@@ -26,11 +26,12 @@ Grafo de conhecimento persistente. Alimentado pelo Claude Code, navegavel no Obs
 
 ## Regras
 
-1. **Frontmatter obrigatorio** — Todo `.md` tem `title`, `description`, `type`, `created`, `tags`
-2. **Zero orfaos** — Todo arquivo deve ter outlinks E ser linkado por ao menos 1 outro arquivo
-3. **Index files** — Cada pasta tem um arquivo index (MOC) que conecta seus filhos ao grafo
-4. **Description como indice** — Claude le descriptions antes de abrir arquivos
-5. **Append-only** — Journal nunca eh sobrescrito. Notes crescem, nunca encolhem
-6. **Wikilinks** — Conectar notas entre si com wikilinks
-7. **Atomicidade** — Uma nota por conceito
-8. **Nomes estaveis** — Nomes de arquivo sao permalinks
+1. **Frontmatter obrigatorio** — Todo `.md` tem `title`, `description`, `type`, `created`, `updated`, `tags`
+2. **Grafo em arvore** — README → Indexes → Folhas. Sem atalhos, sem links decorativos
+3. **README linka APENAS indexes + Tooling** — Nunca linka diretamente para folhas
+4. **Indexes listam APENAS seus filhos** — Sem secao "Relacionados" entre indexes
+5. **Folhas linkam seu index pai** — Primeira linha do body = `[[IndexPai]]`
+6. **Cross-links somente reais** — Somente quando um arquivo depende/cria/modifica outro
+7. **Append-only** — Journal nunca eh sobrescrito. Notes crescem, nunca encolhem
+8. **Atomicidade** — Uma nota por conceito
+9. **Nomes estaveis** — Nomes de arquivo sao permalinks
