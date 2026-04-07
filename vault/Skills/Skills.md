@@ -15,8 +15,5 @@ Tarefas recorrentes e estruturadas, executaveis pelo Claude Code.
 
 - [[create-routine]] — Criar novas rotinas agendadas
 - [[create-agent]] — Criar novos agentes especializados
+- [[import-agent]] — Importar agentes existentes do OpenClaw
 
-## Relacionados
-
-- [[Routines]] — Rotinas que podem acionar skills
-- [[Agents]] — Agentes que podem usar skills

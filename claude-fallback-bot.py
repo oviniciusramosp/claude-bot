@@ -1810,8 +1810,12 @@ class ClaudeTelegramBot:
             self.answer_callback(cb_id, f"Modelo: {model}")
         elif data.startswith("agent:"):
             agent_id = data.split(":", 1)[1]
-            self.cmd_agent_switch(agent_id)
-            self.answer_callback(cb_id, f"Agente: {agent_id}")
+            if agent_id == "create":
+                self.answer_callback(cb_id, "Criando agente...")
+                self._run_agent_create_skill("")
+            else:
+                self.cmd_agent_switch(agent_id)
+                self.answer_callback(cb_id, f"Agente: {agent_id}")
         else:
             self.answer_callback(cb_id)
 
@@ -1843,11 +1847,19 @@ class ClaudeTelegramBot:
         is_new_context = (chat_id, thread_id) not in self._contexts
         self._ctx = self._get_context(chat_id, thread_id)
 
-        # Onboarding: first message in a new group topic → show agent picker
+        # Onboarding: first message in a new group topic → show agent picker or offer to create
         if is_new_context and thread_id and chat_type in ("group", "supergroup"):
             agents = list_agents()
             if agents:
                 self.cmd_agent_keyboard()
+            else:
+                markup = {"inline_keyboard": [[
+                    {"text": "🤖 Criar agente", "callback_data": "agent:create"},
+                    {"text": "⏭ Sem agente", "callback_data": "agent:none"},
+                ]]}
+                self.send_message(
+                    "👋 Novo tópico detectado. Escolha um agente para este canal:",
+                    reply_markup=markup)
 
         user_msg_id = msg.get("message_id")
 

@@ -15,7 +15,3 @@ Rotinas agendadas que executam prompts no Claude Code automaticamente.
 
 - [[btc-preco-matinal]] — Preco do Bitcoin todo dia as 8:30
 
-## Relacionados
-
-- [[Skills]] — Skills que podem ser chamadas por rotinas
-- [[create-routine]] — Skill para criar novas rotinas

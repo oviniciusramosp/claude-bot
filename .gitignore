@@ -22,6 +22,7 @@ vault/Skills/*
 !vault/Skills/Skills.md
 !vault/Skills/create-routine.md
 !vault/Skills/create-agent.md
+!vault/Skills/import-agent.md
 vault/Routines/*
 !vault/Routines/.gitkeep
 !vault/Routines/Routines.md

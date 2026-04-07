@@ -15,8 +15,3 @@ Agentes especializados com personalidade, instrucoes e journal proprio.
 
 (nenhum criado ainda — use `/agent new` no Telegram)
 
-## Relacionados
-
-- [[Skills]] — Skills que agentes podem usar
-- [[Routines]] — Rotinas que podem ser direcionadas a agentes
-- [[create-agent]] — Skill para criar novos agentes

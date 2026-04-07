@@ -10,11 +10,11 @@ tags: [skill, routine, automation]
 
 # Criar Nova Rotina
 
+[[Skills]]
+
 ## Objetivo
 
 Ajudar o usuario a criar uma rotina agendada que executa automaticamente um prompt no Claude Code em horarios definidos.
-
-[[Skills]]
 
 ## Dependencias
 

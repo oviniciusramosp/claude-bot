@@ -150,51 +150,61 @@ tags: [topico1, topico2]
 
 O campo `description` eh obrigatorio e funciona como indice semantico. Deve conter contexto suficiente para decidir se o arquivo precisa ser lido inteiro ou nao.
 
-### Regra inquebravel: Zero arquivos orfaos
+### Regra inquebravel: Zero arquivos orfaos + Estrutura do grafo
 
-O vault eh um **grafo**. O Obsidian Graph View eh a forma principal do usuario navegar e entender conexoes. Um arquivo sem links eh invisivel no grafo — um no morto que o usuario nunca encontra.
+O vault eh um **grafo em arvore com cross-links seletivos**. O Obsidian Graph View eh a forma principal do usuario navegar. A estrutura DEVE formar uma arvore limpa:
 
-**Regra: todo arquivo .md criado DEVE ter no minimo:**
-1. **Outlinks** — pelo menos 1 wikilink para outro arquivo do vault
-2. **Inlink garantido** — ao criar um arquivo, TAMBEM editar ao menos 1 arquivo existente para linkar DE VOLTA ao novo
+```
+README (hub raiz)
+  ├── Journal (index) → entradas diarias
+  ├── Notes (index) → notas individuais
+  ├── Skills (index) → skills individuais
+  ├── Routines (index) → rotinas individuais
+  ├── Agents (index) → agentes individuais
+  └── Tooling (folha de referencia, sem outlinks)
+```
+
+**Regras de linkagem por tipo de arquivo:**
+
+| Tipo | Outlinks permitidos | Inlinks vem de |
+|------|---------------------|----------------|
+| README | APENAS indexes + Tooling | nenhum (raiz) |
+| Index (Journal, Notes, Skills, Routines, Agents) | APENAS seus filhos diretos | README |
+| Leaf (nota, skill, rotina, agente, journal entry) | `[[IndexPai]]` obrigatorio + cross-links genuinos | Seu index pai |
+| Tooling | nenhum (terminal) | README |
+
+**Cross-links entre siblings** — permitidos SOMENTE quando um arquivo genuinamente depende de outro (ex: `create-routine` linka `[[Routines]]` porque cria arquivos la). NAO criar links de cortesia, de contexto, ou "relacionados" entre indexes.
+
+**Proibido:**
+- README linkar diretamente para folhas (sempre via index)
+- Index files linkarem para outros indexes (sem "Relacionados" entre eles)
+- Folhas linkarem para Tooling ou outros indexes que nao sejam seu pai
+- Secoes `## Relacionados` em index files (isso cria link pollution)
 
 **Checklist obrigatorio ao criar qualquer arquivo:**
-- [ ] O novo arquivo tem `[[wikilinks]]` para arquivos relacionados?
-- [ ] Algum arquivo existente ja linka para o novo? Se nao, editar o mais relevante para adicionar o link.
-- [ ] O Journal do dia registra a criacao com `[[link-para-novo-arquivo]]`?
-- [ ] Se eh uma skill → adicionar link no `vault/README.md` ou em notas que a referenciam
-- [ ] Se eh uma rotina → adicionar link no Journal e na nota/agent relacionado
-- [ ] Se eh uma nota → adicionar secao `## Relacionados` com links bidirecionais
-- [ ] Se eh um agente → linkar de `vault/README.md` e do Journal
-
-**NUNCA** criar um .md solto sem conecta-lo ao grafo. Melhor nao criar do que criar orfao.
+- [ ] Frontmatter completo com `description`?
+- [ ] Primeira linha do body = `[[IndexPai]]`?
+- [ ] Index da pasta atualizado com `[[novo-arquivo]]`?
+- [ ] Journal do dia registra a criacao?
+- [ ] Nenhum link decorativo/redundante adicionado?
 
 ### Regra inquebravel: Index files (MOCs)
 
-Cada pasta do vault tem um arquivo index (Map of Content) que funciona como **no hub** no grafo Obsidian. Pastas sao invisiveis no Graph View — somente arquivos aparecem. O index file cria a hierarquia visual.
+Cada pasta tem um index file que funciona como **hub** no grafo. Index files existentes:
 
-**Index files existentes:**
-- `vault/README.md` → hub raiz, linka para todos os index
+- `vault/README.md` → hub raiz, linka para os 5 indexes + Tooling
 - `vault/Journal/Journal.md` → lista entradas recentes
 - `vault/Notes/Notes.md` → lista notas existentes
 - `vault/Skills/Skills.md` → lista skills disponiveis
 - `vault/Routines/Routines.md` → lista rotinas ativas
 - `vault/Agents/Agents.md` → lista agentes disponiveis
 
-**Ao criar um arquivo novo:**
-1. Adicionar `Parte de [[IndexPai]].` no inicio do body (ex: `Parte de [[Routines]].`)
-2. Editar o index da pasta para adicionar `[[novo-arquivo]]` na lista
-3. Isso garante: `README → Routines → btc-preco-matinal` no grafo
-
-**Ao criar um agente novo:**
-1. Adicionar o agente no `vault/Agents/Agents.md`
-2. O `agent.md` do agente deve ter `Parte de [[Agents]].`
-
-**Nunca linkar diretamente do README para arquivos folha** — sempre passar pelo index da pasta.
+**Regras para indexes:**
+- Um index lista APENAS seus filhos diretos (`- [[filho]] — descricao`)
+- Um index NUNCA linka para outros indexes (sem secao "Relacionados")
+- Um index NUNCA linka para folhas de outras pastas
 
 ### Procedimento completo: criando qualquer arquivo no vault
-
-Seguir TODOS os passos abaixo ao criar qualquer .md no vault. Nao pular nenhum.
 
 **1. Criar o arquivo com frontmatter completo:**
 ```yaml
@@ -208,59 +218,46 @@ tags: [tag1, tag2]
 ---
 ```
 
-**2. Primeira linha do body: link para o index pai (uma unica linha):**
-- Se for uma skill → `[[Skills]]`
-- Se for uma rotina → `[[Routines]]`
-- Se for um agente → `[[Agents]]`
-- Se for uma nota → `[[Notes]]`
+**2. Primeira linha do body: link para o index pai:**
+- Skill → `[[Skills]]`
+- Rotina → `[[Routines]]`
+- Agente → `[[Agents]]`
+- Nota → `[[Notes]]`
+- Journal entry → `[[Journal]]`
 
-Isso eh suficiente para conectar o arquivo ao grafo. Nao adicionar frases extras nessa linha.
+Uma unica linha, sem texto extra.
 
-**3. Outlinks adicionais — somente quando verdadeiro:**
-- Linkar outros arquivos do vault APENAS se o conteudo realmente depende deles
-- Exemplo: se uma rotina usa ferramentas especificas do Tooling.md, adicionar `Requires tools from Tooling.md.` (sem wikilink — o index da pasta ja linka Tooling)
-- Nao inflar o body com links decorativos — cada token consumido custa na execucao
+**3. Cross-links — somente dependencias reais:**
+- Adicionar `[[outro-arquivo]]` APENAS se este arquivo cria, modifica, ou depende diretamente dele
+- Exemplo valido: `create-routine` linka `[[Routines]]` (cria arquivos la)
+- Exemplo invalido: uma rotina linkando `[[Tooling]]` por "usar ferramentas"
+- Na duvida, NAO linkar. O grafo fica mais limpo com menos links falsos.
 
-**4. Atualizar o index da pasta para listar o novo arquivo:**
-- Skill criada → editar `vault/Skills/Skills.md`, adicionar `- [[novo-arquivo]] — descricao`
-- Rotina criada → editar `vault/Routines/Routines.md`, adicionar na lista
-- Agente criado → editar `vault/Agents/Agents.md`, adicionar na lista
-- Nota criada → editar `vault/Notes/Notes.md`, adicionar na lista
+**4. Atualizar o index da pasta:**
+- Editar o index relevante e adicionar `- [[novo-arquivo]] — descricao curta`
 
 **5. Registrar no Journal do dia:**
 - Appendar entrada com `[[link-para-novo-arquivo]]`
 
-**Resultado esperado no Graph View:**
+**Resultado no Graph View:**
 ```
-README → [Index da pasta] → [Novo arquivo]
-```
-Nunca:
-```
-README → [Novo arquivo] (orfao sem contexto de pasta)
+README → [Index] → [Folha]
 ```
 
-### Wikilinks — sintaxe e padroes
+### Wikilinks — sintaxe
 
-Usar `[[wikilinks]]` do Obsidian para conectar notas entre si.
+Usar `[[wikilinks]]` do Obsidian.
 
 **Sintaxe:**
-- Referencia a nota: `[[nome-da-nota]]`
-- Referencia a secao: `[[nome-da-nota#secao]]`
-- Referencia ao journal: `[[2026-04-07]]` (nome do arquivo sem pasta)
-- Referencia a skill: `[[create-routine]]`
-- Referencia a rotina: `[[btc-preco-matinal]]`
-- Referencia a agente: `[[jarvis]]` (nome do diretorio do agente)
-- Alias para legibilidade: `[[nome-tecnico|nome legivel]]`
+- Referencia a arquivo: `[[nome-do-arquivo]]` (sem pasta, sem extensao)
+- Referencia a secao: `[[nome-do-arquivo#secao]]`
+- Alias: `[[nome-tecnico|nome legivel]]`
 
 **Diretrizes de linkagem:**
-- Journal DEVE citar toda nota/skill/rotina/agente mencionado na entrada
-- Notas DEVEM ter secao `## Relacionados` no final com links bidirecionais
-- Skills DEVEM linkar para `[[Tooling]]` e quaisquer dependencias
-- Rotinas DEVEM linkar para o agente (se tiver) e skills referenciadas
-- Agentes DEVEM linkar para `[[Tooling]]`, skills que usam, e notas relevantes
-- README.md do vault DEVE listar todos os tipos de conteudo com links
-
-**Principio:** se voce menciona algo que existe no vault, linke. Se nao existe e deveria, crie E linke.
+- Journal entries DEVEM citar toda entidade mencionada (com wikilinks)
+- Notas PODEM ter `## Relacionados` no final com links para outras notas (nunca para indexes)
+- Folhas linkam APENAS para seu index pai + dependencias reais
+- NAO linkar para Tooling de dentro de folhas — Tooling eh acessado via README
 
 ### Journal (`vault/Journal/`)
 
@@ -269,12 +266,15 @@ Um arquivo por dia: `YYYY-MM-DD.md`. **Append-only** — nunca sobrescrever.
 Ao criar o arquivo do dia:
 ```yaml
 ---
-title: "Journal — YYYY-MM-DD"
+title: "Journal YYYY-MM-DD"
 description: Registro do dia YYYY-MM-DD. Conversas, decisoes, rotinas executadas.
 type: journal
 created: YYYY-MM-DD
+updated: YYYY-MM-DD
 tags: [journal]
 ---
+
+[[Journal]]
 ```
 
 Formato de cada entrada (appendar ao final):
@@ -318,6 +318,7 @@ Definicoes de tarefas recorrentes. Cada skill eh um .md executavel.
 ```yaml
 ---
 title: Nome da Skill
+description: Frase curta sobre o que a skill faz e quando eh relevante.
 type: skill
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
@@ -327,12 +328,13 @@ tags: [skill, categoria]
 
 # Nome da Skill
 
+[[Skills]]
+
 ## Objetivo
 O que esta skill faz e quando usar.
 
 ## Dependencias
-- [[Tooling]] — ferramentas necessarias
-- [[nota-relevante]] — contexto
+- [[arquivo-do-vault]] — somente se a skill cria/modifica/depende deste arquivo
 
 ## Passos
 1. ...
@@ -366,8 +368,9 @@ model: sonnet
 enabled: true
 ---
 
+[[Routines]]
+
 Prompt que sera enviado ao Claude Code...
-Pode referenciar skills: execute a skill [[nome-da-skill]].
 ```
 
 **Campos do schedule:**
@@ -457,10 +460,11 @@ Mapa de preferencias: qual ferramenta usar para cada tipo de tarefa. Consultar a
 ### Principios de escrita para o grafo
 
 1. **Atomicidade** — cada nota sobre um unico conceito. Melhor 3 notas curtas linkadas que 1 nota longa.
-2. **Linkabilidade** — se voce menciona algo que ja existe como nota, linke. Se nao existe e deveria, crie.
-3. **Discoverability** — tags no frontmatter + secao `## Relacionados` no final. O usuario navega o graph view.
+2. **Links intencionais** — linkar APENAS dependencias reais. Nao linkar por cortesia. Menos links = grafo mais legivel.
+3. **Discoverability** — tags no frontmatter para busca. `## Relacionados` somente em notas (nunca em indexes).
 4. **Estabilidade** — nomes de arquivo sao permalinks. Renomear quebra links. Escolha bem na criacao.
 5. **Incrementalidade** — nunca apagar, sempre adicionar. O historico de evolucao de uma nota tem valor.
+6. **Arvore primeiro** — o grafo eh uma arvore (README → Index → Folha). Cross-links sao excecao, nao regra.
 
 ---
 

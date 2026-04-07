@@ -15,7 +15,3 @@ Conhecimento duravel e incremental. Cada nota eh um no do grafo.
 
 (nenhuma nota criada ainda — o Claude cria notas automaticamente quando aprende algo duravel)
 
-## Relacionados
-
-- [[Journal]] — Notas sao referenciadas no journal quando criadas
-- [[Skills]] — Skills podem referenciar notas
