@@ -391,46 +391,43 @@ Pode referenciar skills: execute a skill [[nome-da-skill]].
 
 ### Agents (`vault/Agents/`)
 
-Agentes especializados que vivem no vault como nos centrais do grafo Obsidian. Cada agente tem personalidade, instrucoes, modelo padrao, e journal proprio.
+Agentes especializados com workspace proprio. Cada agente eh um diretorio com CLAUDE.md, metadados, e journal.
 
 Estrutura de um agente:
 ```
 vault/Agents/{id}/
-  agent.md       # Identidade, personalidade, instrucoes (no central do grafo)
+  agent.md       # Metadados (frontmatter parseado pelo bot: nome, modelo, icone)
+  CLAUDE.md      # Instrucoes do agente (lido automaticamente pelo Claude Code)
   Journal/       # Journal proprio do agente (YYYY-MM-DD.md)
 ```
 
-Formato do `agent.md`:
+**Como funciona o workspace:**
+Quando um agente esta ativo, o `cwd` do Claude Code muda para `vault/Agents/{id}/`. O Claude Code le automaticamente:
+1. `vault/Agents/{id}/CLAUDE.md` — instrucoes do agente
+2. `~/claude-bot/CLAUDE.md` — regras do vault, grafo, frontmatter (este arquivo)
+
+O CLAUDE.md do agente NAO precisa repetir regras do vault. Ele contem apenas personalidade, instrucoes especificas, e especializacoes.
+
+**O `agent.md`** contem metadados em frontmatter que o bot parseia:
 ```yaml
 ---
 title: Nome do Agente
-description: Frase curta sobre o agente e quando usa-lo.
+description: Frase curta sobre o agente.
 type: agent
-created: YYYY-MM-DD
-updated: YYYY-MM-DD
-tags: [agent, especializacao]
 name: Nome Legivel
-personality: Descricao do tom e estilo de comunicacao.
+personality: Tom e estilo de comunicacao.
 model: sonnet
 icon: "🤖"
-default: false
 ---
+
+[[Agents]]
 ```
-
-Seguido por secoes: Personalidade, Instrucoes, Especializacoes, Relacionados.
-
-**Comportamento quando um agente esta ativo:**
-- O prompt do usuario recebe contexto do agente (personalidade + instrucoes)
-- Journal eh registrado em `vault/Agents/{id}/Journal/` (nao no global)
-- O modelo da sessao muda para o modelo padrao do agente
-- `/important` e consolidacao de sessao usam o journal do agente
 
 **Criacao de agentes:**
 - Via Telegram: `/agent new` dispara a skill [[create-agent]]
-- Via Claude Code: criar diretorio e `agent.md` manualmente
 - Selecao: `/agent` mostra teclado com agentes disponiveis
 
-**Principio:** agentes sao nos do grafo, nao silos. Eles referenciam [[Tooling]], [[Notes]], [[Skills]] e outros agentes via wikilinks.
+**Principio:** agentes sao nos do grafo, nao silos. O agent.md linka para [[Agents]], que conecta ao hub do vault.
 
 ### Images (`vault/Images/`)
 

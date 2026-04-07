@@ -10,10 +10,6 @@ tags: [skill, agent, automation]
 
 # Criar Novo Agente
 
-## Objetivo
-
-Ajudar o usuario a criar um agente especializado que vive dentro do vault e pode ser ativado via `/agent <nome>`.
-
 [[Skills]]
 
 ## Dependencias
@@ -24,29 +20,28 @@ Ajudar o usuario a criar um agente especializado que vive dentro do vault e pode
 
 1. **Perguntar o nome** — Nome legivel do agente (ex: "Jarvis", "CryptoAnalyst", "Palmeiras Scout")
 
-2. **Perguntar a personalidade** — Como o agente deve se comportar. Tom de voz, estilo de comunicacao. Ex: "Direto e tecnico, sem rodeios" ou "Amigavel e didatico"
+2. **Perguntar a personalidade** — Como o agente deve se comportar. Tom de voz, estilo de comunicacao.
 
-3. **Perguntar a descricao** — Uma frase curta que explique o que o agente faz (vai no frontmatter `description`)
+3. **Perguntar a descricao** — Uma frase curta que explique o que o agente faz
 
-4. **Perguntar especializacoes** — Areas de foco do agente. Lista de topicos em que ele eh especialista.
+4. **Perguntar especializacoes** — Areas de foco do agente.
 
-5. **Perguntar o modelo padrao** — Qual modelo usar por padrao? Opcoes: sonnet (rapido), opus (profundo), haiku (leve). Default: sonnet.
+5. **Perguntar o modelo padrao** — sonnet (rapido), opus (profundo), haiku (leve). Default: sonnet.
 
-6. **Perguntar o icone** — Um emoji que representa o agente. Ex: 🤖, 📊, ⚽, 🔬
+6. **Perguntar o icone** — Um emoji que representa o agente.
 
-7. **Perguntar se eh o agente padrao** — Deve ser ativado automaticamente? (`default: true` no frontmatter)
+7. **Gerar ID** — Converter o nome em kebab-case. Ex: "CryptoAnalyst" -> `crypto-analyst`
 
-8. **Gerar ID** — Converter o nome em kebab-case para o ID do diretorio. Ex: "CryptoAnalyst" -> `crypto-analyst`
-
-9. **Criar a estrutura** — Gerar em `vault/Agents/{id}/`:
+8. **Criar a estrutura** — Gerar em `vault/Agents/{id}/`:
 
 ```
 vault/Agents/{id}/
-  agent.md       # Arquivo central do agente
+  agent.md       # Metadados (frontmatter parseado pelo bot)
+  CLAUDE.md      # Instrucoes para o Claude Code (lido automaticamente como workspace)
   Journal/       # Diretorio para journal proprio
 ```
 
-O `agent.md` deve seguir este formato:
+O `agent.md` contem metadados para o bot:
 
 ```yaml
 ---
@@ -64,39 +59,35 @@ default: false
 ---
 
 [[Agents]]
+```
+
+O `CLAUDE.md` contem instrucoes para o Claude Code (lido automaticamente quando o agente esta ativo):
+
+```markdown
+# {nome}
 
 ## Personalidade
-{descricao detalhada da personalidade}
+{descricao detalhada da personalidade e tom de voz}
 
 ## Instrucoes
-- Registrar no Journal proprio (vault/Agents/{id}/Journal/)
+- Registrar conversas no Journal proprio: Journal/YYYY-MM-DD.md
 - {instrucoes especificas do agente}
 
 ## Especializacoes
 - {lista de especializacoes}
 ```
 
-A primeira linha do body DEVE ser `[[Agents]]` (link para o index pai). Manter o body enxuto — nao adicionar links decorativos.
+O CLAUDE.md do agente NAO precisa repetir regras do vault (frontmatter, wikilinks, etc.) — essas regras vem do CLAUDE.md pai em ~/claude-bot/ que eh carregado automaticamente pela hierarquia do Claude Code.
 
-10. **Atualizar o index** — Editar `vault/Agents/Agents.md` e adicionar o novo agente na lista: `- [[{id}]] — {descricao curta}`
+9. **Atualizar o index** — Editar `vault/Agents/Agents.md` e adicionar: `- [[{id}]] — {descricao curta}`
 
-11. **Registrar no Journal global** — Appendar no journal do dia:
-```
-## HH:MM — Novo agente criado
+10. **Registrar no Journal global** — Appendar no journal do dia com [[link]] para o novo agente.
 
-- Criado agente [[{nome}]] ([[vault/Agents/{id}/agent.md|{nome}]])
-- Especializacoes: {lista}
-- Modelo: {modelo}
-
----
-```
-
-12. **Confirmar** — Informar ao usuario que o agente foi criado e como ativa-lo (`/agent {nome}`)
+11. **Confirmar** — Informar ao usuario que o agente foi criado e como ativa-lo (`/agent {nome}`)
 
 ## Notas
 
-- O agente vive dentro do vault e aparece no graph view do Obsidian como um no central
-- O journal do agente eh separado do global — cada agente tem seu proprio historico
+- Cada agente tem seu proprio workspace: `vault/Agents/{id}/`
+- O Claude Code le o CLAUDE.md do agente + o CLAUDE.md do projeto (hierarquia automatica)
+- O journal do agente eh separado do global
 - Rotinas podem ser direcionadas a agentes com o campo `agent: {id}` no frontmatter
-- O campo `default: true` faz o agente ser ativado automaticamente em novas sessoes
-- Agentes podem referenciar skills, notas, e outras entidades do vault via wikilinks

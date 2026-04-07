@@ -1321,6 +1321,7 @@ class ClaudeTelegramBot:
         if agent_id == "none":
             session = self.sessions.ensure_active()
             session.agent = None
+            session.workspace = CLAUDE_WORKSPACE
             self.sessions.save()
             self.send_message("🤖 Agente desativado. Usando modo padrão.")
             return
@@ -1337,6 +1338,7 @@ class ClaudeTelegramBot:
         session = self.sessions.ensure_active()
         session.agent = found["_id"]
         session.model = found.get("model", session.model)
+        session.workspace = str(AGENTS_DIR / found["_id"])
         self.sessions.save()
         icon = found.get("icon", "🤖")
         name = found.get("name", found["_id"])
@@ -1403,30 +1405,15 @@ class ClaudeTelegramBot:
         self._last_typing_time = time.time()
         self._last_snapshot_len = 0
 
-        # Inject agent context if active
-        effective_prompt = prompt
-        if session.agent:
-            agent = load_agent(session.agent)
-            if agent:
-                today = time.strftime("%Y-%m-%d")
-                journal_dir = get_agent_journal_dir(session.agent, create=True)
-                agent_name = agent.get("name", session.agent)
-                personality = agent.get("personality", "")
-                body = agent.get("_body", "")
-                effective_prompt = (
-                    f"[Agente: {agent_name}]\n"
-                    f"Personalidade: {personality}\n\n"
-                    f"Instrucoes do agente:\n{body}\n\n"
-                    f"Registre no Journal do agente: {journal_dir}/{today}.md\n"
-                    f"Consulte {VAULT_DIR}/Tooling.md e {VAULT_DIR}/.env conforme necessario.\n\n"
-                    f"{prompt}"
-                )
+        # Agent context is handled natively by Claude Code via CLAUDE.md
+        # in the agent's workspace directory (vault/Agents/{id}/CLAUDE.md).
+        # No prompt injection needed.
 
         # Start runner thread
         runner_thread = threading.Thread(
             target=self.runner.run,
             kwargs={
-                "prompt": effective_prompt,
+                "prompt": prompt,
                 "model": session.model,
                 "session_id": session.session_id,
                 "workspace": session.workspace,
@@ -1663,31 +1650,25 @@ class ClaudeTelegramBot:
                 self._run_claude_prompt(msg)
 
     def _execute_routine_task(self, task: RoutineTask) -> None:
-        """Execute a scheduled routine with model override and vault/agent context."""
+        """Execute a scheduled routine with model/agent/workspace override."""
         logger.info("Executing routine: %s (%s, model=%s, agent=%s)", task.name, task.time_slot, task.model, task.agent)
         session = self.sessions.ensure_active()
         original_model = session.model
         original_agent = session.agent
+        original_workspace = session.workspace
 
-        # Temporarily switch model and agent if specified
+        # Temporarily switch model, agent, and workspace
         if task.model and task.model != session.model:
             session.model = task.model
         if task.agent:
             session.agent = task.agent
-        if session.model != original_model or session.agent != original_agent:
+            session.workspace = str(AGENTS_DIR / task.agent)
+        changed = (session.model != original_model or session.agent != original_agent
+                    or session.workspace != original_workspace)
+        if changed:
             self.sessions.save()
 
-        today = time.strftime("%Y-%m-%d")
-        journal_dir = get_agent_journal_dir(task.agent, create=True)
-        prompt = (
-            f"[ROTINA: {task.name} | {task.time_slot}]\n"
-            f"Voce esta executando uma rotina agendada. Consulte:\n"
-            f"- {VAULT_DIR}/Tooling.md para preferencias de ferramentas\n"
-            f"- {VAULT_DIR}/.env para credenciais\n"
-            f"- {VAULT_DIR}/Skills/ para skills referenciadas\n"
-            f"Registre a execucao no Journal ({journal_dir}/{today}.md).\n\n"
-            f"{task.prompt}"
-        )
+        prompt = f"[ROTINA: {task.name} | {task.time_slot}]\n\n{task.prompt}"
 
         self.send_message(f"🔄 Executando rotina: *{task.name}* ({task.time_slot})")
         try:
@@ -1701,14 +1682,10 @@ class ClaudeTelegramBot:
             logger.error("Routine %s failed: %s", task.name, exc)
             self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
 
-        # Restore original model and agent
-        changed = False
-        if session.model != original_model:
-            session.model = original_model
-            changed = True
-        if session.agent != original_agent:
-            session.agent = original_agent
-            changed = True
+        # Restore original model, agent, and workspace
+        session.model = original_model
+        session.agent = original_agent
+        session.workspace = original_workspace
         if changed:
             self.sessions.save()
 
