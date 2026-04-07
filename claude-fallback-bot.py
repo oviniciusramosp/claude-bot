@@ -893,40 +893,88 @@ def get_agent_journal_dir(agent_id: Optional[str], create: bool = False) -> Path
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class ThreadContext:
+    """Per-topic/chat execution context. Each Telegram topic (or private chat) gets its own."""
+    chat_id: str
+    thread_id: Optional[int] = None  # None for private chats, int for group topics
+    runner: Optional[Any] = field(default=None, repr=False)
+    session_name: Optional[str] = None
+    pending: list = field(default_factory=list)
+    pending_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    stream_msg_id: Optional[int] = None
+    user_msg_id: Optional[int] = None
+    last_reaction: str = ""
+    last_edit_time: float = 0.0
+    last_typing_time: float = 0.0
+    last_snapshot_len: int = 0
+
+    def ensure_runner(self) -> "ClaudeRunner":
+        if self.runner is None:
+            self.runner = ClaudeRunner()
+        return self.runner
+
+
 class ClaudeTelegramBot:
     def __init__(self) -> None:
         self.token = TELEGRAM_BOT_TOKEN
-        self.chat_id = str(TELEGRAM_CHAT_ID)
+        # Support comma-separated chat IDs (private + group)
+        self.authorized_ids: set = set()
+        for cid in str(TELEGRAM_CHAT_ID).split(","):
+            cid = cid.strip()
+            if cid:
+                self.authorized_ids.add(cid)
         self.base_url = f"https://api.telegram.org/bot{self.token}"
 
         self.sessions = SessionManager()
-        self.runner = ClaudeRunner()
-
         self.timeout_seconds = DEFAULT_TIMEOUT
         self.effort: Optional[str] = None
-        self.pending_messages: list = []  # List[str | RoutineTask]
-        self._pending_lock = threading.Lock()
         self._update_offset = 0
         self._stop_event = threading.Event()
 
-        self._stream_msg_id: Optional[int] = None
-        self._user_msg_id: Optional[int] = None
-        self._last_reaction: str = ""
-        self._last_edit_time: float = 0.0
-        self._last_typing_time: float = 0.0
-        self._last_snapshot_len: int = 0
+        # Thread contexts: keyed by (chat_id, thread_id)
+        self._contexts: Dict[tuple, ThreadContext] = {}
+        self._contexts_lock = threading.Lock()
+
+        # Active context (set per-message in the polling loop)
+        self._ctx: Optional[ThreadContext] = None
 
         # Routine scheduler
         self.routine_state = RoutineStateManager()
         self.scheduler = RoutineScheduler(self.routine_state, self._enqueue_routine)
         self.scheduler.start()
 
-        logger.info("Bot initialized. Chat ID: %s", self.chat_id)
+        logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
+
+    def _get_context(self, chat_id: str, thread_id: Optional[int] = None) -> ThreadContext:
+        """Get or create a ThreadContext for a chat/topic pair."""
+        key = (chat_id, thread_id)
+        with self._contexts_lock:
+            if key not in self._contexts:
+                ctx = ThreadContext(chat_id=chat_id, thread_id=thread_id)
+                # Auto-create session for this context
+                name = f"t{thread_id}" if thread_id else time.strftime("%d%b-%H%M").lower()
+                if name not in self.sessions.sessions:
+                    self.sessions.create(name)
+                ctx.session_name = name
+                self._contexts[key] = ctx
+            return self._contexts[key]
+
+    def _is_authorized(self, chat_id: str) -> bool:
+        return chat_id in self.authorized_ids
 
     def _enqueue_routine(self, task: RoutineTask) -> None:
         """Called by the scheduler thread to enqueue a routine for execution."""
-        with self._pending_lock:
-            self.pending_messages.append(task)
+        # Routines go to the default context (private chat or first context)
+        with self._contexts_lock:
+            if self._contexts:
+                ctx = next(iter(self._contexts.values()))
+            else:
+                # Create a default context
+                default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else "0"
+                ctx = self._get_context(default_chat, None)
+        with ctx.pending_lock:
+            ctx.pending.append(task)
 
     # -- Telegram helpers --
 
@@ -945,15 +993,28 @@ class ClaudeTelegramBot:
         logger.error("tg_request %s failed after 3 attempts", method)
         return None
 
+    @property
+    def _chat_id(self) -> str:
+        return self._ctx.chat_id if self._ctx else str(TELEGRAM_CHAT_ID)
+
+    @property
+    def runner(self) -> ClaudeRunner:
+        """Runner for the current context (backward compat property)."""
+        if self._ctx:
+            return self._ctx.ensure_runner()
+        # Fallback: create a transient runner
+        return ClaudeRunner()
+
     def send_message(self, text: str, parse_mode: str = "Markdown",
                      reply_markup: Optional[Dict] = None) -> Optional[int]:
         chunks = self._split_message(text)
         last_msg_id = None
+        chat_id = self._chat_id
+        thread_id = self._ctx.thread_id if self._ctx else None
         for chunk in chunks:
-            data: Dict[str, Any] = {
-                "chat_id": self.chat_id,
-                "text": chunk,
-            }
+            data: Dict[str, Any] = {"chat_id": chat_id, "text": chunk}
+            if thread_id:
+                data["message_thread_id"] = thread_id
             if parse_mode:
                 data["parse_mode"] = parse_mode
             if reply_markup and chunk == chunks[-1]:
@@ -962,7 +1023,6 @@ class ClaudeTelegramBot:
             if resp and resp.get("ok"):
                 last_msg_id = resp["result"]["message_id"]
             else:
-                # retry without parse_mode in case of formatting error
                 if parse_mode:
                     data.pop("parse_mode", None)
                     resp = self.tg_request("sendMessage", data)
@@ -971,21 +1031,16 @@ class ClaudeTelegramBot:
         return last_msg_id
 
     def edit_message(self, message_id: int, text: str, parse_mode: str = "Markdown") -> bool:
-        """Try to edit a message. Returns True on success, False on failure."""
         if not text.strip():
             return False
         text = text[:MAX_MESSAGE_LENGTH]
-        data: Dict[str, Any] = {
-            "chat_id": self.chat_id,
-            "message_id": message_id,
-            "text": text,
-        }
+        chat_id = self._chat_id
+        data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
             data["parse_mode"] = parse_mode
         resp = self.tg_request("editMessageText", data)
         if resp and resp.get("ok"):
             return True
-        # Retry without parse_mode (Markdown formatting error)
         if parse_mode:
             data.pop("parse_mode", None)
             resp = self.tg_request("editMessageText", data)
@@ -994,32 +1049,28 @@ class ClaudeTelegramBot:
         return False
 
     def send_typing(self) -> None:
-        self.tg_request("sendChatAction", {"chat_id": self.chat_id, "action": "typing"})
+        chat_id = self._chat_id
+        data: Dict[str, Any] = {"chat_id": chat_id, "action": "typing"}
+        if self._ctx and self._ctx.thread_id:
+            data["message_thread_id"] = self._ctx.thread_id
+        self.tg_request("sendChatAction", data)
 
     def set_reaction(self, message_id: int, emoji: str) -> None:
-        """Set a reaction emoji on a message. Pass empty string to remove. Fails silently."""
         if not message_id:
             return
-        if emoji:
-            data = {
-                "chat_id": self.chat_id,
-                "message_id": message_id,
-                "reaction": [{"type": "emoji", "emoji": emoji}],
-            }
-        else:
-            data = {
-                "chat_id": self.chat_id,
-                "message_id": message_id,
-                "reaction": [],
-            }
-        # Single attempt, fail silently — reactions are non-critical UX
+        chat_id = self._chat_id
+        data: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "reaction": [{"type": "emoji", "emoji": emoji}] if emoji else [],
+        }
         try:
             url = f"{self.base_url}/setMessageReaction"
             payload = json.dumps(data).encode("utf-8")
             req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
         except Exception:
-            pass  # reactions are best-effort
+            pass
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self.tg_request("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
@@ -1076,7 +1127,7 @@ class ClaudeTelegramBot:
         self.send_message(HELP_TEXT)
 
     def cmd_status(self) -> None:
-        s = self.sessions.get_active()
+        s = self._get_session()
         lines = ["📊 *Status*\n"]
         if s:
             lines.append(f"• Sessão: `{s.name}`")
@@ -1096,7 +1147,7 @@ class ClaudeTelegramBot:
         self.send_message("\n".join(lines))
 
     def cmd_model_switch(self, model: str) -> None:
-        s = self.sessions.ensure_active()
+        s = self._get_session()
         s.model = model
         self.sessions.save()
         self.send_message(f"✅ Modelo alterado para `{model}`")
@@ -1149,7 +1200,7 @@ class ClaudeTelegramBot:
             self.send_message(f"❌ Sessão `{name}` não encontrada.")
 
     def cmd_clear(self) -> None:
-        s = self.sessions.get_active()
+        s = self._get_session()
         if s:
             s.session_id = None
             self.sessions.save()
@@ -1177,7 +1228,7 @@ class ClaudeTelegramBot:
     def cmd_workspace(self, path: str) -> None:
         p = os.path.expanduser(path)
         if os.path.isdir(p):
-            s = self.sessions.ensure_active()
+            s = self._get_session()
             s.workspace = p
             self.sessions.save()
             self.send_message(f"✅ Workspace: `{p}`")
@@ -1202,7 +1253,7 @@ class ClaudeTelegramBot:
 
     def _get_journal_path(self) -> str:
         """Return the journal file path for today, using agent journal if active."""
-        session = self.sessions.get_active()
+        session = self._get_session()
         today = time.strftime("%Y-%m-%d")
         journal_dir = get_agent_journal_dir(session.agent if session else None)
         return str(journal_dir / f"{today}.md")
@@ -1224,7 +1275,7 @@ class ClaudeTelegramBot:
         if self.runner.running:
             logger.info("Skipping consolidation — Claude is busy")
             return
-        session = self.sessions.get_active()
+        session = self._get_session()
         if not session or not session.session_id or session.message_count == 0:
             return
         journal_path = self._get_journal_path()
@@ -1291,7 +1342,7 @@ class ClaudeTelegramBot:
             if not agents:
                 self.send_message("🤖 Nenhum agente configurado.\nUse `/agent new` para criar um.")
                 return
-            session = self.sessions.get_active()
+            session = self._get_session()
             active_agent = session.agent if session else None
             lines = ["🤖 *Agentes*\n"]
             for a in agents:
@@ -1319,7 +1370,7 @@ class ClaudeTelegramBot:
 
     def cmd_agent_switch(self, agent_id: str) -> None:
         if agent_id == "none":
-            session = self.sessions.ensure_active()
+            session = self._get_session()
             session.agent = None
             session.workspace = CLAUDE_WORKSPACE
             self.sessions.save()
@@ -1335,7 +1386,7 @@ class ClaudeTelegramBot:
         if not found:
             self.send_message(f"❌ Agente `{agent_id}` não encontrado.")
             return
-        session = self.sessions.ensure_active()
+        session = self._get_session()
         session.agent = found["_id"]
         session.model = found.get("model", session.model)
         session.workspace = str(AGENTS_DIR / found["_id"])
@@ -1385,14 +1436,30 @@ class ClaudeTelegramBot:
 
     # -- Claude execution --
 
+    def _get_session(self) -> Session:
+        """Get the session for the current context."""
+        ctx = self._ctx
+        if ctx and ctx.session_name:
+            if ctx.session_name in self.sessions.sessions:
+                return self.sessions.sessions[ctx.session_name]
+            # Create session for this context
+            s = self.sessions.create(ctx.session_name)
+            return s
+        return self._get_session()
+
     def _run_claude_prompt(self, prompt: str, _retry: bool = False) -> None:
-        if self.runner.running:
-            with self._pending_lock:
-                self.pending_messages.append(prompt)
+        ctx = self._ctx
+        runner = ctx.ensure_runner() if ctx else ClaudeRunner()
+
+        if runner.running:
+            lock = ctx.pending_lock if ctx else threading.Lock()
+            q = ctx.pending if ctx else []
+            with lock:
+                q.append(prompt)
             self.send_message("⏳ Mensagem enfileirada — será enviada quando o Claude terminar.")
             return
 
-        session = self.sessions.ensure_active()
+        session = self._get_session()
         if not _retry:
             session.message_count += 1
             session.total_turns += 1
@@ -1400,18 +1467,18 @@ class ClaudeTelegramBot:
             self.sessions.save()
 
         if not _retry:
-            self._stream_msg_id = self.send_message("⏳ _Processando..._")
-        self._last_edit_time = time.time()
-        self._last_typing_time = time.time()
-        self._last_snapshot_len = 0
-
-        # Agent context is handled natively by Claude Code via CLAUDE.md
-        # in the agent's workspace directory (vault/Agents/{id}/CLAUDE.md).
-        # No prompt injection needed.
+            if ctx:
+                ctx.stream_msg_id = self.send_message("⏳ _Processando..._")
+            else:
+                pass  # no ctx = silent (routine)
+        if ctx:
+            ctx.last_edit_time = time.time()
+            ctx.last_typing_time = time.time()
+            ctx.last_snapshot_len = 0
 
         # Start runner thread
         runner_thread = threading.Thread(
-            target=self.runner.run,
+            target=runner.run,
             kwargs={
                 "prompt": prompt,
                 "model": session.model,
@@ -1424,122 +1491,106 @@ class ClaudeTelegramBot:
         runner_thread.start()
 
         # Start watchdog thread
-        watchdog_thread = threading.Thread(target=self._watchdog, daemon=True)
+        watchdog_thread = threading.Thread(
+            target=self._watchdog, args=(runner,), daemon=True)
         watchdog_thread.start()
 
         # Stream updates while runner is active
-        self._stream_updates(runner_thread)
+        self._stream_updates(runner_thread, runner)
 
-        # Finalize — pass prompt so expired-session retry works
-        self._finalize_response(session, prompt=prompt if not _retry else None)
+        # Finalize
+        self._finalize_response(session, runner, prompt=prompt if not _retry else None)
 
-        # Process queued messages
+        # Process queued messages for this context
         self._process_pending()
 
-    def _watchdog(self) -> None:
-        """Activity-based timeout: only fires when Claude has been silent.
-        Also applies a short no-output timeout (90s) when zero output since start.
-        Notifies once when first output is received.
-        """
-        NO_OUTPUT_TIMEOUT = 90   # kill if Claude never starts responding
-        MAX_TOTAL_TIMEOUT = 600  # hard cap — kill regardless of tool activity (10 min)
+    def _watchdog(self, runner: ClaudeRunner) -> None:
+        NO_OUTPUT_TIMEOUT = 90
+        MAX_TOTAL_TIMEOUT = 600
         _notified_first_output = False
 
-        while self.runner.running:
+        while runner.running:
             time.sleep(5)
-            if not self.runner.running:
+            if not runner.running:
                 break
             now = time.time()
-            has_output = self.runner.last_activity > self.runner.start_time
+            has_output = runner.last_activity > runner.start_time
 
-            # Notify once when first output arrives
             if has_output and not _notified_first_output:
                 _notified_first_output = True
-                if self._stream_msg_id:
-                    # already showing "Processando..." message — no extra noise
-                    pass
 
-            # Short timeout: no output at all since start
             if not has_output:
-                elapsed_start = now - self.runner.start_time
+                elapsed_start = now - runner.start_time
                 if elapsed_start > NO_OUTPUT_TIMEOUT:
                     logger.warning("No-output timeout after %.0fs", elapsed_start)
                     self.send_message(f"⏰ Timeout — Claude não produziu nenhum output em {int(elapsed_start)}s. Cancelando...")
-                    self.runner.cancel()
+                    runner.cancel()
                     break
             else:
-                # Hard total timeout (prevents infinite tool loops)
-                elapsed_total = now - self.runner.start_time
+                elapsed_total = now - runner.start_time
                 if elapsed_total > MAX_TOTAL_TIMEOUT:
                     logger.warning("Hard total timeout after %.0fs", elapsed_total)
                     self.send_message(f"⏰ Timeout — Claude rodou por mais de {int(elapsed_total//60)}min sem concluir. Cancelando...")
-                    self.runner.cancel()
+                    runner.cancel()
                     break
-                # Normal activity timeout (silence between tool calls)
-                elapsed = now - self.runner.last_activity
+                elapsed = now - runner.last_activity
                 if elapsed > self.timeout_seconds:
                     logger.warning("Activity timeout after %.0fs of silence", elapsed)
                     self.send_message(f"⏰ Timeout — Claude ficou {int(elapsed)}s sem atividade. Cancelando...")
-                    self.runner.cancel()
+                    runner.cancel()
                     break
 
-    def _update_reaction(self) -> None:
-        """Update the reaction emoji on the user's message based on Claude's current activity."""
-        if not self._user_msg_id:
+    def _update_reaction(self, runner: ClaudeRunner) -> None:
+        ctx = self._ctx
+        if not ctx or not ctx.user_msg_id:
             return
-        activity = self.runner.activity_type
-        _REACTION_MAP = {
-            "thinking": "🤔",
-            "tool": "⚡",
-            "text": "✍️",
-        }
-        emoji = _REACTION_MAP.get(activity, "🤔")
-        if emoji != self._last_reaction:
-            self.set_reaction(self._user_msg_id, emoji)
-            self._last_reaction = emoji
+        _REACTION_MAP = {"thinking": "🤔", "tool": "⚡", "text": "✍️"}
+        emoji = _REACTION_MAP.get(runner.activity_type, "🤔")
+        if emoji != ctx.last_reaction:
+            self.set_reaction(ctx.user_msg_id, emoji)
+            ctx.last_reaction = emoji
 
-    def _stream_updates(self, runner_thread: threading.Thread) -> None:
+    def _stream_updates(self, runner_thread: threading.Thread, runner: ClaudeRunner) -> None:
+        ctx = self._ctx
         _first_output_notified = False
-        _checkin_interval = 15.0   # edita a msg de status a cada 15s mesmo sem output novo
+        _checkin_interval = 15.0
         _last_checkin = time.time()
-        _last_sent_text = ""  # track what we've already shown to ensure append-only
+        _last_sent_text = ""
 
         while runner_thread.is_alive():
             runner_thread.join(timeout=1.0)
             now = time.time()
 
-            if now - self._last_typing_time >= TYPING_INTERVAL:
+            if ctx and now - ctx.last_typing_time >= TYPING_INTERVAL:
                 self.send_typing()
-                self._last_typing_time = now
+                ctx.last_typing_time = now
 
-            # Update reaction based on activity type
-            self._update_reaction()
+            self._update_reaction(runner)
 
-            if self._stream_msg_id:
-                snapshot = self.runner.get_snapshot()
-                has_new = len(snapshot) > self._last_snapshot_len
-                elapsed = int(now - self.runner.start_time)
+            stream_msg = ctx.stream_msg_id if ctx else None
+            if stream_msg:
+                snapshot = runner.get_snapshot()
+                last_len = ctx.last_snapshot_len if ctx else 0
+                has_new = len(snapshot) > last_len
+                elapsed = int(now - runner.start_time)
+                last_edit = ctx.last_edit_time if ctx else 0.0
 
-                # Notify once when first output arrives
                 if has_new and not _first_output_notified:
                     _first_output_notified = True
                     logger.info("First output received from Claude")
 
-                # Update message when there's new content
-                if has_new and now - self._last_edit_time >= STREAM_EDIT_INTERVAL:
-                    # Append-only: never show less content than before
+                if has_new and now - last_edit >= STREAM_EDIT_INTERVAL:
                     display = snapshot
                     if len(display) > MAX_MESSAGE_LENGTH - 200:
                         display = "...\n" + display[-(MAX_MESSAGE_LENGTH - 200):]
                     display += f"\n\n⏳ _Processando... ({elapsed}s)_"
-                    # Only update if display has at least as much content as before
                     if len(snapshot) >= len(_last_sent_text):
-                        self.edit_message(self._stream_msg_id, display)
-                        self._last_edit_time = now
-                        self._last_snapshot_len = len(snapshot)
+                        self.edit_message(stream_msg, display)
+                        if ctx:
+                            ctx.last_edit_time = now
+                            ctx.last_snapshot_len = len(snapshot)
                         _last_sent_text = snapshot
 
-                # Check-in periódico mesmo sem output novo
                 elif now - _last_checkin >= _checkin_interval:
                     _last_checkin = now
                     if snapshot:
@@ -1549,100 +1600,81 @@ class ClaudeTelegramBot:
                         display += f"\n\n⏳ _Processando... ({elapsed}s)_"
                     else:
                         display = f"⏳ _Aguardando resposta do Claude... {elapsed}s_"
-                    self.edit_message(self._stream_msg_id, display)
+                    self.edit_message(stream_msg, display)
 
-    def _finalize_response(self, session: Session, prompt: Optional[str] = None) -> None:
-        # Update session_id
-        if self.runner.captured_session_id:
-            session.session_id = self.runner.captured_session_id
+    def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None) -> None:
+        ctx = self._ctx
+
+        if runner.captured_session_id:
+            session.session_id = runner.captured_session_id
             self.sessions.save()
 
         logger.info(
             "Finalizing: result_text=%d chars, accumulated=%d chars, error=%s, stderr=%d chars, exit=%s",
-            len(self.runner.result_text),
-            len(self.runner.accumulated_text),
-            repr(self.runner.error_text[:100]) if self.runner.error_text else "none",
-            len(self.runner.stderr_text),
-            self.runner.exit_code,
+            len(runner.result_text), len(runner.accumulated_text),
+            repr(runner.error_text[:100]) if runner.error_text else "none",
+            len(runner.stderr_text), runner.exit_code,
         )
 
-        # Detect expired/invalid session: exit 1, no output, session_id was set
-        if (
-            self.runner.exit_code == 1
-            and not self.runner.result_text
-            and not self.runner.accumulated_text
-            and not self.runner.error_text
-            and not self.runner.stderr_text
-            and session.session_id
-            and prompt is not None
-        ):
-            logger.warning("Session ID %s appears expired — retrying without --resume", session.session_id)
-            old_id = session.session_id
+        # Detect expired session
+        if (runner.exit_code == 1 and not runner.result_text and not runner.accumulated_text
+                and not runner.error_text and not runner.stderr_text
+                and session.session_id and prompt is not None):
+            logger.warning("Session ID %s appears expired — retrying", session.session_id)
             session.session_id = None
             self.sessions.save()
-            if self._stream_msg_id:
-                self.edit_message(self._stream_msg_id, "⚠️ _Sessão expirada. Iniciando nova sessão..._")
-            # Retry prompt without session_id
+            stream_msg = ctx.stream_msg_id if ctx else None
+            if stream_msg:
+                self.edit_message(stream_msg, "⚠️ _Sessão expirada. Iniciando nova sessão..._")
             self._run_claude_prompt(prompt, _retry=True)
             return
 
         # Build final response
-        final_text = self.runner.result_text or self.runner.accumulated_text or self.runner.error_text
+        final_text = runner.result_text or runner.accumulated_text or runner.error_text
         if not final_text:
-            exit_code = self.runner.exit_code
-            stderr = self.runner.stderr_text
-
+            exit_code = runner.exit_code
+            stderr = runner.stderr_text
             if stderr:
-                # We have stderr — translate it
                 final_text = _translate_error(stderr)
                 if exit_code and exit_code not in (0, 130):
                     final_text += f"\n_exit code {exit_code}_"
             elif exit_code == 130:
                 final_text = "🛑 Execução cancelada pelo usuário."
             elif exit_code == 2:
-                final_text = (
-                    "❌ *Argumento inválido no Claude CLI*\n"
-                    "O comando foi montado com um parâmetro incorreto. "
-                    "Reporte para o Vini — pode ser um bug na configuração do bot."
-                )
+                final_text = "❌ *Argumento inválido no Claude CLI*"
             else:
-                final_text = (
-                    "⚠️ *Claude não retornou resposta*\n"
-                    "Causas prováveis: API da Anthropic sobrecarregada, timeout silencioso ou falha no CLI.\n"
-                    "Tente novamente em alguns instantes. Se persistir, use /status."
-                )
+                final_text = "⚠️ *Claude não retornou resposta*\nTente novamente em alguns instantes."
 
-        # Append cost info and track weekly costs
-        if self.runner.cost_usd > 0:
-            final_text += f"\n\n💰 Custo: ${self.runner.cost_usd:.4f} (total: ${self.runner.total_cost_usd:.4f})"
-            _track_cost(self.runner.cost_usd)
+        if runner.cost_usd > 0:
+            final_text += f"\n\n💰 Custo: ${runner.cost_usd:.4f} (total: ${runner.total_cost_usd:.4f})"
+            _track_cost(runner.cost_usd)
 
-        # Send final (replace the streaming message for short responses, or send new)
+        # Send final
         sent = False
-        if self._stream_msg_id and len(final_text) <= MAX_MESSAGE_LENGTH:
-            sent = self.edit_message(self._stream_msg_id, final_text)
-
+        stream_msg = ctx.stream_msg_id if ctx else None
+        if stream_msg and len(final_text) <= MAX_MESSAGE_LENGTH:
+            sent = self.edit_message(stream_msg, final_text)
         if not sent:
-            # edit failed or response is long — send as new message(s)
-            if self._stream_msg_id:
-                # Try to clean up the "⏳ Processando..." placeholder
-                self.edit_message(self._stream_msg_id, "✅")
+            if stream_msg:
+                self.edit_message(stream_msg, "✅")
             self.send_message(final_text)
 
-        self._stream_msg_id = None
-
-        # Clear reaction on user message
-        if self._user_msg_id:
-            self.set_reaction(self._user_msg_id, "")
-            self._user_msg_id = None
-            self._last_reaction = ""
+        if ctx:
+            ctx.stream_msg_id = None
+            if ctx.user_msg_id:
+                self.set_reaction(ctx.user_msg_id, "")
+                ctx.user_msg_id = None
+                ctx.last_reaction = ""
 
     def _process_pending(self) -> None:
+        ctx = self._ctx
+        if not ctx:
+            return
         while True:
-            with self._pending_lock:
-                if not self.pending_messages:
+            with ctx.pending_lock:
+                if not ctx.pending:
                     break
-                msg = self.pending_messages.pop(0)
+                msg = ctx.pending.pop(0)
             if isinstance(msg, RoutineTask):
                 self._execute_routine_task(msg)
             else:
@@ -1652,7 +1684,7 @@ class ClaudeTelegramBot:
     def _execute_routine_task(self, task: RoutineTask) -> None:
         """Execute a scheduled routine with model/agent/workspace override."""
         logger.info("Executing routine: %s (%s, model=%s, agent=%s)", task.name, task.time_slot, task.model, task.agent)
-        session = self.sessions.ensure_active()
+        session = self._get_session()
         original_model = session.model
         original_agent = session.agent
         original_workspace = session.workspace
@@ -1733,16 +1765,13 @@ class ClaudeTelegramBot:
                 self.send_message(f"❌ Comando desconhecido: `{cmd}`")
             return
 
-        # Regular text → send to Claude (or queue)
-        if self.runner.running:
-            with self._pending_lock:
-                self.pending_messages.append(text)
-            self.send_message("⏳ Mensagem enfileirada — será enviada quando o Claude terminar.")
-        else:
-            self._user_msg_id = user_msg_id
-            self.set_reaction(user_msg_id, "👀")  # eyes: message received
-            self._last_reaction = "👀"
-            self._run_claude_prompt(text)
+        # Regular text → send to Claude (queued per-context if runner busy)
+        ctx = self._ctx
+        if ctx:
+            ctx.user_msg_id = user_msg_id
+            self.set_reaction(user_msg_id, "👀")
+            ctx.last_reaction = "👀"
+        self._run_claude_prompt(text)
 
     def _handle_callback(self, callback: Dict) -> None:
         cb_id = callback.get("id", "")
@@ -1763,9 +1792,11 @@ class ClaudeTelegramBot:
         # Callback queries (inline keyboards)
         if "callback_query" in update:
             cb = update["callback_query"]
-            # Check authorization
-            cb_chat = str(cb.get("message", {}).get("chat", {}).get("id", ""))
-            if cb_chat == self.chat_id:
+            cb_msg = cb.get("message", {})
+            cb_chat = str(cb_msg.get("chat", {}).get("id", ""))
+            if self._is_authorized(cb_chat):
+                thread_id = cb_msg.get("message_thread_id")
+                self._ctx = self._get_context(cb_chat, thread_id)
                 self._handle_callback(cb)
             return
 
@@ -1775,8 +1806,12 @@ class ClaudeTelegramBot:
 
         # Authorization
         chat_id = str(msg.get("chat", {}).get("id", ""))
-        if chat_id != self.chat_id:
+        if not self._is_authorized(chat_id):
             return
+
+        # Extract thread_id for forum topics (None for private chats)
+        thread_id = msg.get("message_thread_id")
+        self._ctx = self._get_context(chat_id, thread_id)
 
         user_msg_id = msg.get("message_id")
 
@@ -1855,7 +1890,11 @@ class ClaudeTelegramBot:
     def run(self) -> None:
         logger.info("Starting bot polling loop...")
         self._register_commands()
-        self.send_message("🤖 Bot iniciado. Use /help para ver comandos.")
+        # Send startup message to default chat
+        default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
+        if default_chat:
+            self._ctx = self._get_context(default_chat, None)
+            self.send_message("🤖 Bot iniciado. Use /help para ver comandos.")
 
         while not self._stop_event.is_set():
             try:
@@ -1865,56 +1904,22 @@ class ClaudeTelegramBot:
                     if uid >= self._update_offset:
                         self._update_offset = uid + 1
                     try:
-                        # Handle commands that work while Claude is running
-                        # in-line to avoid blocking the polling thread
-                        if self.runner.running:
-                            msg = update.get("message", {})
-                            text = msg.get("text", "").strip()
-                            chat_id = str(msg.get("chat", {}).get("id", ""))
-                            if chat_id != self.chat_id:
-                                continue
-                            if text.startswith("/stop"):
-                                self.cmd_stop()
-                                continue
-                            # Non-blocking commands while running
-                            parts = text.split(None, 1)
-                            cmd = parts[0].lower().split("@")[0] if parts and parts[0].startswith("/") else ""
-                            non_blocking = {"/status", "/sessions", "/model", "/sonnet",
-                                            "/opus", "/haiku", "/help", "/start", "/timeout",
-                                            "/workspace", "/effort"}
-                            # /routine list, /routine status, /agent, /agent list are non-blocking
-                            if cmd == "/routine" and len(parts) > 1 and parts[1].strip().lower() in ("list", "status"):
-                                self._process_update(update)
-                                continue
-                            if cmd == "/agent" and (len(parts) == 1 or (len(parts) > 1 and parts[1].strip().lower() in ("list", ""))):
-                                self._process_update(update)
-                                continue
-                            if cmd in non_blocking:
-                                self._process_update(update)
-                                continue
-                            if cmd == "/btw":
-                                arg = parts[1].strip() if len(parts) > 1 else ""
-                                if arg:
-                                    self.cmd_btw(arg)
-                                else:
-                                    self.send_message("❌ Use: `/btw <mensagem>`")
-                                continue
-                            # Callback queries always processed
-                            if "callback_query" in update:
-                                self._process_update(update)
-                                continue
-                            # Any other text → queue
-                            if text and not text.startswith("/"):
-                                with self._pending_lock:
-                                    self.pending_messages.append(text)
-                                self.send_message("⏳ Mensagem enfileirada — será enviada quando o Claude terminar.")
-                                continue
-                            # Unknown command while running
-                            if text.startswith("/"):
-                                self._process_update(update)
-                                continue
-                        else:
-                            self._process_update(update)
+                        # Determine context for this update
+                        msg = update.get("message", {})
+                        chat_id = str(msg.get("chat", {}).get("id", ""))
+                        thread_id = msg.get("message_thread_id")
+
+                        if not self._is_authorized(chat_id) and "callback_query" not in update:
+                            continue
+
+                        # Set context for this message
+                        if chat_id and self._is_authorized(chat_id):
+                            self._ctx = self._get_context(chat_id, thread_id)
+
+                        # Process the update — _run_claude_prompt handles queuing
+                        # per-context if that context's runner is busy.
+                        # Different topics can run in parallel.
+                        self._process_update(update)
                     except Exception as exc:
                         logger.error("Error handling update %s: %s", update.get("update_id"), exc, exc_info=True)
             except KeyboardInterrupt:
@@ -1928,8 +1933,11 @@ class ClaudeTelegramBot:
 
     def stop(self) -> None:
         self._stop_event.set()
-        if self.runner.running:
-            self.runner.cancel()
+        # Cancel all running contexts
+        with self._contexts_lock:
+            for ctx in self._contexts.values():
+                if ctx.runner and ctx.runner.running:
+                    ctx.runner.cancel()
 
 
 # ---------------------------------------------------------------------------
