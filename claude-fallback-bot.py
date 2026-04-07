@@ -963,6 +963,33 @@ class ClaudeTelegramBot:
     def _is_authorized(self, chat_id: str) -> bool:
         return chat_id in self.authorized_ids
 
+    def _authorize_chat(self, chat_id: str) -> None:
+        """Dynamically authorize a new chat ID (e.g., a group the bot was added to)."""
+        self.authorized_ids.add(chat_id)
+        # Persist to .env
+        try:
+            env_file = Path(__file__).resolve().parent / ".env"
+            if env_file.is_file():
+                content = env_file.read_text()
+                lines = content.splitlines()
+                new_lines = []
+                found = False
+                for line in lines:
+                    if line.startswith("TELEGRAM_CHAT_ID="):
+                        current = line.split("=", 1)[1].strip()
+                        ids = {i.strip() for i in current.split(",") if i.strip()}
+                        ids.add(chat_id)
+                        new_lines.append(f"TELEGRAM_CHAT_ID={','.join(sorted(ids))}")
+                        found = True
+                    else:
+                        new_lines.append(line)
+                if not found:
+                    new_lines.append(f"TELEGRAM_CHAT_ID={chat_id}")
+                env_file.write_text("\n".join(new_lines) + "\n")
+            logger.info("Auto-authorized chat ID: %s", chat_id)
+        except Exception as exc:
+            logger.error("Failed to persist authorized chat: %s", exc)
+
     def _enqueue_routine(self, task: RoutineTask) -> None:
         """Called by the scheduler thread to enqueue a routine for execution."""
         # Routines go to the default context (private chat or first context)
@@ -1804,14 +1831,30 @@ class ClaudeTelegramBot:
         if not msg:
             return
 
-        # Authorization
         chat_id = str(msg.get("chat", {}).get("id", ""))
+        user_id = str(msg.get("from", {}).get("id", ""))
+        chat_type = msg.get("chat", {}).get("type", "private")
+
+        # Auto-discovery: if the bot receives a message in an unknown group
+        # from an authorized user, auto-authorize the group
         if not self._is_authorized(chat_id):
-            return
+            if user_id in self.authorized_ids and chat_type in ("group", "supergroup"):
+                self._authorize_chat(chat_id)
+                logger.info("Auto-authorized group %s via user %s", chat_id, user_id)
+            else:
+                return
 
         # Extract thread_id for forum topics (None for private chats)
         thread_id = msg.get("message_thread_id")
+        is_new_context = (chat_id, thread_id) not in self._contexts
         self._ctx = self._get_context(chat_id, thread_id)
+
+        # Onboarding: first message in a new topic → show agent picker
+        if is_new_context and thread_id and chat_type in ("group", "supergroup"):
+            agents = list_agents()
+            if agents:
+                self.cmd_agent_keyboard()
+                # Still process the message below
 
         user_msg_id = msg.get("message_id")
 
