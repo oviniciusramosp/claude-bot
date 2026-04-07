@@ -1,0 +1,64 @@
+# ============================================
+# Secrets & credentials
+# ============================================
+.env
+vault/.env
+
+# ============================================
+# Vault — personal content (not shared)
+# Only .gitkeep files are tracked to preserve
+# the directory structure for new users.
+# ============================================
+vault/Journal/*
+!vault/Journal/.gitkeep
+!vault/Journal/Journal.md
+vault/Notes/*
+!vault/Notes/.gitkeep
+!vault/Notes/Notes.md
+vault/Images/*
+!vault/Images/.gitkeep
+vault/Skills/*
+!vault/Skills/.gitkeep
+!vault/Skills/Skills.md
+!vault/Skills/create-routine.md
+!vault/Skills/create-agent.md
+vault/Routines/*
+!vault/Routines/.gitkeep
+!vault/Routines/Routines.md
+vault/Agents/*
+!vault/Agents/.gitkeep
+!vault/Agents/Agents.md
+
+# Obsidian workspace state (user-specific)
+vault/.obsidian/workspace.json
+vault/.obsidian/graph.json
+
+# Claude Code local settings (user-specific paths)
+.claude/settings.local.json
+
+# ============================================
+# Runtime data
+# ============================================
+*.log
+sessions.json
+
+# ============================================
+# macOS
+# ============================================
+.DS_Store
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# ============================================
+# IDE
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
