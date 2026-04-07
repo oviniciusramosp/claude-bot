@@ -114,15 +114,14 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/important` — Registrar pontos importantes da sessão no diário
 
 🔁 *Rotinas*
-• `/routine` — Criar nova rotina (interativo)
-• `/routine list` — Listar rotinas de hoje
-• `/routine status` — Status de execução das rotinas
+• `/routine` — Gerenciar rotinas (listar, criar, editar)
 
 🤖 *Agentes*
-• `/agent` — Escolher agente (teclado)
+• `/agent` — Gerenciar agentes (trocar, criar, editar, importar)
 • `/agent <nome>` — Trocar para agente
-• `/agent new` — Criar novo agente
-• `/agent list` — Listar agentes
+
+⚡ *Skills*
+• `/skill` — Gerenciar skills (listar, editar)
 
 💬 Qualquer outra mensagem é enviada como prompt ao Claude.
 📷 Envie fotos diretamente — o Claude irá analisá-las."""
@@ -1354,45 +1353,129 @@ class ClaudeTelegramBot:
         self._run_claude_prompt(prompt)
 
     def cmd_routine(self, arg: str) -> None:
-        arg = arg.strip().lower()
-        if arg == "list":
-            routines = self.scheduler.list_today_routines()
-            if not routines:
-                self.send_message("📋 Nenhuma rotina agendada para hoje.")
-                return
-            _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌"}
-            lines = ["📋 *Rotinas de hoje*\n"]
-            for r in routines:
-                icon = _icons.get(r["status"], "⏰")
-                lines.append(f"- {icon} `{r['time']}` *{r['title']}* — {r['model']}")
-            self.send_message("\n".join(lines))
-        elif arg == "status":
-            routines = self.scheduler.list_today_routines()
-            if not routines:
-                self.send_message("📊 Nenhuma rotina agendada para hoje.")
-                return
-            _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌"}
-            lines = [f"📊 *Rotinas — {time.strftime('%Y-%m-%d')}*\n"]
-            for r in routines:
-                icon = _icons.get(r["status"], "⏰")
-                extra = ""
-                if r["status"] == "failed" and r.get("error"):
-                    extra = f" — `{r['error'][:60]}`"
-                lines.append(f"- {icon} `{r['time']}` *{r['title']}*{extra}")
-            self.send_message("\n".join(lines))
+        arg = arg.strip()
+        arg_lower = arg.lower()
+        if not arg:
+            # No arg: show action keyboard
+            markup = {"inline_keyboard": [
+                [{"text": "📋 Listar", "callback_data": "routine:list"},
+                 {"text": "📊 Status", "callback_data": "routine:status"}],
+                [{"text": "➕ Criar nova", "callback_data": "routine:new"},
+                 {"text": "✏️ Editar", "callback_data": "routine:edit"}],
+            ]}
+            self.send_message("🔁 *Rotinas* — o que deseja fazer?", reply_markup=markup)
+            return
+        if arg_lower == "list":
+            self._routine_list()
+        elif arg_lower == "status":
+            self._routine_status()
+        elif arg_lower in ("new", "create"):
+            self._routine_create("")
+        elif arg_lower.startswith("edit"):
+            edit_arg = arg[4:].strip()
+            self._routine_edit(edit_arg)
         else:
-            # Default: trigger create-routine skill
-            prompt = (
-                f"Execute a skill de criacao de rotinas. "
-                f"Leia {VAULT_DIR}/Skills/create-routine.md para instrucoes. "
-                f"Ajude o usuario a criar uma nova rotina em {VAULT_DIR}/Routines/. "
-                "Faca as perguntas necessarias sobre: o que a rotina deve fazer, "
-                "horarios, dias da semana, modelo, e data limite. "
-                "Depois gere o arquivo .md com frontmatter completo e registre no Journal."
-            )
-            if arg:
-                prompt += f"\n\nO usuario disse: {arg}"
-            self._run_claude_prompt(prompt)
+            # Treat as creation request with context
+            self._routine_create(arg)
+
+    def _routine_list(self) -> None:
+        routines = self.scheduler.list_today_routines()
+        if not routines:
+            self.send_message("📋 Nenhuma rotina agendada para hoje.")
+            return
+        _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌"}
+        lines = ["📋 *Rotinas de hoje*\n"]
+        for r in routines:
+            icon = _icons.get(r["status"], "⏰")
+            lines.append(f"- {icon} `{r['time']}` *{r['title']}* — {r['model']}")
+        self.send_message("\n".join(lines))
+
+    def _routine_status(self) -> None:
+        routines = self.scheduler.list_today_routines()
+        if not routines:
+            self.send_message("📊 Nenhuma rotina agendada para hoje.")
+            return
+        _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌"}
+        lines = [f"📊 *Rotinas — {time.strftime('%Y-%m-%d')}*\n"]
+        for r in routines:
+            icon = _icons.get(r["status"], "⏰")
+            extra = ""
+            if r["status"] == "failed" and r.get("error"):
+                extra = f" — `{r['error'][:60]}`"
+            lines.append(f"- {icon} `{r['time']}` *{r['title']}*{extra}")
+        self.send_message("\n".join(lines))
+
+    def _routine_create(self, extra: str) -> None:
+        prompt = (
+            f"Execute a skill de criacao de rotinas. "
+            f"Leia {VAULT_DIR}/Skills/create-routine.md para instrucoes. "
+            f"Ajude o usuario a criar uma nova rotina em {VAULT_DIR}/Routines/. "
+            "Faca as perguntas necessarias sobre: o que a rotina deve fazer, "
+            "horarios, dias da semana, modelo, e data limite. "
+            "Depois gere o arquivo .md com frontmatter completo e registre no Journal."
+        )
+        if extra:
+            prompt += f"\n\nO usuario disse: {extra}"
+        self._run_claude_prompt(prompt)
+
+    def _routine_edit(self, name: str) -> None:
+        prompt = (
+            f"O usuario quer editar uma rotina existente. "
+            f"Liste os arquivos em {VAULT_DIR}/Routines/ e mostre as rotinas disponiveis. "
+            f"Pergunte qual deseja editar e o que quer mudar (horario, dias, prompt, modelo, ativar/desativar). "
+            "Faca a edicao no arquivo .md e confirme."
+        )
+        if name:
+            prompt += f"\n\nO usuario quer editar: {name}"
+        self._run_claude_prompt(prompt)
+
+    # -- Skill commands --
+
+    def cmd_skill(self, arg: str) -> None:
+        arg = arg.strip()
+        arg_lower = arg.lower()
+        if not arg:
+            markup = {"inline_keyboard": [
+                [{"text": "📋 Listar", "callback_data": "skill:list"},
+                 {"text": "✏️ Editar", "callback_data": "skill:edit"}],
+            ]}
+            self.send_message("⚡ *Skills* — o que deseja fazer?", reply_markup=markup)
+            return
+        if arg_lower == "list":
+            self._skill_list()
+        elif arg_lower.startswith("edit"):
+            self._skill_edit(arg[4:].strip())
+        else:
+            self._skill_edit(arg)
+
+    def _skill_list(self) -> None:
+        skills_dir = VAULT_DIR / "Skills"
+        if not skills_dir.is_dir():
+            self.send_message("⚡ Nenhuma skill encontrada.")
+            return
+        lines = ["⚡ *Skills*\n"]
+        for f in sorted(skills_dir.glob("*.md")):
+            if f.name.startswith("Skills"):
+                continue  # skip index
+            fm, _ = get_frontmatter_and_body(f)
+            title = fm.get("title", f.stem)
+            desc = fm.get("description", "")[:60]
+            lines.append(f"- *{title}* — {desc}")
+        if len(lines) == 1:
+            self.send_message("⚡ Nenhuma skill encontrada.")
+        else:
+            self.send_message("\n".join(lines))
+
+    def _skill_edit(self, name: str) -> None:
+        prompt = (
+            f"O usuario quer editar uma skill existente. "
+            f"Liste as skills em {VAULT_DIR}/Skills/ (leia o frontmatter de cada .md). "
+            f"Pergunte qual deseja editar e o que quer mudar. "
+            "Faca a edicao no arquivo .md e confirme."
+        )
+        if name:
+            prompt += f"\n\nO usuario quer editar: {name}"
+        self._run_claude_prompt(prompt)
 
     # -- Agent commands --
 
@@ -1400,27 +1483,62 @@ class ClaudeTelegramBot:
         arg = arg.strip()
         arg_lower = arg.lower()
         if not arg:
-            # No argument: show keyboard picker
-            self.cmd_agent_keyboard()
+            # No argument: show action keyboard
+            rows = [
+                [{"text": "🔀 Trocar agente", "callback_data": "agentmenu:switch"},
+                 {"text": "📋 Listar", "callback_data": "agentmenu:list"}],
+                [{"text": "➕ Criar novo", "callback_data": "agent:create"},
+                 {"text": "✏️ Editar", "callback_data": "agentmenu:edit"}],
+                [{"text": "📥 Importar (OC)", "callback_data": "agentmenu:import"}],
+            ]
+            markup = {"inline_keyboard": rows}
+            self.send_message("🤖 *Agentes* — o que deseja fazer?", reply_markup=markup)
             return
         if arg_lower == "list":
-            agents = list_agents()
-            if not agents:
-                self.send_message("🤖 Nenhum agente configurado.\nUse `/agent new` para criar um.")
-                return
-            session = self._get_session()
-            active_agent = session.agent if session else None
-            lines = ["🤖 *Agentes*\n"]
-            for a in agents:
-                icon = a.get("icon", "🤖")
-                marker = " ◀️" if a["_id"] == active_agent else ""
-                lines.append(f"- {icon} *{a.get('name', a['_id'])}* — {a.get('description', '')[:60]}{marker}")
-            self.send_message("\n".join(lines))
+            self._agent_list()
         elif arg_lower in ("new", "create"):
             self._run_agent_create_skill("")
+        elif arg_lower == "import":
+            self._agent_import("")
+        elif arg_lower.startswith("edit"):
+            self._agent_edit(arg[4:].strip())
         else:
-            # Try to switch to agent by name/id
             self.cmd_agent_switch(arg_lower)
+
+    def _agent_list(self) -> None:
+        agents = list_agents()
+        if not agents:
+            self.send_message("🤖 Nenhum agente configurado.\nUse `/agent new` para criar um.")
+            return
+        session = self._get_session()
+        active_agent = session.agent if session else None
+        lines = ["🤖 *Agentes*\n"]
+        for a in agents:
+            icon = a.get("icon", "🤖")
+            marker = " ◀️" if a["_id"] == active_agent else ""
+            lines.append(f"- {icon} *{a.get('name', a['_id'])}* — {a.get('description', '')[:60]}{marker}")
+        self.send_message("\n".join(lines))
+
+    def _agent_edit(self, name: str) -> None:
+        prompt = (
+            f"O usuario quer editar um agente existente. "
+            f"Liste os agentes em {VAULT_DIR}/Agents/ (leia o frontmatter de cada agent.md). "
+            f"Pergunte qual deseja editar e o que quer mudar (personalidade, instrucoes, modelo, icone). "
+            "Faca a edicao nos arquivos agent.md e/ou CLAUDE.md do agente e confirme."
+        )
+        if name:
+            prompt += f"\n\nO usuario quer editar: {name}"
+        self._run_claude_prompt(prompt)
+
+    def _agent_import(self, extra: str) -> None:
+        prompt = (
+            f"Execute a skill de importacao de agentes. "
+            f"Leia {VAULT_DIR}/Skills/import-agent.md para instrucoes. "
+            "Ajude o usuario a importar um agente existente do OpenClaw para o vault."
+        )
+        if extra:
+            prompt += f"\n\nO usuario disse: {extra}"
+        self._run_claude_prompt(prompt)
 
     def _run_agent_create_skill(self, extra: str = "") -> None:
         prompt = (
@@ -1825,6 +1943,7 @@ class ClaudeTelegramBot:
                 "/important": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
                 "/agent": lambda: self.cmd_agent(arg),
+                "/skill": lambda: self.cmd_skill(arg),
             }
 
             fn = handler_map.get(cmd)
@@ -1842,9 +1961,19 @@ class ClaudeTelegramBot:
             ctx.last_reaction = "👀"
         self._run_claude_prompt(text)
 
+    def _remove_keyboard(self, callback: Dict) -> None:
+        """Remove inline keyboard from the message that had the buttons."""
+        msg = callback.get("message", {})
+        msg_id = msg.get("message_id")
+        text = msg.get("text", "")
+        if msg_id and text:
+            self.edit_message(msg_id, text)
+
     def _handle_callback(self, callback: Dict) -> None:
         cb_id = callback.get("id", "")
         data = callback.get("data", "")
+
+        self._remove_keyboard(callback)
 
         if data.startswith("model:"):
             model = data.split(":", 1)[1]
@@ -1852,12 +1981,40 @@ class ClaudeTelegramBot:
             self.answer_callback(cb_id, f"Modelo: {model}")
         elif data.startswith("agent:"):
             agent_id = data.split(":", 1)[1]
+            self.answer_callback(cb_id)
             if agent_id == "create":
-                self.answer_callback(cb_id, "Criando agente...")
                 self._run_agent_create_skill("")
             else:
                 self.cmd_agent_switch(agent_id)
-                self.answer_callback(cb_id, f"Agente: {agent_id}")
+        elif data.startswith("agentmenu:"):
+            action = data.split(":", 1)[1]
+            self.answer_callback(cb_id)
+            if action == "switch":
+                self.cmd_agent_keyboard()
+            elif action == "list":
+                self._agent_list()
+            elif action == "edit":
+                self._agent_edit("")
+            elif action == "import":
+                self._agent_import("")
+        elif data.startswith("routine:"):
+            action = data.split(":", 1)[1]
+            self.answer_callback(cb_id)
+            if action == "list":
+                self._routine_list()
+            elif action == "status":
+                self._routine_status()
+            elif action == "new":
+                self._routine_create("")
+            elif action == "edit":
+                self._routine_edit("")
+        elif data.startswith("skill:"):
+            action = data.split(":", 1)[1]
+            self.answer_callback(cb_id)
+            if action == "list":
+                self._skill_list()
+            elif action == "edit":
+                self._skill_edit("")
         else:
             self.answer_callback(cb_id)
 
@@ -1948,7 +2105,8 @@ class ClaudeTelegramBot:
             {"command": "opus", "description": "Usar modelo Opus"},
             {"command": "haiku", "description": "Usar modelo Haiku"},
             {"command": "model", "description": "Escolher modelo"},
-            {"command": "agent", "description": "Escolher ou criar agente"},
+            {"command": "agent", "description": "Gerenciar agentes"},
+            {"command": "skill", "description": "Gerenciar skills"},
             {"command": "routine", "description": "Criar ou listar rotinas"},
             {"command": "important", "description": "Registrar pontos importantes no diario"},
             {"command": "compact", "description": "Compactar contexto"},
@@ -1994,6 +2152,7 @@ class ClaudeTelegramBot:
 
                         # Check if this is a new topic before creating context
                         is_new_topic = (chat_id, thread_id) not in self._contexts
+                        logger.info("Update: chat=%s thread=%s type=%s new_topic=%s", chat_id, thread_id, chat_type, is_new_topic)
 
                         # Set context for this message
                         self._ctx = self._get_context(chat_id, thread_id)
