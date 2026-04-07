@@ -1832,29 +1832,22 @@ class ClaudeTelegramBot:
             return
 
         chat_id = str(msg.get("chat", {}).get("id", ""))
-        user_id = str(msg.get("from", {}).get("id", ""))
         chat_type = msg.get("chat", {}).get("type", "private")
 
-        # Auto-discovery: if the bot receives a message in an unknown group
-        # from an authorized user, auto-authorize the group
+        # Authorization already handled in polling loop
         if not self._is_authorized(chat_id):
-            if user_id in self.authorized_ids and chat_type in ("group", "supergroup"):
-                self._authorize_chat(chat_id)
-                logger.info("Auto-authorized group %s via user %s", chat_id, user_id)
-            else:
-                return
+            return
 
-        # Extract thread_id for forum topics (None for private chats)
+        # Extract thread_id for forum topics
         thread_id = msg.get("message_thread_id")
         is_new_context = (chat_id, thread_id) not in self._contexts
         self._ctx = self._get_context(chat_id, thread_id)
 
-        # Onboarding: first message in a new topic → show agent picker
+        # Onboarding: first message in a new group topic → show agent picker
         if is_new_context and thread_id and chat_type in ("group", "supergroup"):
             agents = list_agents()
             if agents:
                 self.cmd_agent_keyboard()
-                # Still process the message below
 
         user_msg_id = msg.get("message_id")
 
@@ -1947,21 +1940,25 @@ class ClaudeTelegramBot:
                     if uid >= self._update_offset:
                         self._update_offset = uid + 1
                     try:
-                        # Determine context for this update
                         msg = update.get("message", {})
                         chat_id = str(msg.get("chat", {}).get("id", ""))
+                        user_id = str(msg.get("from", {}).get("id", ""))
+                        chat_type = msg.get("chat", {}).get("type", "private")
                         thread_id = msg.get("message_thread_id")
 
+                        # Auto-discovery: authorized user in unknown group → authorize group
                         if not self._is_authorized(chat_id) and "callback_query" not in update:
-                            continue
+                            if user_id in self.authorized_ids and chat_type in ("group", "supergroup"):
+                                self._authorize_chat(chat_id)
+                                logger.info("Auto-authorized group %s via user %s", chat_id, user_id)
+                            else:
+                                logger.debug("Ignoring message from unauthorized chat %s", chat_id)
+                                continue
 
                         # Set context for this message
-                        if chat_id and self._is_authorized(chat_id):
-                            self._ctx = self._get_context(chat_id, thread_id)
+                        self._ctx = self._get_context(chat_id, thread_id)
 
-                        # Process the update — _run_claude_prompt handles queuing
-                        # per-context if that context's runner is busy.
-                        # Different topics can run in parallel.
+                        # Process update — each topic runs independently
                         self._process_update(update)
                     except Exception as exc:
                         logger.error("Error handling update %s: %s", update.get("update_id"), exc, exc_info=True)
