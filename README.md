@@ -130,6 +130,14 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/timeout <sec>` | Activity timeout (default: 600s) |
 | `/workspace <path>` | Change working directory |
 
+### Agents
+| Command | Description |
+|---------|-------------|
+| `/agent` | Show agent picker (inline keyboard) |
+| `/agent <name>` | Switch to an agent |
+| `/agent new` | Create a new agent (interactive) |
+| `/agent list` | List all agents |
+
 ### Journal & Routines
 | Command | Description |
 |---------|-------------|
@@ -149,15 +157,75 @@ When you send a message, the bot sets emoji reactions on it to show processing s
 |----------|---------|
 | 👀 | Message received |
 | 🤔 | Claude is thinking |
-| 👨‍💻 | Claude is using tools (running code, reading files) |
-| 📝 | Claude is writing text |
+| ⚡ | Claude is using tools (running code, reading files) |
+| ✍️ | Claude is writing text |
 | *(removed)* | Response complete |
+
+---
+
+## Agents
+
+Agents are specialized personas that live inside the vault. Each agent has its own workspace, CLAUDE.md, personality, model, and journal.
+
+```
+vault/Agents/cripto/
+  agent.md       # Metadata (name, model, icon — parsed by the bot)
+  CLAUDE.md      # Instructions for Claude Code (loaded automatically)
+  Journal/       # Agent-specific daily logs
+```
+
+When an agent is active, Claude Code's working directory changes to the agent's folder. It reads the agent's CLAUDE.md for personality and instructions, plus the project's CLAUDE.md for vault rules -- automatically via Claude Code's directory hierarchy.
+
+### Creating agents
+
+- **Via Telegram:** `/agent new` -- interactive skill that asks name, personality, model, etc.
+- **Manually:** Create the directory structure and files in `vault/Agents/`
+
+### Switching agents
+
+- **Private chat:** `/agent` shows an inline keyboard to pick an agent
+- **Group topics:** Each topic auto-prompts for an agent on first message (see below)
+
+---
+
+## Group Topics (Multi-Agent Channels)
+
+The bot supports Telegram groups with **Forum Topics** enabled. Each topic acts as an independent channel with its own agent, session, and parallel execution.
+
+```
+Telegram Group (Forum mode)
+  |-- Topic "General"   --> default agent
+  |-- Topic "Crypto"    --> crypto agent
+  |-- Topic "Dev"       --> dev agent
+  '-- Topic "Palmeiras" --> palmeiras agent
+```
+
+### Setup (fully automatic)
+
+1. **Create a Telegram group** with Forum Topics enabled (Group Settings > Topics)
+2. **Add the bot to the group** and send any message
+3. The bot auto-detects the group and authorizes it (no manual config needed)
+4. In each topic, the bot shows the agent picker on the first message
+
+The bot auto-discovers groups when a previously authorized user (your private chat ID) sends a message. The group's chat_id is persisted to `.env` automatically.
+
+### How it works
+
+- Each topic gets its own `ThreadContext` with independent Claude runner
+- Different topics execute in parallel -- no queueing between them
+- Within a topic, messages queue normally (one at a time)
+- Agent selection persists per topic
+- Each topic has its own session and conversation history
+
+### Private chat
+
+Private chat continues to work as before. Use `/agent` to switch agents freely.
 
 ---
 
 ## Knowledge Vault
 
-The `vault/` directory is an [Obsidian](https://obsidian.md)-compatible knowledge vault. Claude reads it for context and writes to it to preserve knowledge across sessions.
+The `vault/` directory (also called "knowledge base" or "KB") is an [Obsidian](https://obsidian.md)-compatible knowledge vault. Claude reads it for context and writes to it to preserve knowledge across sessions.
 
 ### Structure
 
