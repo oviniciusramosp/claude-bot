@@ -2090,7 +2090,11 @@ class ClaudeTelegramBot:
         }
         resp = self.tg_request("getUpdates", data)
         if resp and resp.get("ok"):
-            return resp.get("result", [])
+            results = resp.get("result", [])
+            if results:
+                logger.info("Received %d updates (offset=%d)", len(results), self._update_offset)
+            return results
+        logger.warning("getUpdates returned: %s", resp)
         return []
 
     def _register_commands(self) -> None:
@@ -2120,13 +2124,12 @@ class ClaudeTelegramBot:
 
     def run(self) -> None:
         logger.info("Starting bot polling loop...")
-        self._register_commands()
-        # Send startup message to default chat
-        default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else None
-        if default_chat:
-            self._ctx = self._get_context(default_chat, None)
-            self.send_message("🤖 Bot iniciado. Use /help para ver comandos.")
-
+        logger.info("Registering commands...")
+        try:
+            self._register_commands()
+        except Exception as exc:
+            logger.error("Failed to register commands: %s", exc)
+        logger.info("Entering polling loop")
         while not self._stop_event.is_set():
             try:
                 updates = self._poll_updates()
