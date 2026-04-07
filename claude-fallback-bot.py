@@ -966,16 +966,16 @@ class ClaudeTelegramBot:
             logger.error("Failed to load contexts: %s", exc)
 
     def _save_contexts(self) -> None:
-        """Persist context→session mappings to disk."""
+        """Persist context→session mappings to disk. Must NOT acquire _contexts_lock (caller may hold it)."""
         try:
             entries = []
-            with self._contexts_lock:
-                for (cid, tid), ctx in self._contexts.items():
-                    entries.append({
-                        "chat_id": cid,
-                        "thread_id": tid,
-                        "session_name": ctx.session_name,
-                    })
+            # Iterate without lock — called from within _get_context which holds the lock
+            for (cid, tid), ctx in list(self._contexts.items()):
+                entries.append({
+                    "chat_id": cid,
+                    "thread_id": tid,
+                    "session_name": ctx.session_name,
+                })
             data = {"contexts": entries}
             tmp = CONTEXTS_FILE.with_suffix(".tmp")
             tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -2160,22 +2160,27 @@ class ClaudeTelegramBot:
                         # Set context for this message
                         self._ctx = self._get_context(chat_id, thread_id)
 
-                        # Onboarding: first message in a new group topic
-                        if is_new_topic and thread_id and chat_type in ("group", "supergroup"):
-                            agents = list_agents()
-                            if agents:
-                                self.cmd_agent_keyboard()
-                            else:
-                                markup = {"inline_keyboard": [[
-                                    {"text": "🤖 Criar agente", "callback_data": "agent:create"},
-                                    {"text": "⏭ Sem agente", "callback_data": "agent:none"},
-                                ]]}
-                                self.send_message(
-                                    "👋 Novo tópico! Escolha um agente para este canal:",
-                                    reply_markup=markup)
-
-                        # Process update — each topic runs independently
-                        self._process_update(update)
+                        # Process update + onboarding in a thread so polling never blocks
+                        def _handle(u=update, c=self._ctx, new=is_new_topic, ct=chat_type, tid=thread_id):
+                            try:
+                                self._ctx = c
+                                # Onboarding: first message in a new group topic
+                                if new and tid and ct in ("group", "supergroup"):
+                                    agents = list_agents()
+                                    if agents:
+                                        self.cmd_agent_keyboard()
+                                    else:
+                                        markup = {"inline_keyboard": [[
+                                            {"text": "🤖 Criar agente", "callback_data": "agent:create"},
+                                            {"text": "⏭ Sem agente", "callback_data": "agent:none"},
+                                        ]]}
+                                        self.send_message(
+                                            "👋 Novo tópico! Escolha um agente para este canal:",
+                                            reply_markup=markup)
+                                self._process_update(u)
+                            except Exception as exc:
+                                logger.error("Error processing update: %s", exc, exc_info=True)
+                        threading.Thread(target=_handle, daemon=True).start()
                     except Exception as exc:
                         logger.error("Error handling update %s: %s", update.get("update_id"), exc, exc_info=True)
             except KeyboardInterrupt:
