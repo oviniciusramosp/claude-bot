@@ -150,9 +150,9 @@ tags: [topico1, topico2]
 
 O campo `description` eh obrigatorio e funciona como indice semantico. Deve conter contexto suficiente para decidir se o arquivo precisa ser lido inteiro ou nao.
 
-### Regra inquebravel: Zero arquivos orfaos + Estrutura do grafo
+### Estrutura do grafo
 
-O vault eh um **grafo em arvore com cross-links seletivos**. O Obsidian Graph View eh a forma principal do usuario navegar. A estrutura DEVE formar uma arvore limpa:
+O vault eh um **grafo em arvore limpa**. O Obsidian Graph View eh a forma principal do usuario navegar. O chart deve ser limpo, com conexoes claras e sem links desnecessarios.
 
 ```
 README (hub raiz)
@@ -161,56 +161,45 @@ README (hub raiz)
   ├── Skills (index) → skills individuais
   ├── Routines (index) → rotinas individuais
   ├── Agents (index) → agentes individuais
-  └── Tooling (folha de referencia, sem outlinks)
+  └── Tooling (folha terminal)
 ```
 
-**Regras de linkagem por tipo de arquivo:**
+**Regras de linkagem:**
 
-| Tipo | Outlinks permitidos | Inlinks vem de |
-|------|---------------------|----------------|
-| README | APENAS indexes + Tooling | nenhum (raiz) |
-| Index (Journal, Notes, Skills, Routines, Agents) | APENAS seus filhos diretos | README |
-| Leaf (nota, skill, rotina, agente, journal entry) | `[[IndexPai]]` obrigatorio + cross-links genuinos | Seu index pai |
+| Tipo | Outlinks | Inlinks |
+|------|----------|---------|
+| README | indexes + Tooling | nenhum (raiz) |
+| Index | seus filhos diretos | README |
+| Leaf (skill, rotina, nota) | `[[IndexPai]]` na primeira linha + cross-links genuinos | seu index |
+| Agente | `{id}.md` com links internos | Agents index |
+| Journal entry | `[[Journal]]` ou `[[{agent}/Journal\|Journal]]` | Journal index |
 | Tooling | nenhum (terminal) | README |
 
-**Cross-links entre siblings** — permitidos SOMENTE quando um arquivo genuinamente depende de outro (ex: `create-routine` linka `[[Routines]]` porque cria arquivos la). NAO criar links de cortesia, de contexto, ou "relacionados" entre indexes.
+**Principio central: nem toda mencao precisa ser um `[[link]]`.** Links existem para criar conexoes NO GRAFO do Obsidian. Se a conexao nao agrega visualmente, nao linke. Use texto plano.
 
 **Proibido:**
-- README linkar diretamente para folhas (sempre via index)
-- Index files linkarem para outros indexes (sem "Relacionados" entre eles)
-- Folhas linkarem para Tooling ou outros indexes que nao sejam seu pai
-- Secoes `## Relacionados` em index files (isso cria link pollution)
+- README linkar para folhas (sempre via index)
+- Indexes linkarem entre si
+- Dois arquivos terem multiplas conexoes
+- Links decorativos ou "relacionados"
+- Journal entries criarem wikilinks para tudo que mencionam (polui o grafo)
 
-**Checklist obrigatorio ao criar qualquer arquivo:**
-- [ ] Frontmatter completo com `description`?
-- [ ] Primeira linha do body = `[[IndexPai]]`?
-- [ ] Index da pasta atualizado com `[[novo-arquivo]]`?
-- [ ] Journal do dia registra a criacao?
-- [ ] Nenhum link decorativo/redundante adicionado?
+### Index files (MOCs)
 
-### Regra inquebravel: Index files (MOCs)
+Cada pasta tem um index que funciona como hub no grafo:
 
-Cada pasta tem um index file que funciona como **hub** no grafo. Index files existentes:
+- `vault/README.md` → hub raiz
+- `vault/Journal/Journal.md`, `vault/Notes/Notes.md`, `vault/Skills/Skills.md`, `vault/Routines/Routines.md`, `vault/Agents/Agents.md`
 
-- `vault/README.md` → hub raiz, linka para os 5 indexes + Tooling
-- `vault/Journal/Journal.md` → lista entradas recentes
-- `vault/Notes/Notes.md` → lista notas existentes
-- `vault/Skills/Skills.md` → lista skills disponiveis
-- `vault/Routines/Routines.md` → lista rotinas ativas
-- `vault/Agents/Agents.md` → lista agentes disponiveis
+Regras: lista APENAS filhos diretos. Nunca linka para outros indexes.
 
-**Regras para indexes:**
-- Um index lista APENAS seus filhos diretos (`- [[filho]] — descricao`)
-- Um index NUNCA linka para outros indexes (sem secao "Relacionados")
-- Um index NUNCA linka para folhas de outras pastas
+### Criando arquivos no vault
 
-### Procedimento completo: criando qualquer arquivo no vault
-
-**1. Criar o arquivo com frontmatter completo:**
+**1. Frontmatter completo:**
 ```yaml
 ---
-title: Nome descritivo
-description: Frase que explica o conteudo e quando eh relevante.
+title: Nome
+description: Frase curta sobre conteudo e relevancia.
 type: (note|skill|routine|agent|journal|reference|index)
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
@@ -218,56 +207,41 @@ tags: [tag1, tag2]
 ---
 ```
 
-**2. Primeira linha do body: link para o index pai:**
-- Skill → `[[Skills]]`
-- Rotina → `[[Routines]]`
-- Agente → `[[Agents]]`
-- Nota → `[[Notes]]`
-- Journal entry → `[[Journal]]`
+**2. Primeira linha do body = link para index pai:**
+Skill → `[[Skills]]`, Rotina → `[[Routines]]`, Nota → `[[Notes]]`
 
-Uma unica linha, sem texto extra.
+**3. Cross-links somente para dependencias reais.** Na duvida, nao linkar.
 
-**3. Cross-links — somente dependencias reais:**
-- Adicionar `[[outro-arquivo]]` APENAS se este arquivo cria, modifica, ou depende diretamente dele
-- Exemplo valido: `create-routine` linka `[[Routines]]` (cria arquivos la)
-- Exemplo invalido: uma rotina linkando `[[Tooling]]` por "usar ferramentas"
-- Na duvida, NAO linkar. O grafo fica mais limpo com menos links falsos.
+**4. Atualizar o index da pasta** com `- [[novo-arquivo]] — descricao`
 
-**4. Atualizar o index da pasta:**
-- Editar o index relevante e adicionar `- [[novo-arquivo]] — descricao curta`
+**5. Registrar no Journal do dia** (sem criar wikilink para o arquivo novo — mencionar em texto plano)
 
-**5. Registrar no Journal do dia:**
-- Appendar entrada com `[[link-para-novo-arquivo]]`
+### Wikilinks — quando usar
 
-**Resultado no Graph View:**
-```
-README → [Index] → [Folha]
-```
+**Criar link quando:**
+- Primeira linha do body → `[[IndexPai]]`
+- Referenciar pasta interna de agente → `[[{id}/Journal|Journal]]`
+- Skill depende de outro arquivo → `[[arquivo-alvo]]`
 
-### Wikilinks — sintaxe
-
-Usar `[[wikilinks]]` do Obsidian.
+**NAO criar link quando:**
+- Mencionar algo no Journal (usar texto plano, nao `[[link]]`)
+- Referenciar Tooling de dentro de folhas
+- Mencionar algo "relacionado" que nao eh dependencia real
+- Citar uma entidade por contexto sem dependencia
 
 **Sintaxe:**
-- Referencia a arquivo: `[[nome-do-arquivo]]` (sem pasta, sem extensao)
-- Referencia a secao: `[[nome-do-arquivo#secao]]`
-- Alias: `[[nome-tecnico|nome legivel]]`
-
-**Diretrizes de linkagem:**
-- Journal entries DEVEM citar toda entidade mencionada (com wikilinks)
-- Notas PODEM ter `## Relacionados` no final com links para outras notas (nunca para indexes)
-- Folhas linkam APENAS para seu index pai + dependencias reais
-- NAO linkar para Tooling de dentro de folhas — Tooling eh acessado via README
+- `[[nome-do-arquivo]]` — link simples
+- `[[pasta/subpasta/arquivo|Texto visivel]]` — com alias (para referenciar pastas)
+- `[[nome#secao]]` — para secoes
 
 ### Journal (`vault/Journal/`)
 
-Um arquivo por dia: `YYYY-MM-DD.md`. **Append-only** — nunca sobrescrever.
+Um arquivo por dia: `YYYY-MM-DD.md`. Append-only.
 
-Ao criar o arquivo do dia:
 ```yaml
 ---
 title: "Journal YYYY-MM-DD"
-description: Registro do dia YYYY-MM-DD. Conversas, decisoes, rotinas executadas.
+description: Registro do dia YYYY-MM-DD.
 type: journal
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
@@ -277,74 +251,56 @@ tags: [journal]
 [[Journal]]
 ```
 
-Formato de cada entrada (appendar ao final):
+Formato de entrada:
 ```markdown
 ## HH:MM — Resumo curto
 
-- Topicos discutidos (com [[wikilinks]] para notas relevantes)
+- Topicos discutidos
 - Decisoes tomadas
 - Acoes realizadas
-- Skills executadas → [[skill-nome]]
-- Rotinas executadas → [[rotina-nome]]
-- Notas criadas → [[nota-nome]]
 
 ---
 ```
 
-**Toda entrada do Journal DEVE conter wikilinks** para as entidades mencionadas. O Journal eh o hub temporal do grafo — ele conecta tudo que aconteceu no dia.
+**Journal NAO cria wikilinks para entidades mencionadas.** O formato do arquivo e sua localizacao na pasta sao suficientes para o grafo. Isso mantem o chart limpo.
 
-Consolidacao acontece automaticamente quando o usuario usa `/new`, `/switch`, ou `/important` no Telegram. Se o bot enviar um prompt de consolidacao, registre tudo que foi relevante na sessao.
+Para journals de agentes, primeira linha: `[[{agent-id}/Journal|Journal]]`
 
 ### Notes (`vault/Notes/`)
 
 Knowledge base incremental. Cada nota eh um no do grafo.
 
-- Nomes em kebab-case: `como-funciona-x.md`
-- Nunca deletar conteudo existente — adicionar ou atualizar secoes
-- Tags no frontmatter para busca rapida
-- **Sempre** incluir wikilinks para notas relacionadas em uma secao `## Relacionados` no final
-- Atualizar o campo `updated` no frontmatter ao modificar
-
-Criar notas quando:
-- O usuario compartilha conhecimento duravel (nao efemero)
-- Uma decisao arquitetural eh tomada
-- Um padrao ou processo eh estabelecido
-- Uma referencia externa importante eh descoberta
+- Nomes em kebab-case
+- Nunca deletar conteudo — adicionar ou atualizar
+- Tags no frontmatter para busca
+- Primeira linha: `[[Notes]]`
 
 ### Skills (`vault/Skills/`)
 
-Definicoes de tarefas recorrentes. Cada skill eh um .md executavel.
+Cada skill eh um .md com instrucoes procedurais.
 
 ```yaml
 ---
 title: Nome da Skill
-description: Frase curta sobre o que a skill faz e quando eh relevante.
+description: O que faz e quando usar.
 type: skill
-created: YYYY-MM-DD
-updated: YYYY-MM-DD
 trigger: "quando o usuario pedir X"
 tags: [skill, categoria]
 ---
 
-# Nome da Skill
-
 [[Skills]]
 
 ## Objetivo
-O que esta skill faz e quando usar.
-
-## Dependencias
-- [[arquivo-do-vault]] — somente se a skill cria/modifica/depende deste arquivo
+...
 
 ## Passos
 1. ...
-2. ...
 
 ## Notas
-Observacoes, edge cases, historico de execucoes.
+...
 ```
 
-**Toda execucao de skill DEVE gerar um registro no Journal do dia** com link `[[skill-nome]]`.
+Cross-links somente para pastas-alvo da skill (ex: `[[Routines]]` se a skill cria rotinas).
 
 ### Routines (`vault/Routines/`)
 
@@ -394,43 +350,54 @@ Prompt que sera enviado ao Claude Code...
 
 ### Agents (`vault/Agents/`)
 
-Agentes especializados com workspace proprio. Cada agente eh um diretorio com CLAUDE.md, metadados, e journal.
+Agentes especializados com workspace proprio. Cada agente eh um diretorio com 3 arquivos + Journal.
 
-Estrutura de um agente:
 ```
 vault/Agents/{id}/
-  agent.md       # Metadados (frontmatter parseado pelo bot: nome, modelo, icone)
-  CLAUDE.md      # Instrucoes do agente (lido automaticamente pelo Claude Code)
-  Journal/       # Journal proprio do agente (YYYY-MM-DD.md)
+  agent.md       # Metadados (frontmatter parseado pelo bot, body vazio)
+  CLAUDE.md      # Instrucoes para Claude Code (SEM frontmatter, SEM wikilinks)
+  {id}.md        # Hub de links internos do agente no grafo
+  Journal/       # Journal proprio do agente
 ```
 
-**Como funciona o workspace:**
-Quando um agente esta ativo, o `cwd` do Claude Code muda para `vault/Agents/{id}/`. O Claude Code le automaticamente:
-1. `vault/Agents/{id}/CLAUDE.md` — instrucoes do agente
-2. `~/claude-bot/CLAUDE.md` — regras do vault, grafo, frontmatter (este arquivo)
-
-O CLAUDE.md do agente NAO precisa repetir regras do vault. Ele contem apenas personalidade, instrucoes especificas, e especializacoes.
-
-**O `agent.md`** contem metadados em frontmatter que o bot parseia:
+**agent.md** — metadados parseados pelo bot. Body vazio:
 ```yaml
 ---
-title: Nome do Agente
-description: Frase curta sobre o agente.
+title: Nome
+description: Descricao curta
 type: agent
 name: Nome Legivel
-personality: Tom e estilo de comunicacao.
+personality: Tom e estilo
 model: sonnet
 icon: "🤖"
 ---
-
-[[Agents]]
 ```
 
-**Criacao de agentes:**
-- Via Telegram: `/agent new` dispara a skill [[create-agent]]
-- Selecao: `/agent` mostra teclado com agentes disponiveis
+**CLAUDE.md** — instrucoes lidas pelo Claude Code quando o agente esta ativo. NAO tem frontmatter. NAO tem wikilinks. Contem apenas:
+```markdown
+# {Nome} {emoji}
 
-**Principio:** agentes sao nos do grafo, nao silos. O agent.md linka para [[Agents]], que conecta ao hub do vault.
+## Personalidade
+{descricao do tom e estilo}
+
+## Instrucoes
+- Registrar conversas no Journal proprio: Journal/YYYY-MM-DD.md
+- {instrucoes especificas}
+
+## Especializacoes
+- {areas de foco}
+```
+
+**{id}.md** — hub do agente no grafo Obsidian. Contem links internos:
+```markdown
+[[{id}/Journal|Journal]]
+[[agent]]
+[[CLAUDE]]
+```
+
+**Workspace:** quando ativo, `cwd` muda para `vault/Agents/{id}/`. Claude le o CLAUDE.md do agente + o CLAUDE.md do projeto (hierarquia automatica).
+
+**Criacao:** `/agent new` ou `/agent import` no Telegram.
 
 ### Images (`vault/Images/`)
 
