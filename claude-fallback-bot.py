@@ -49,6 +49,7 @@ CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve
 
 DATA_DIR = Path.home() / ".claude-bot"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
+CONTEXTS_FILE = DATA_DIR / "contexts.json"
 LOG_FILE = DATA_DIR / "bot.log"
 
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
@@ -935,6 +936,7 @@ class ClaudeTelegramBot:
         # Thread contexts: keyed by (chat_id, thread_id)
         self._contexts: Dict[tuple, ThreadContext] = {}
         self._contexts_lock = threading.Lock()
+        self._load_contexts()
 
         # Active context (set per-message in the polling loop)
         self._ctx: Optional[ThreadContext] = None
@@ -945,6 +947,42 @@ class ClaudeTelegramBot:
         self.scheduler.start()
 
         logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
+
+    def _load_contexts(self) -> None:
+        """Restore context→session mappings from disk."""
+        if not CONTEXTS_FILE.exists():
+            return
+        try:
+            data = json.loads(CONTEXTS_FILE.read_text(encoding="utf-8"))
+            for entry in data.get("contexts", []):
+                cid = entry.get("chat_id", "")
+                tid = entry.get("thread_id")
+                sname = entry.get("session_name")
+                if cid and sname:
+                    ctx = ThreadContext(chat_id=cid, thread_id=tid)
+                    ctx.session_name = sname
+                    self._contexts[(cid, tid)] = ctx
+            logger.info("Loaded %d contexts from disk", len(self._contexts))
+        except Exception as exc:
+            logger.error("Failed to load contexts: %s", exc)
+
+    def _save_contexts(self) -> None:
+        """Persist context→session mappings to disk."""
+        try:
+            entries = []
+            with self._contexts_lock:
+                for (cid, tid), ctx in self._contexts.items():
+                    entries.append({
+                        "chat_id": cid,
+                        "thread_id": tid,
+                        "session_name": ctx.session_name,
+                    })
+            data = {"contexts": entries}
+            tmp = CONTEXTS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(CONTEXTS_FILE)
+        except Exception as exc:
+            logger.error("Failed to save contexts: %s", exc)
 
     def _get_context(self, chat_id: str, thread_id: Optional[int] = None) -> ThreadContext:
         """Get or create a ThreadContext for a chat/topic pair."""
@@ -958,6 +996,7 @@ class ClaudeTelegramBot:
                     self.sessions.create(name)
                 ctx.session_name = name
                 self._contexts[key] = ctx
+                self._save_contexts()
             return self._contexts[key]
 
     def _is_authorized(self, chat_id: str) -> bool:
@@ -1434,7 +1473,10 @@ class ClaudeTelegramBot:
             buttons.append({"text": f"{icon} {name}", "callback_data": f"agent:{a['_id']}"})
         # Build rows of 2 buttons each
         rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
-        rows.append([{"text": "❌ Nenhum", "callback_data": "agent:none"}])
+        rows.append([
+            {"text": "➕ Criar novo", "callback_data": "agent:create"},
+            {"text": "❌ Nenhum", "callback_data": "agent:none"},
+        ])
         markup = {"inline_keyboard": rows}
         self.send_message("Escolha o agente:", reply_markup=markup)
 
