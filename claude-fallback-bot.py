@@ -5,6 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
+import http.server
 import json
 import logging
 import os
@@ -59,6 +60,7 @@ ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 
 DEFAULT_TIMEOUT = 600
+CONTROL_PORT = 27182
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
@@ -945,6 +947,11 @@ class ClaudeTelegramBot:
         self.scheduler = RoutineScheduler(self.routine_state, self._enqueue_routine)
         self.scheduler.start()
 
+        # Tracks active routine contexts for HTTP stop requests
+        self._routine_contexts: Dict[str, "ThreadContext"] = {}
+        self._routine_contexts_lock = threading.Lock()
+
+        self._start_control_server()
         logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
 
     def _load_contexts(self) -> None:
@@ -1038,8 +1045,25 @@ class ClaudeTelegramBot:
                 # Create a default context
                 default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else "0"
                 ctx = self._get_context(default_chat, None)
-        with ctx.pending_lock:
-            ctx.pending.append(task)
+
+        def _run_routine() -> None:
+            # Wait for any active runner to finish before executing (up to 10 min)
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                runner = ctx.runner
+                if runner is None or not runner.running:
+                    break
+                time.sleep(5)
+            with self._routine_contexts_lock:
+                self._routine_contexts[task.name] = ctx
+            try:
+                self._ctx = ctx
+                self._execute_routine_task(task)
+            finally:
+                with self._routine_contexts_lock:
+                    self._routine_contexts.pop(task.name, None)
+
+        threading.Thread(target=_run_routine, daemon=True, name=f"routine-{task.name}").start()
 
     # -- Telegram helpers --
 
@@ -1634,7 +1658,9 @@ class ClaudeTelegramBot:
             return s
         return self._get_session()
 
-    def _run_claude_prompt(self, prompt: str, _retry: bool = False) -> None:
+    def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
+                          no_output_timeout: int = 90,
+                          max_total_timeout: int = 600) -> None:
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -1679,7 +1705,7 @@ class ClaudeTelegramBot:
 
         # Start watchdog thread
         watchdog_thread = threading.Thread(
-            target=self._watchdog, args=(runner,), daemon=True)
+            target=self._watchdog, args=(runner, no_output_timeout, max_total_timeout), daemon=True)
         watchdog_thread.start()
 
         # Stream updates while runner is active
@@ -1691,9 +1717,11 @@ class ClaudeTelegramBot:
         # Process queued messages for this context
         self._process_pending()
 
-    def _watchdog(self, runner: ClaudeRunner) -> None:
-        NO_OUTPUT_TIMEOUT = 90
-        MAX_TOTAL_TIMEOUT = 600
+    def _watchdog(self, runner: ClaudeRunner,
+                  no_output_timeout: int = 90,
+                  max_total_timeout: int = 600) -> None:
+        NO_OUTPUT_TIMEOUT = no_output_timeout
+        MAX_TOTAL_TIMEOUT = max_total_timeout
         _notified_first_output = False
 
         while runner.running:
@@ -1884,14 +1912,21 @@ class ClaudeTelegramBot:
             session.workspace = str(AGENTS_DIR / task.agent)
         changed = (session.model != original_model or session.agent != original_agent
                     or session.workspace != original_workspace)
+
+        # Routines always run with a fresh session (no prior conversation context)
+        original_session_id = session.session_id
+        session.session_id = None
+
         if changed:
             self.sessions.save()
 
         prompt = f"[ROTINA: {task.name} | {task.time_slot}]\n\n{task.prompt}"
 
         self.send_message(f"🔄 Executando rotina: *{task.name}* ({task.time_slot})")
+        saved_timeout = self.timeout_seconds
+        self.timeout_seconds = 300  # 5 min inactivity for routines
         try:
-            self._run_claude_prompt(prompt)
+            self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200)
             # Check if there was an error
             if self.runner.error_text:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", self.runner.error_text[:200])
@@ -1900,11 +1935,14 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.error("Routine %s failed: %s", task.name, exc)
             self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
+        finally:
+            self.timeout_seconds = saved_timeout
 
-        # Restore original model, agent, and workspace
+        # Restore original model, agent, workspace, and session_id
         session.model = original_model
         session.agent = original_agent
         session.workspace = original_workspace
+        session.session_id = original_session_id
         if changed:
             self.sessions.save()
 
@@ -2122,6 +2160,72 @@ class ClaudeTelegramBot:
         ]
         self.tg_request("setMyCommands", {"commands": commands})
 
+    def _start_control_server(self) -> None:
+        bot = self
+
+        class _Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body = json.loads(self.rfile.read(length)) if length else {}
+                    if self.path == "/routine/run":
+                        name = body.get("name", "")
+                        time_slot = body.get("time_slot", "now")
+                        md_file = ROUTINES_DIR / f"{name}.md"
+                        if not md_file.exists():
+                            self._respond(404, {"error": "routine not found"})
+                            return
+                        fm, routine_body = get_frontmatter_and_body(md_file)
+                        if not fm or not routine_body:
+                            self._respond(400, {"error": "invalid routine file"})
+                            return
+                        task = RoutineTask(
+                            name=name,
+                            prompt=routine_body,
+                            model=str(fm.get("model", "sonnet")),
+                            time_slot=time_slot,
+                            agent=fm.get("agent"),
+                        )
+                        bot.routine_state.set_status(name, time_slot, "running")
+                        bot._enqueue_routine(task)
+                        self._respond(200, {"ok": True})
+                    elif self.path == "/routine/stop":
+                        name = body.get("name", "")
+                        with bot._routine_contexts_lock:
+                            ctx = bot._routine_contexts.get(name)
+                        if ctx and ctx.runner and ctx.runner.running:
+                            ctx.runner.cancel()
+                            self._respond(200, {"ok": True})
+                        else:
+                            self._respond(404, {"error": "routine not running"})
+                    else:
+                        self._respond(404, {"error": "unknown endpoint"})
+                except Exception as exc:
+                    logger.error("Control server error: %s", exc)
+                    self._respond(500, {"error": str(exc)})
+
+            def _respond(self, code, data):
+                body = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # suppress default HTTP logging
+
+        try:
+            server = http.server.HTTPServer(("127.0.0.1", CONTROL_PORT), _Handler)
+            threading.Thread(target=server.serve_forever, daemon=True, name="control-server").start()
+            logger.info("Control server listening on 127.0.0.1:%d", CONTROL_PORT)
+        except Exception as exc:
+            logger.error("Failed to start control server: %s", exc)
+
+    def _notify_startup(self) -> None:
+        for cid in self.authorized_ids:
+            self.tg_request("sendMessage", {"chat_id": cid, "text": "🟢 Bot online"})
+
     def run(self) -> None:
         logger.info("Starting bot polling loop...")
         logger.info("Registering commands...")
@@ -2129,6 +2233,7 @@ class ClaudeTelegramBot:
             self._register_commands()
         except Exception as exc:
             logger.error("Failed to register commands: %s", exc)
+        self._notify_startup()
         logger.info("Entering polling loop")
         while not self._stop_event.is_set():
             try:

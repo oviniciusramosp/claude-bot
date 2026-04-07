@@ -12,6 +12,8 @@ import json
 import os
 import subprocess
 import time
+import urllib.error
+import urllib.request
 
 # Set process name for Activity Monitor
 try:
@@ -91,6 +93,7 @@ AGENTS_DIR = os.path.join(VAULT_DIR, "Agents")
 ROUTINES_STATE_DIR = os.path.join(DATA_DIR, "routines-state")
 
 DAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+CONTROL_PORT = 27182
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +299,25 @@ def get_today_routines():
 
 
 # ---------------------------------------------------------------------------
+# Control server helpers
+# ---------------------------------------------------------------------------
+
+def _control_post(endpoint: str, data: dict) -> bool:
+    """POST to the bot's HTTP control server. Returns True on success."""
+    try:
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{CONTROL_PORT}{endpoint}",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------------------
 # Bot lifecycle
 # ---------------------------------------------------------------------------
 
@@ -401,7 +423,25 @@ class ClaudeBotMenuBar(rumps.App):
             self.menu.add(item_with_icon(f"Routines — {time.strftime('%d %b')}", "calendar.badge.clock", color="blue"))
             for r in routines:
                 sym, col = _icons.get(r["status"], ("circle", "gray"))
-                self.menu.add(item_with_icon(f"  {r['time']}  {r['title']}", sym, color=col))
+                header = item_with_icon(f"  {r['time']}  {r['title']}", sym, color=col)
+                # Run Now action
+                def _make_run_cb(name, time_slot):
+                    def _cb(_):
+                        _control_post("/routine/run", {"name": name, "time_slot": time_slot})
+                    return _cb
+                run_item = item_with_icon("    ▶ Run Now", "play.circle", color="green",
+                                         callback=_make_run_cb(r["name"], r["time"]))
+                header.update({run_item.title: run_item})
+                # Stop action — only useful when running
+                if r["status"] == "running":
+                    def _make_stop_cb(name):
+                        def _cb(_):
+                            _control_post("/routine/stop", {"name": name})
+                        return _cb
+                    stop_item = item_with_icon("    ⏹ Stop", "stop.circle", color="red",
+                                              callback=_make_stop_cb(r["name"]))
+                    header.update({stop_item.title: stop_item})
+                self.menu.add(header)
             self.menu.add(rumps.separator)
 
         # ── Agents list ──
