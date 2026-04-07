@@ -1842,24 +1842,7 @@ class ClaudeTelegramBot:
         if not self._is_authorized(chat_id):
             return
 
-        # Extract thread_id for forum topics
-        thread_id = msg.get("message_thread_id")
-        is_new_context = (chat_id, thread_id) not in self._contexts
-        self._ctx = self._get_context(chat_id, thread_id)
-
-        # Onboarding: first message in a new group topic → show agent picker or offer to create
-        if is_new_context and thread_id and chat_type in ("group", "supergroup"):
-            agents = list_agents()
-            if agents:
-                self.cmd_agent_keyboard()
-            else:
-                markup = {"inline_keyboard": [[
-                    {"text": "🤖 Criar agente", "callback_data": "agent:create"},
-                    {"text": "⏭ Sem agente", "callback_data": "agent:none"},
-                ]]}
-                self.send_message(
-                    "👋 Novo tópico detectado. Escolha um agente para este canal:",
-                    reply_markup=markup)
+        # Context and onboarding already handled in polling loop
 
         user_msg_id = msg.get("message_id")
 
@@ -1967,8 +1950,25 @@ class ClaudeTelegramBot:
                                 logger.debug("Ignoring message from unauthorized chat %s", chat_id)
                                 continue
 
+                        # Check if this is a new topic before creating context
+                        is_new_topic = (chat_id, thread_id) not in self._contexts
+
                         # Set context for this message
                         self._ctx = self._get_context(chat_id, thread_id)
+
+                        # Onboarding: first message in a new group topic
+                        if is_new_topic and thread_id and chat_type in ("group", "supergroup"):
+                            agents = list_agents()
+                            if agents:
+                                self.cmd_agent_keyboard()
+                            else:
+                                markup = {"inline_keyboard": [[
+                                    {"text": "🤖 Criar agente", "callback_data": "agent:create"},
+                                    {"text": "⏭ Sem agente", "callback_data": "agent:none"},
+                                ]]}
+                                self.send_message(
+                                    "👋 Novo tópico! Escolha um agente para este canal:",
+                                    reply_markup=markup)
 
                         # Process update — each topic runs independently
                         self._process_update(update)
