@@ -1591,12 +1591,21 @@ class PipelineExecutor:
                 if self._cancelled.is_set():
                     runner.cancel()
                     break
-                # Check inactivity
+                # Check inactivity — only trigger if the process itself has exited
+                # but the thread is still alive (stuck cleanup), OR if the process
+                # is alive but genuinely idle (no stdout AND process not waiting on API).
+                # A live process (poll() is None) means the agent is reasoning or
+                # waiting for an API response — that's NOT idle.
                 idle = time.time() - runner.last_activity
                 if idle > step.inactivity_timeout and runner.last_activity > runner.start_time:
-                    runner.cancel()
-                    raise TimeoutError(
-                        f"Step {step.id} idle for {int(idle)}s (inactivity limit: {step.inactivity_timeout}s)")
+                    proc = runner.process
+                    if proc and proc.poll() is None:
+                        # Process alive = agent reasoning / API call in flight — not idle
+                        pass
+                    else:
+                        runner.cancel()
+                        raise TimeoutError(
+                            f"Step {step.id} idle for {int(idle)}s (inactivity limit: {step.inactivity_timeout}s)")
                 time.sleep(1)
             if runner_thread.is_alive() or runner.running:
                 elapsed = int(time.time() - runner.start_time)
@@ -3070,10 +3079,16 @@ class ClaudeTelegramBot:
                     break
                 elapsed = now - runner.last_activity
                 if elapsed > self.timeout_seconds:
-                    logger.warning("Activity timeout after %.0fs of silence", elapsed)
-                    self.send_message(f"⏰ Timeout — Claude ficou {int(elapsed)}s sem atividade. Cancelando...")
-                    runner.cancel()
-                    break
+                    # Only trigger if process is dead — a live process means
+                    # the agent is reasoning or waiting for API response
+                    proc = runner.process
+                    if proc and proc.poll() is None:
+                        pass  # process alive = agent working, not idle
+                    else:
+                        logger.warning("Activity timeout after %.0fs of silence", elapsed)
+                        self.send_message(f"⏰ Timeout — Claude ficou {int(elapsed)}s sem atividade. Cancelando...")
+                        runner.cancel()
+                        break
 
     def _update_reaction(self, runner: ClaudeRunner) -> None:
         ctx = self._ctx
