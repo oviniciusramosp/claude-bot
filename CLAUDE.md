@@ -100,6 +100,9 @@ Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sess
 | `/delete <name>` | Delete session |
 | `/run [name]` | Manually trigger a routine/pipeline |
 | `/compact` | Auto-compact context |
+| `/cost` | Token usage and cost for current session |
+| `/doctor` | Check Claude Code installation health |
+| `/btw <msg>` | Inject message to running Claude process (native); falls back to queue |
 | `/stop` | Cancel running task |
 | `/timeout <sec>` | Change timeout |
 | `/workspace <path>` | Change working directory |

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.6.0"  # routine detail redesign, flat sections, real usage API
+BOT_VERSION = "2.6.0"  # routine detail redesign, real usage API; native /btw injection, /cost, /doctor
 
 import http.server
 import json
