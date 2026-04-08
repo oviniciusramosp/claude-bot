@@ -48,8 +48,8 @@ struct SidebarView: View {
         case .dashboard:
             return appState.isRunning ? "Running" : nil
         case .agents:
-            let c = appState.agents.count
-            return c > 0 ? "\(c)" : nil
+            let c = appState.agents.count + 1 // +1 for Main agent
+            return "\(c)"
         case .routines:
             let c = appState.routines.count
             return c > 0 ? "\(c)" : nil

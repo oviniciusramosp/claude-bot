@@ -227,7 +227,7 @@ struct ClaudeUsageCard: View {
     /// Stat chips — icons match sidebar (Agents, Routines, Skills)
     private var statChips: some View {
         HStack(spacing: 5) {
-            DashboardChip(symbol: SidebarItem.agents.symbol, value: appState.agents.count)
+            DashboardChip(symbol: SidebarItem.agents.symbol, value: appState.agents.count + 1) // +1 Main
             DashboardChip(symbol: SidebarItem.routines.symbol, value: appState.routines.count)
             DashboardChip(symbol: SidebarItem.skills.symbol, value: appState.skills.count)
         }

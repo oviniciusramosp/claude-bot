@@ -251,7 +251,7 @@ Componentes compartilhados:
 
 | Componente | Descricao |
 |------------|-----------|
-| `GlassCard` | Container principal com `.regularMaterial` + borda 0.5pt |
+| `GlassCard` | Container principal com `.ultraThinMaterial` + borda 0.5pt |
 | `SectionCard` | GlassCard com cabecalho (titulo + SF Symbol) |
 | `SettingRow` | Label `.callout` + controle alinhado a direita |
 | `ModelBadge` | Badge colorido por modelo (opus=purple, haiku=green, outros=blue) |
@@ -264,10 +264,16 @@ Escala de spacing: `Spacing.xs(4) sm(8) md(12) lg(16) xl(20) xxl(24)`
 
 ### Sidebar
 
-Agrupada em 3 sections:
+Colapsavel. Agrupada em 3 sections:
 - **Overview** — Dashboard
-- **Manage** — Agents, Routines, Skills, Sessions
-- **System** — Logs, Settings
+- **Manage** — Agents, Routines, Skills
+- **System** — Sessions, Logs, Settings, Changelog
+
+Cada item mostra um badge com contagem (Agents, Routines, Skills) ou status (Dashboard: "Running", Logs: "⚠ N"). Changelog mostra a versao (vX.Y.Z).
+
+### Agents
+
+O **Main Agent** eh o agente padrao do bot (sem workspace proprio). Ele conta como agente nas contagens da sidebar e dos stat chips do Dashboard. A contagem total de agentes eh sempre `appState.agents.count + 1` (custom agents + Main).
 
 ## Vault
 
