@@ -3154,7 +3154,7 @@ class ClaudeTelegramBot:
             if not runner.running:
                 break
             now = time.time()
-            has_output = runner.last_activity > runner.start_time
+            has_output = bool(runner.accumulated_text or runner.result_text or runner.tool_log)
 
             if has_output and not _notified_first_output:
                 _notified_first_output = True
