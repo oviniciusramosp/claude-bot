@@ -3,6 +3,19 @@ import SwiftUI
 struct SkillListView: View {
     @EnvironmentObject var appState: AppState
     @State private var selectedSkill: Skill? = nil
+    @State private var searchText = ""
+    @State private var showCreateSheet = false
+
+    private var filteredSkills: [Skill] {
+        if searchText.isEmpty { return appState.skills }
+        let q = searchText.lowercased()
+        return appState.skills.filter {
+            $0.title.lowercased().contains(q)
+            || $0.description.lowercased().contains(q)
+            || $0.trigger.lowercased().contains(q)
+            || $0.tags.contains { $0.lowercased().contains(q) }
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -12,14 +25,16 @@ struct SkillListView: View {
                     title: "No Skills",
                     subtitle: "Skills are markdown files in vault/Skills/."
                 )
+            } else if filteredSkills.isEmpty {
+                EmptyStateView(
+                    symbol: "magnifyingglass",
+                    title: "No Results",
+                    subtitle: "No skills match \"\(searchText)\"."
+                )
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.flexible(), spacing: Spacing.xl),
-                              GridItem(.flexible(), spacing: Spacing.xl)],
-                    spacing: Spacing.xl
-                ) {
-                    ForEach(appState.skills) { skill in
-                        SkillCard(skill: skill)
+                VStack(spacing: Spacing.lg) {
+                    ForEach(filteredSkills) { skill in
+                        SkillRow(skill: skill)
                             .onTapGesture { selectedSkill = skill }
                     }
                 }
@@ -28,40 +43,38 @@ struct SkillListView: View {
         }
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Skills")
+        .searchable(text: $searchText, placement: .toolbar, prompt: "Search skills")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    showCreateSheet = true
+                } label: {
+                    Label("New Skill", systemImage: "plus")
+                }
+            }
+        }
         .sheet(item: $selectedSkill) { skill in
             SkillDetailView(skill: skill)
+        }
+        .sheet(isPresented: $showCreateSheet) {
+            SkillFormSheet()
         }
     }
 }
 
-struct SkillCard: View {
+// MARK: - Skill Row
+
+struct SkillRow: View {
     var skill: Skill
 
     var body: some View {
         GlassCard(padding: Spacing.xl) {
-            VStack(alignment: .leading, spacing: Spacing.md) {
-                // Header: icon + title
-                HStack {
-                    Image(systemName: SidebarItem.skills.symbol)
-                        .font(.system(size: 24))
-                        .foregroundStyle(Color.statusBlue)
-                    Spacer()
-                    if !skill.tags.isEmpty {
-                        HStack(spacing: 4) {
-                            ForEach(skill.tags.prefix(2), id: \.self) { tag in
-                                Text(tag)
-                                    .font(.system(size: 10))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.black.opacity(0.05))
-                                    .clipShape(Capsule())
-                                    .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
-                            }
-                        }
-                    }
-                }
+            HStack(spacing: Spacing.md) {
+                Image(systemName: SidebarItem.skills.symbol)
+                    .font(.system(size: 20))
+                    .foregroundStyle(Color.statusBlue)
+                    .frame(width: 28)
 
-                // Title + description
                 VStack(alignment: .leading, spacing: Spacing.xs) {
                     Text(skill.title)
                         .font(.system(size: 15, weight: .bold))
@@ -74,22 +87,153 @@ struct SkillCard: View {
                             .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                             .lineLimit(2)
                     }
+
+                    if !skill.trigger.isEmpty {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color.statusBlue)
+                            Text(skill.trigger)
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+                                .lineLimit(1)
+                        }
+                    }
                 }
 
-                // Trigger
-                if !skill.trigger.isEmpty {
+                Spacer()
+
+                if !skill.tags.isEmpty {
                     HStack(spacing: 4) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.statusBlue)
-                        Text(skill.trigger)
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
-                            .lineLimit(1)
+                        ForEach(skill.tags.prefix(2), id: \.self) { tag in
+                            Text(tag)
+                                .font(.system(size: 10))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.black.opacity(0.05))
+                                .clipShape(Capsule())
+                                .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+                        }
                     }
                 }
             }
         }
         .contentShape(Rectangle())
+    }
+}
+
+// MARK: - Skill Create Form
+
+struct SkillFormSheet: View {
+    @EnvironmentObject var appState: AppState
+    @Environment(\.dismiss) var dismiss
+
+    @State private var title = ""
+    @State private var skillId = ""
+    @State private var description = ""
+    @State private var trigger = ""
+    @State private var instructions = ""
+    @State private var isSaving = false
+
+    private var canCreate: Bool {
+        !title.isEmpty && !instructions.isEmpty && !isSaving
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: 0) {
+                    // Identity
+                    VStack(alignment: .leading, spacing: Spacing.md) {
+                        TextField("Skill Title", text: $title)
+                            .font(.system(size: 17, weight: .bold))
+                            .textFieldStyle(.plain)
+                            .onChange(of: title) { _, v in
+                                skillId = v.lowercased()
+                                    .replacingOccurrences(of: " ", with: "-")
+                                    .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+                            }
+                        if !skillId.isEmpty {
+                            Text("\(skillId).md")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                        TextField("Description", text: $description,
+                                  prompt: Text("What does this skill do?"))
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
+                            .textFieldStyle(.plain)
+                    }
+                    .padding(.horizontal, Spacing.xl)
+                    .padding(.vertical, Spacing.lg)
+
+                    Divider().padding(.horizontal, Spacing.xl)
+
+                    // Trigger
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("Trigger")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                        TextField("When should this skill activate?", text: $trigger)
+                            .font(.system(size: 13))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    .padding(.horizontal, Spacing.xl)
+                    .padding(.vertical, Spacing.lg)
+
+                    Divider().padding(.horizontal, Spacing.xl)
+
+                    // Instructions body
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("Instructions")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                        TextEditor(text: $instructions)
+                            .font(.system(.callout, design: .default))
+                            .frame(minHeight: 200)
+                            .scrollContentBackground(.hidden)
+                            .padding(Spacing.sm)
+                            .background(Color.primary.opacity(0.03))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                            )
+                    }
+                    .padding(.horizontal, Spacing.xl)
+                    .padding(.vertical, Spacing.lg)
+                }
+            }
+
+            Divider()
+
+            // Footer
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.bordered)
+                Button("Create") {
+                    isSaving = true
+                    let todayStr = {
+                        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+                        return f.string(from: Date())
+                    }()
+                    let skill = Skill(
+                        id: skillId, title: title, description: description,
+                        trigger: trigger, tags: ["skill"],
+                        created: todayStr, updated: todayStr, body: instructions
+                    )
+                    Task {
+                        try? await appState.saveSkill(skill)
+                        isSaving = false
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canCreate)
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.md)
+        }
+        .frame(minWidth: 500, minHeight: 480)
+        .background(Color(.windowBackgroundColor))
     }
 }

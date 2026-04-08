@@ -261,6 +261,11 @@ final class AppState: ObservableObject {
         } catch {}
     }
 
+    func saveSkill(_ skill: Skill) async throws {
+        try await vaultService?.saveSkill(skill)
+        await loadSkills()
+    }
+
     func deleteSkill(id: String) async throws {
         try await vaultService?.deleteSkill(id: id)
         await loadSkills()

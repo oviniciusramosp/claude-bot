@@ -344,6 +344,34 @@ actor VaultService {
         return skills.sorted { $0.title < $1.title }
     }
 
+    func saveSkill(_ skill: Skill) throws {
+        let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
+        try fm.createDirectory(at: skillsURL, withIntermediateDirectories: true)
+
+        let yamlLines = [
+            "title: \"\(skill.title)\"",
+            "description: \"\(skill.description)\"",
+            "trigger: \"\(skill.trigger)\"",
+            "tags: [\(skill.tags.map { "\"\($0)\"" }.joined(separator: ", "))]",
+            "created: \"\(skill.created.isEmpty ? today() : skill.created)\"",
+            "updated: \"\(today())\""
+        ]
+
+        let content = "---\n\(yamlLines.joined(separator: "\n"))\n---\n\n\(skill.body)"
+        let fileURL = skillsURL.appending(component: "\(skill.id).md")
+        try content.write(to: fileURL, atomically: true, encoding: .utf8)
+        try updateSkillsIndex(skill)
+    }
+
+    private func updateSkillsIndex(_ skill: Skill) throws {
+        let indexURL = vaultURL.appending(component: "Skills").appending(component: "Skills.md")
+        var content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+        if !content.contains("[[\(skill.id)]]") {
+            content += "\n- [[\(skill.id)]] — \(skill.description)"
+            try content.write(to: indexURL, atomically: true, encoding: .utf8)
+        }
+    }
+
     func deleteSkill(id: String) throws {
         let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
         let fileURL = skillsURL.appending(component: "\(id).md")
