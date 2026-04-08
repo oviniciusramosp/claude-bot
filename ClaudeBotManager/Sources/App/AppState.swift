@@ -136,6 +136,11 @@ final class AppState: ObservableObject {
                 loaded[i].todayExecutions = slots.values.sorted {
                     ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast)
                 }
+                // Load pipeline step definitions for expanded view
+                if loaded[i].isPipeline && loaded[i].pipelineStepDefs.isEmpty {
+                    loaded[i].pipelineStepDefs = await vs.loadPipelineStepDefs(
+                        routineId: loaded[i].id, promptBody: loaded[i].promptBody)
+                }
             }
             routines = loaded
         } catch {}
