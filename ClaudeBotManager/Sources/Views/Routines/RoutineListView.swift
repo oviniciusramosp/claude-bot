@@ -142,6 +142,14 @@ struct RoutineRow: View {
                         ModelBadge(model: routine.model)
                     }
 
+                    Button { onTap() } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Edit")
+
                     Toggle("", isOn: $isEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
@@ -239,8 +247,6 @@ struct RoutineRow: View {
                 }
             }
         } // GlassCard
-        .contentShape(Rectangle())
-        .onTapGesture { onTap() }
         .contextMenu { contextMenuItems }
     }
 
