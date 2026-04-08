@@ -131,6 +131,47 @@ Edit the constants at the top of `claude-fallback-bot.py`:
 - `STREAM_EDIT_INTERVAL` — seconds between Telegram message edits
 - `TYPING_INTERVAL` — seconds between typing indicators
 
+## Versionamento e Commits
+
+### Bumpar a versão
+
+O projeto usa **Semantic Versioning** (MAJOR.MINOR.PATCH). A versão vive em dois lugares — sempre atualizar os dois juntos:
+
+1. `claude-fallback-bot.py`, linha `BOT_VERSION = "X.Y.Z"` — adicionar comentário descritivo
+2. `ClaudeBotManager/Sources/App/Info.plist`, campo `CFBundleShortVersionString`
+
+Critérios:
+- **PATCH** (2.0.0 → 2.0.1) — bug fix, ajuste de prompt, mudança de configuração
+- **MINOR** (2.0.0 → 2.1.0) — nova feature, mudança de comportamento, refactoring estrutural
+- **MAJOR** (2.0.0 → 3.0.0) — breaking change na API do bot, redesign de sessões/workspace
+
+### Quando commitar
+
+**Commitar proativamente** após cada mudança coerente — não acumular alterações não relacionadas num commit só.
+
+Fazer commit imediatamente após:
+- Qualquer mudança em `claude-fallback-bot.py` (corrigir bug, adicionar comando, mudar constante)
+- Criação ou edição de skill, rotina, ou agent no vault
+- Mudança em CLAUDE.md (raiz ou vault)
+- Mudança em configuração (`.env`, plist, `settings.local.json`)
+
+Sequência padrão:
+```bash
+# 1. Bumpar versão (se mudança relevante)
+# 2. Verificar sintaxe
+python3 -m py_compile claude-fallback-bot.py
+
+# 3. Commitar
+git add claude-fallback-bot.py vault/CLAUDE.md CLAUDE.md  # arquivos específicos
+git commit -m "tipo: descrição concisa"
+```
+
+Formato da mensagem de commit:
+- `feat: adiciona comando /foo`
+- `fix: corrige timeout em sessões com agente`
+- `refactor: separa CLAUDE.md em dev/runtime`
+- `chore: bump version 2.0.0 → 2.1.0`
+
 ## ClaudeBotManager
 
 App macOS nativa (SwiftUI) em `ClaudeBotManager/`. Menu bar app para gerenciar o bot:
