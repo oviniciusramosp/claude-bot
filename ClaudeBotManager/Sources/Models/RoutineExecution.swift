@@ -91,4 +91,12 @@ struct StepExecution: Identifiable, Hashable, Sendable {
         if secs < 60 { return "\(secs)s" }
         return "\(secs / 60)m \(secs % 60)s"
     }
+
+    var liveDuration: String? {
+        guard let start = startedAt else { return nil }
+        let end = finishedAt ?? Date()
+        let secs = Int(end.timeIntervalSince(start))
+        if secs < 60 { return "\(secs)s" }
+        return "\(secs / 60)m \(secs % 60)s"
+    }
 }
