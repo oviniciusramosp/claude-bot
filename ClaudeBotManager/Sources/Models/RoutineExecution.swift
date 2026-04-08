@@ -56,6 +56,25 @@ struct RoutineExecution: Identifiable, Hashable, Sendable {
         if secs < 60 { return "\(secs)s" }
         return "\(secs / 60)m \(secs % 60)s"
     }
+
+    /// Duration for running executions (measures from startedAt to now)
+    var liveDuration: String? {
+        guard let start = startedAt else { return nil }
+        let end = finishedAt ?? Date()
+        let secs = Int(end.timeIntervalSince(start))
+        if secs < 60 { return "\(secs)s" }
+        return "\(secs / 60)m \(secs % 60)s"
+    }
+
+    /// Time label: "17:20" from startedAt, or timeSlot if no startedAt
+    var timeLabel: String {
+        if let start = startedAt {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm"
+            return f.string(from: start)
+        }
+        return timeSlot
+    }
 }
 
 struct StepExecution: Identifiable, Hashable, Sendable {

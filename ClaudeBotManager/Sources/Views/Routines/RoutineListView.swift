@@ -151,7 +151,7 @@ struct RoutineRow: View {
                         }
                 }
 
-                // Row 2: Schedule + Agent (always shown with emoji)
+                // Row 2: Schedule + Agent + Last execution info
                 HStack(spacing: Spacing.sm) {
                     Text(routine.schedule.times.joined(separator: ", "))
                         .font(.system(size: 10, design: .monospaced))
@@ -171,9 +171,39 @@ struct RoutineRow: View {
 
                     Spacer()
 
-                    Text(routine.nextExecutionDescription)
+                    // Show last execution time + duration
+                    if let exec = routine.lastExecution {
+                        if exec.status == .running, let dur = exec.liveDuration {
+                            Text("Running \(dur)")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(Color(red: 0.25, green: 0.56, blue: 0.98))
+                        } else if let dur = exec.liveDuration {
+                            Text("\(exec.timeLabel) · \(dur)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        } else {
+                            Text(exec.timeLabel)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
+                    } else {
+                        Text(routine.nextExecutionDescription)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+
+                // Row 2.5: Error detail (if last execution failed)
+                if let exec = routine.lastExecution, exec.status == .failed, let err = exec.error {
+                    Text(err)
                         .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(Color(red: 1.0, green: 0.220, blue: 0.235))
+                        .lineLimit(2)
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(red: 1.0, green: 0.220, blue: 0.235).opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
                 }
 
                 // Row 3: Pipeline timeline
