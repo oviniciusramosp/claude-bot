@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.4.0"  # weekly usage bar, sidebar version footer with git update
+BOT_VERSION = "2.6.0"  # routine detail redesign, flat sections, real usage API
 
 import http.server
 import json
@@ -117,6 +117,8 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/delete <nome>` — Apagar sessão
 • `/clear` — Resetar sessão atual
 • `/compact` — Compactar contexto
+• `/cost` — Custo e uso de tokens da sessão
+• `/doctor` — Verificar saúde da instalação
 
 ⚙️ *Modelo*
 • `/sonnet` — Usar Sonnet
@@ -130,7 +132,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/timeout <seg>` — Alterar timeout (padrão 600s)
 • `/workspace <path>` — Alterar diretório de trabalho
 • `/effort <low|medium|high>` — Nível de esforço de raciocínio
-• `/btw <msg>` — Enviar após conclusão atual
+• `/btw <msg>` — Injetar mensagem ao Claude em execução (nativo)
 
 📓 *Journal*
 • `/important` — Registrar pontos importantes da sessão no diário
@@ -151,6 +153,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • Envie mensagens de voz — serão transcritas e enviadas ao Claude
 
 💬 Qualquer outra mensagem é enviada como prompt ao Claude.
+💭 Mensagens enquanto Claude roda são injetadas automaticamente como `/btw`.
 📷 Envie fotos diretamente — o Claude irá analisá-las."""
 
 # ---------------------------------------------------------------------------
@@ -1027,6 +1030,7 @@ class ClaudeRunner:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
                 cwd=workspace,
                 text=True,
                 bufsize=1,
@@ -1146,6 +1150,18 @@ class ClaudeRunner:
                     proc.kill()
         except Exception as exc:
             logger.error("Error cancelling process: %s", exc)
+
+    def send_btw(self, message: str) -> bool:
+        """Inject a /btw message to the running Claude process via stdin.
+        Returns True if the write succeeded, False otherwise."""
+        if not self.running or not self.process or not self.process.stdin:
+            return False
+        try:
+            self.process.stdin.write(f"/btw {message}\n")
+            self.process.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, ValueError):
+            return False
 
     def get_snapshot(self) -> str:
         with self._lock:
@@ -2060,6 +2076,12 @@ class ClaudeTelegramBot:
     def cmd_compact(self) -> None:
         self._run_claude_prompt("/compact")
 
+    def cmd_cost(self) -> None:
+        self._run_claude_prompt("/cost")
+
+    def cmd_doctor(self) -> None:
+        self._run_claude_prompt("/doctor")
+
     def cmd_stop(self) -> None:
         if self.runner.running:
             self.runner.cancel()
@@ -2095,12 +2117,15 @@ class ClaudeTelegramBot:
     def cmd_btw(self, text: str) -> None:
         ctx = self._ctx
         if ctx and ctx.runner and ctx.runner.running:
-            with ctx.pending_lock:
-                if len(ctx.pending) >= 10:
-                    self.send_message("⚠️ Fila cheia — aguarde o Claude terminar.")
-                    return
-                ctx.pending.append(text)
-            self.send_message("📝 Mensagem enfileirada — será enviada quando o Claude terminar.")
+            if ctx.runner.send_btw(text):
+                self.send_message("💭 Enviado ao Claude via /btw.")
+            else:
+                with ctx.pending_lock:
+                    if len(ctx.pending) >= 10:
+                        self.send_message("⚠️ Fila cheia — aguarde o Claude terminar.")
+                        return
+                    ctx.pending.append(text)
+                self.send_message("💭 BTW enfileirado — será enviado quando Claude terminar.")
         else:
             self._run_claude_prompt(text)
 
@@ -2694,11 +2719,14 @@ class ClaudeTelegramBot:
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
         if runner.running:
-            lock = ctx.pending_lock if ctx else threading.Lock()
-            q = ctx.pending if ctx else []
-            with lock:
-                q.append(prompt)
-            self.send_message("⏳ Mensagem enfileirada — será enviada quando o Claude terminar.")
+            if runner.send_btw(prompt):
+                self.send_message("💭 Enviado ao Claude via /btw.")
+            else:
+                lock = ctx.pending_lock if ctx else threading.Lock()
+                q = ctx.pending if ctx else []
+                with lock:
+                    q.append(prompt)
+                self.send_message("💭 BTW enfileirado — será enviado quando Claude terminar.")
             return
 
         session = self._get_session()
@@ -3018,6 +3046,8 @@ class ClaudeTelegramBot:
                 "/switch": lambda: self.cmd_switch(arg) if arg else self.send_message("❌ Use: `/switch <nome>`"),
                 "/delete": lambda: self.cmd_delete(arg) if arg else self.send_message("❌ Use: `/delete <nome>`"),
                 "/compact": lambda: self.cmd_compact(),
+                "/cost": lambda: self.cmd_cost(),
+                "/doctor": lambda: self.cmd_doctor(),
                 "/stop": lambda: self.cmd_stop(),
                 "/timeout": lambda: self.cmd_timeout(arg) if arg else self.send_message(f"ℹ️ Timeout atual: {self.timeout_seconds}s"),
                 "/workspace": lambda: self.cmd_workspace(arg) if arg else self.send_message("❌ Use: `/workspace <path>`"),
