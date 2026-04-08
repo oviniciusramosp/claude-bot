@@ -11,6 +11,7 @@ import http.server
 import json
 import logging
 import os
+import re
 import secrets
 import signal
 import shutil
@@ -79,9 +80,27 @@ DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
 CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
+SESSION_MAX_AGE_DAYS = 60
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
+APPROVAL_EXPIRY_SECONDS = 300  # 5 minutes
+
+# Patterns that trigger an approval prompt before sending to Claude.
+# Each tuple is (regex_pattern, human-readable description).
+DANGEROUS_PATTERNS = [
+    (r'\brm\s+(-[rf]+\s+)*/', "delete files from root"),
+    (r'\brm\s+-rf?\s', "recursive delete"),
+    (r'\bgit\s+push\s+.*--force', "force push"),
+    (r'\bgit\s+reset\s+--hard', "hard reset"),
+    (r'\bdrop\s+(table|database)\b', "drop database objects"),
+    (r'\bsudo\b', "run as superuser"),
+    (r'\bmkfs\b', "format filesystem"),
+    (r'\bdd\s+if=', "disk dump"),
+    (r'\b>\s*/dev/sd[a-z]', "write to disk device"),
+    (r'\bchmod\s+-R\s+777\b', "open all permissions"),
+    (r'\bcurl\s+.*\|\s*(ba)?sh', "pipe URL to shell"),
+]
 
 SYSTEM_PROMPT = (
     "You are being accessed via a Telegram bot as a remote fallback. "
@@ -515,10 +534,14 @@ def _cleanup_stale_pipeline_workspaces() -> None:
 class RoutineScheduler:
     """Background thread that checks vault/Routines/ every 60s and enqueues matching routines."""
 
-    def __init__(self, state: RoutineStateManager, enqueue_fn, enqueue_pipeline_fn=None) -> None:
+    def __init__(self, state: RoutineStateManager, enqueue_fn, enqueue_pipeline_fn=None,
+                 notify_fn=None) -> None:
         self.state = state
         self._enqueue = enqueue_fn
         self._enqueue_pipeline = enqueue_pipeline_fn
+        self._notify_fn = notify_fn  # callable(text) to send Telegram messages
+        self._notified_invalid_routines: set = set()  # tracks notified routines per day
+        self._notified_date: str = ""  # YYYY-MM-DD for daily reset
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="routine-scheduler")
 
@@ -537,12 +560,33 @@ class RoutineScheduler:
                 logger.error("Routine scheduler error: %s", exc, exc_info=True)
             self._stop_event.wait(60)
 
+    def _notify_invalid_routine(self, routine_name: str, errors: list) -> None:
+        """Send a one-per-day Telegram notification about invalid routine frontmatter."""
+        if not self._notify_fn or routine_name in self._notified_invalid_routines:
+            return
+        self._notified_invalid_routines.add(routine_name)
+        bullet_list = "\n".join(f"- {e}" for e in errors)
+        msg = (
+            f"\u26a0\ufe0f Rotina `{routine_name}` tem erros no frontmatter:\n"
+            f"{bullet_list}\n\n"
+            f"Corrija o arquivo `vault/Routines/{routine_name}.md`"
+        )
+        try:
+            self._notify_fn(msg)
+        except Exception as exc:
+            logger.error("Failed to notify about invalid routine %s: %s", routine_name, exc)
+
     def _check_routines(self) -> None:
         if not ROUTINES_DIR.is_dir():
             return
         now_time = time.strftime("%H:%M")
         now_day_idx = time.localtime().tm_wday  # 0=Monday
         today_str = time.strftime("%Y-%m-%d")
+
+        # Reset notification tracking at day boundary
+        if self._notified_date != today_str:
+            self._notified_invalid_routines.clear()
+            self._notified_date = today_str
 
         for md_file in sorted(ROUTINES_DIR.glob("*.md")):
             try:
@@ -555,16 +599,28 @@ class RoutineScheduler:
                 if _missing:
                     logger.warning("Routine %s skipped — missing required fields: %s",
                                    md_file.name, ", ".join(_missing))
+                    self._notify_invalid_routine(
+                        md_file.stem,
+                        [f"Campo `{f}` ausente" for f in _missing],
+                    )
                     continue
                 if not fm.get("enabled", False):
                     continue
                 schedule = fm.get("schedule", {})
                 if not isinstance(schedule, dict):
                     logger.warning("Routine %s skipped — 'schedule' must be a mapping", md_file.name)
+                    self._notify_invalid_routine(
+                        md_file.stem,
+                        ["Campo `schedule` deve ser um mapeamento (dict), nao " + type(schedule).__name__],
+                    )
                     continue
                 if not isinstance(schedule.get("times"), list) or not schedule["times"]:
                     logger.warning("Routine %s skipped — 'schedule.times' must be a non-empty list",
                                    md_file.name)
+                    self._notify_invalid_routine(
+                        md_file.stem,
+                        ["Campo `schedule.times` deve ser uma lista nao-vazia"],
+                    )
                     continue
                 # Check expiry
                 until = schedule.get("until") or fm.get("until")
@@ -831,6 +887,7 @@ class SessionManager:
             logger.info("Loaded %d sessions from disk", len(self.sessions))
         except Exception as exc:
             logger.error("Failed to load sessions: %s", exc)
+        self._evict_old_sessions()
 
     def save(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -842,6 +899,21 @@ class SessionManager:
         tmp = SESSIONS_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tmp.replace(SESSIONS_FILE)
+
+    def _evict_old_sessions(self) -> None:
+        """Remove sessions older than SESSION_MAX_AGE_DAYS."""
+        cutoff = time.time() - (SESSION_MAX_AGE_DAYS * 86400)
+        expired = [name for name, s in self.sessions.items() if s.created_at < cutoff]
+        if not expired:
+            return
+        for name in expired:
+            del self.sessions[name]
+            logger.info("Evicted expired session: %s", name)
+        # Fix active session if it was evicted
+        if self.active_session not in self.sessions:
+            self.active_session = next(iter(self.sessions), None)
+        self.save()
+        logger.info("Evicted %d sessions older than %d days", len(expired), SESSION_MAX_AGE_DAYS)
 
     # -- CRUD --
 
@@ -1621,7 +1693,10 @@ class ClaudeTelegramBot:
         # Routine scheduler
         self.routine_state = RoutineStateManager()
         _cleanup_stale_pipeline_workspaces()
-        self.scheduler = RoutineScheduler(self.routine_state, self._enqueue_routine, self._enqueue_pipeline)
+        self.scheduler = RoutineScheduler(
+            self.routine_state, self._enqueue_routine, self._enqueue_pipeline,
+            notify_fn=self.send_message,
+        )
         self.scheduler.start()
 
         # Tracks active routine/pipeline contexts for HTTP stop requests
@@ -1630,7 +1705,11 @@ class ClaudeTelegramBot:
         self._active_pipelines: Dict[str, PipelineExecutor] = {}
         self._active_pipelines_lock = threading.Lock()
 
+        self._start_time = time.time()
         self._start_control_server()
+
+        # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
+        self._pending_approvals: Dict[str, dict] = {}
 
         # Voice transcription tools
         self._voice_tools = self._check_voice_tools()
@@ -3020,6 +3099,26 @@ class ClaudeTelegramBot:
         if changed:
             self.sessions.save()
 
+    # -- Dangerous prompt approval --
+
+    def _check_dangerous_prompt(self, prompt: str) -> Optional[str]:
+        """Check if user prompt contains dangerous commands. Returns warning or None."""
+        matches = []
+        for pattern, description in DANGEROUS_PATTERNS:
+            if re.search(pattern, prompt, re.IGNORECASE):
+                matches.append(f"• {description}")
+        if not matches:
+            return None
+        return "\n".join(matches)
+
+    def _expire_approvals(self) -> None:
+        """Remove pending approvals older than APPROVAL_EXPIRY_SECONDS."""
+        now = time.time()
+        expired = [k for k, v in self._pending_approvals.items()
+                   if now - v["ts"] > APPROVAL_EXPIRY_SECONDS]
+        for k in expired:
+            del self._pending_approvals[k]
+
     # -- Update processing --
 
     def _handle_text(self, text: str, user_msg_id: Optional[int] = None) -> None:
@@ -3070,6 +3169,32 @@ class ClaudeTelegramBot:
             return
 
         # Regular text → send to Claude (queued per-context if runner busy)
+        # Check for dangerous patterns first
+        warning = self._check_dangerous_prompt(text)
+        if warning:
+            self._expire_approvals()
+            approval_id = secrets.token_hex(8)
+            ctx = self._ctx
+            self._pending_approvals[approval_id] = {
+                "prompt": text,
+                "chat_id": self._chat_id,
+                "thread_id": ctx.thread_id if ctx else None,
+                "user_msg_id": user_msg_id,
+                "ts": time.time(),
+            }
+            markup = {
+                "inline_keyboard": [[
+                    {"text": "✅ Aprovar", "callback_data": f"approve:{approval_id}"},
+                    {"text": "❌ Cancelar", "callback_data": f"reject:{approval_id}"},
+                ]]
+            }
+            self.send_message(
+                f"⚠️ *Comando potencialmente perigoso detectado:*\n{warning}\n\n"
+                f"Deseja enviar mesmo assim?",
+                reply_markup=markup,
+            )
+            return
+
         ctx = self._ctx
         if ctx:
             ctx.user_msg_id = user_msg_id
@@ -3141,6 +3266,25 @@ class ClaudeTelegramBot:
                 self._skill_list()
             elif action == "edit":
                 self._skill_edit("")
+        elif data.startswith("approve:"):
+            approval_id = data.split(":", 1)[1]
+            entry = self._pending_approvals.pop(approval_id, None)
+            if entry and time.time() - entry["ts"] <= APPROVAL_EXPIRY_SECONDS:
+                self.answer_callback(cb_id, "Aprovado")
+                ctx = self._ctx
+                if ctx:
+                    ctx.user_msg_id = entry.get("user_msg_id")
+                    self.set_reaction(ctx.user_msg_id, "👀")
+                    ctx.last_reaction = "👀"
+                self._run_claude_prompt(entry["prompt"])
+            else:
+                self.answer_callback(cb_id, "Expirado")
+                self.send_message("⏰ Aprovação expirada. Envie o comando novamente.")
+        elif data.startswith("reject:"):
+            approval_id = data.split(":", 1)[1]
+            self._pending_approvals.pop(approval_id, None)
+            self.answer_callback(cb_id, "Cancelado")
+            self.send_message("🚫 Comando cancelado.")
         else:
             self.answer_callback(cb_id)
 
@@ -3302,6 +3446,24 @@ class ClaudeTelegramBot:
                     self._respond(401, {"error": "unauthorized"})
                     return False
                 return True
+
+            def do_GET(self):
+                if self.path == "/health":
+                    active_sessions = len(bot.sessions.sessions)
+                    active_runners = sum(
+                        1 for ctx in list(bot._contexts.values())
+                        if ctx.runner and ctx.runner.running
+                    )
+                    uptime = time.time() - bot._start_time
+                    self._respond(200, {
+                        "status": "ok",
+                        "uptime_seconds": round(uptime, 1),
+                        "active_sessions": active_sessions,
+                        "active_runners": active_runners,
+                        "scheduler_alive": bot.scheduler._thread.is_alive() if bot.scheduler._thread else False,
+                    })
+                else:
+                    self._respond(404, {"error": "not found"})
 
             def do_POST(self):
                 if not self._check_auth():
