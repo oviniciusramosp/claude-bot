@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.0.0"  # Multi-agent pipeline orchestration
+BOT_VERSION = "2.1.0"  # Split CLAUDE.md dev/runtime, vault as default workspace
 
 import http.server
 import json
@@ -2143,8 +2143,8 @@ class ClaudeTelegramBot:
     def _routine_edit(self, name: str) -> None:
         prompt = (
             f"O usuario quer editar uma rotina existente. "
-            f"Liste os arquivos em {VAULT_DIR}/Routines/ e mostre as rotinas disponiveis. "
-            f"Pergunte qual deseja editar e o que quer mudar (horario, dias, prompt, modelo, ativar/desativar). "
+            "Liste os arquivos em Routines/ e mostre as rotinas disponiveis. "
+            "Pergunte qual deseja editar e o que quer mudar (horario, dias, prompt, modelo, ativar/desativar). "
             "Faca a edicao no arquivo .md e confirme."
         )
         if name:
@@ -2191,8 +2191,8 @@ class ClaudeTelegramBot:
     def _skill_edit(self, name: str) -> None:
         prompt = (
             f"O usuario quer editar uma skill existente. "
-            f"Liste as skills em {VAULT_DIR}/Skills/ (leia o frontmatter de cada .md). "
-            f"Pergunte qual deseja editar e o que quer mudar. "
+            "Liste as skills em Skills/ (leia o frontmatter de cada .md). "
+            "Pergunte qual deseja editar e o que quer mudar. "
             "Faca a edicao no arquivo .md e confirme."
         )
         if name:
@@ -2244,8 +2244,8 @@ class ClaudeTelegramBot:
     def _agent_edit(self, name: str) -> None:
         prompt = (
             f"O usuario quer editar um agente existente. "
-            f"Liste os agentes em {VAULT_DIR}/Agents/ (leia o frontmatter de cada agent.md). "
-            f"Pergunte qual deseja editar e o que quer mudar (personalidade, instrucoes, modelo, icone). "
+            "Liste os agentes em Agents/ (leia o frontmatter de cada agent.md). "
+            "Pergunte qual deseja editar e o que quer mudar (personalidade, instrucoes, modelo, icone). "
             "Faca a edicao nos arquivos agent.md e/ou CLAUDE.md do agente e confirme."
         )
         if name:
@@ -2255,7 +2255,7 @@ class ClaudeTelegramBot:
     def _agent_import(self, extra: str) -> None:
         prompt = (
             f"Execute a skill de importacao de agentes. "
-            f"Leia {VAULT_DIR}/Skills/import-agent.md para instrucoes. "
+            "Leia Skills/import-agent.md para instrucoes. "
             "Ajude o usuario a importar um agente existente do OpenClaw para o vault."
         )
         if extra:
@@ -2265,8 +2265,8 @@ class ClaudeTelegramBot:
     def _run_agent_create_skill(self, extra: str = "") -> None:
         prompt = (
             f"Execute a skill de criacao de agentes. "
-            f"Leia {VAULT_DIR}/Skills/create-agent.md para instrucoes. "
-            f"Ajude o usuario a criar um novo agente em {VAULT_DIR}/Agents/. "
+            "Leia Skills/create-agent.md para instrucoes. "
+            "Ajude o usuario a criar um novo agente em Agents/. "
             "Faca as perguntas necessarias sobre: nome, personalidade, especializacoes, "
             "modelo padrao, e icone. Depois gere os arquivos e registre no Journal."
         )
