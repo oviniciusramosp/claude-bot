@@ -68,14 +68,14 @@ install_hear() {
         return 1
     }
 
-    # Find the binary asset URL (look for 'hear' without extension, or .zip)
+    # Find the binary asset URL (look for 'hear' binary or any hear*.zip)
     local download_url
     download_url=$(echo "$release_json" | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for a in data.get('assets', []):
     name = a.get('name', '')
-    if name == 'hear' or name == 'hear.zip':
+    if name == 'hear' or name.startswith('hear') and name.endswith('.zip'):
         print(a['browser_download_url'])
         break
 " 2>/dev/null)
@@ -121,7 +121,17 @@ install_deps() {
         ffmpeg_path=$([[ -x "/opt/homebrew/bin/ffmpeg" ]] && echo "/opt/homebrew/bin/ffmpeg" || command -v ffmpeg)
         echo -e "  ffmpeg: ${GREEN}found${NC} ($ffmpeg_path)"
     else
-        echo -e "  ffmpeg: ${RED}not found${NC} — install with: brew install ffmpeg"
+        if command -v brew &>/dev/null; then
+            echo -e "  ffmpeg: ${YELLOW}not found — installing via brew...${NC}"
+            brew install ffmpeg --quiet
+            if [[ -x "/opt/homebrew/bin/ffmpeg" ]] || command -v ffmpeg &>/dev/null; then
+                echo -e "  ffmpeg: ${GREEN}installed${NC}"
+            else
+                echo -e "  ffmpeg: ${RED}brew install failed — install manually: brew install ffmpeg${NC}"
+            fi
+        else
+            echo -e "  ffmpeg: ${RED}not found and Homebrew not available — install manually: brew install ffmpeg${NC}"
+        fi
     fi
 
     # hear

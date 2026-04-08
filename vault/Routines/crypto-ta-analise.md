@@ -4,13 +4,13 @@ description: "Pipeline diária de análise técnica do mercado cripto (BTC, alts
 type: pipeline
 created: 2026-04-08
 updated: 2026-04-08
-tags: [pipeline, crypto, bitcoin, análise-técnica, notion, daily]
+tags: [pipeline, crypto, bitcoin, "análise-técnica", notion, daily]
 schedule:
-  times: ["21:30"]
   days: ["*"]
+  times: [21:30]
 model: sonnet
-agent: crypto-bro
 enabled: true
+agent: crypto-bro
 notify: final
 ---
 
@@ -23,46 +23,44 @@ steps:
     model: haiku
     prompt_file: steps/collector.md
     timeout: 600
-    inactivity_timeout: 300
 
   - id: analyst
     name: "Análise técnica e macro"
     model: opus
-    prompt_file: steps/analyst.md
     depends_on: [collector]
+    prompt_file: steps/analyst.md
     timeout: 600
-    inactivity_timeout: 300
 
   - id: cover
     name: "Geração de capa"
     model: sonnet
-    prompt_file: steps/cover.md
     depends_on: [collector]
+    prompt_file: steps/cover.md
     timeout: 120
     inactivity_timeout: 60
 
   - id: writer
     name: "Redação do relatório"
     model: opus
-    prompt_file: steps/writer.md
     depends_on: [analyst]
+    prompt_file: steps/writer.md
     timeout: 600
-    inactivity_timeout: 300
 
   - id: reviewer
     name: "Revisão e validação"
     model: opus
-    prompt_file: steps/reviewer.md
     depends_on: [writer]
+    prompt_file: steps/reviewer.md
     timeout: 300
     inactivity_timeout: 180
 
   - id: publisher
     name: "Publicação Notion + Telegram"
     model: sonnet
-    prompt_file: steps/publisher.md
     depends_on: [reviewer, cover]
+    prompt_file: steps/publisher.md
     timeout: 120
     inactivity_timeout: 60
     output: telegram
+
 ```
