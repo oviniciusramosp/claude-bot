@@ -295,6 +295,8 @@ struct ZAIUsageCard: View {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 cardHeader("Z.AI Usage", symbol: "cpu")
 
+                Spacer(minLength: 0)
+
                 VStack(spacing: Spacing.sm) {
                     Image(systemName: "link.badge.plus")
                         .font(.title2)
@@ -307,8 +309,10 @@ struct ZAIUsageCard: View {
                         .foregroundStyle(.quaternary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, Spacing.xl)
+
+                Spacer(minLength: 0)
             }
+            .frame(maxHeight: .infinity)
         }
     }
 }

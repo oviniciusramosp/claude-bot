@@ -13,11 +13,12 @@ struct SidebarView: View {
                 sidebarLabel(.agents)
                 sidebarLabel(.routines)
                 sidebarLabel(.skills)
-                sidebarLabel(.sessions)
             }
             Section("System") {
+                sidebarLabel(.sessions)
                 sidebarLabel(.logs)
                 sidebarLabel(.settings)
+                sidebarLabel(.changelog)
             }
         }
         .listStyle(.sidebar)
@@ -61,6 +62,9 @@ struct SidebarView: View {
         case .logs:
             let errors = appState.routines.flatMap { $0.todayExecutions }.filter { $0.status == .failed }.count
             return errors > 0 ? "⚠ \(errors)" : nil
+        case .changelog:
+            let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            return v.map { "v\($0)" }
         default:
             return nil
         }
@@ -75,8 +79,6 @@ struct SidebarFooterView: View {
     @State private var updateAvailable = false
     @State private var isUpdating = false
     @State private var showUpdateConfirm = false
-    @State private var showChangelog = false
-    @State private var changelog: [ChangelogEntry] = []
 
     private var repoPath: String {
         URL(fileURLWithPath: appState.vaultPath).deletingLastPathComponent().path
@@ -90,7 +92,6 @@ struct SidebarFooterView: View {
         VStack(spacing: 0) {
             Divider()
             HStack(spacing: Spacing.sm) {
-                // Version label + update dot
                 Button {
                     if updateAvailable { showUpdateConfirm = true }
                 } label: {
@@ -114,16 +115,6 @@ struct SidebarFooterView: View {
                 .disabled(isUpdating)
 
                 Spacer()
-
-                // Changelog button
-                Button("Changelog") {
-                    loadChangelog()
-                    showChangelog = true
-                }
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .buttonStyle(.plain)
-                .help("View recent git commits")
             }
             .padding(.horizontal, Spacing.md)
             .padding(.vertical, Spacing.sm)
@@ -140,12 +131,7 @@ struct SidebarFooterView: View {
         } message: {
             Text("The app will restart after pulling the latest changes from git.")
         }
-        .sheet(isPresented: $showChangelog) {
-            ChangelogSheet(entries: changelog, repoPath: repoPath)
-        }
     }
-
-    // MARK: - Git operations
 
     private func checkForUpdates() {
         let path = repoPath
@@ -167,23 +153,7 @@ struct SidebarFooterView: View {
             _ = runShell(
                 "cd \"\(path)\" && git pull --ff-only 2>&1 && bash \"\(buildScript)\" 2>&1"
             )
-            // App restarts via build-app.sh — isUpdating stays true, that's OK
         }
-    }
-
-    private func loadChangelog() {
-        let path = repoPath
-        let raw = runShell(
-            "git -C \"\(path)\" log --oneline --no-decorate -40 2>/dev/null"
-        )
-        changelog = raw
-            .components(separatedBy: "\n")
-            .filter { !$0.isEmpty }
-            .compactMap { line -> ChangelogEntry? in
-                let parts = line.split(separator: " ", maxSplits: 1)
-                guard parts.count == 2 else { return nil }
-                return ChangelogEntry(hash: String(parts[0]), message: String(parts[1]))
-            }
     }
 }
 
@@ -220,30 +190,18 @@ struct ChangelogEntry: Identifiable {
     var shortHash: String { String(hash.prefix(7)) }
 }
 
-struct ChangelogSheet: View {
-    var entries: [ChangelogEntry]
-    var repoPath: String
+// MARK: - Changelog Page View (full tab, not a modal)
 
-    @Environment(\.dismiss) private var dismiss
+struct ChangelogPageView: View {
+    @EnvironmentObject var appState: AppState
+    @State private var entries: [ChangelogEntry] = []
+
+    private var repoPath: String {
+        URL(fileURLWithPath: appState.vaultPath).deletingLastPathComponent().path
+    }
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header
-            HStack {
-                Label("Changelog", systemImage: "clock.arrow.2.circlepath")
-                    .font(.headline)
-                Spacer()
-                Button { dismiss() } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(Spacing.lg)
-
-            Divider()
-
+        Group {
             if entries.isEmpty {
                 VStack(spacing: Spacing.md) {
                     Image(systemName: "doc.text.magnifyingglass")
@@ -255,33 +213,42 @@ struct ChangelogSheet: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(entries) { entry in
-                            HStack(alignment: .top, spacing: Spacing.sm) {
-                                Text(entry.shortHash)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                                    .frame(width: 52, alignment: .leading)
-                                    .padding(.top, 1)
+                List(entries) { entry in
+                    HStack(alignment: .top, spacing: Spacing.sm) {
+                        Text(entry.shortHash)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 52, alignment: .leading)
 
-                                Text(entry.message)
-                                    .font(.caption)
-                                    .foregroundStyle(entry.typeColor)
-                                    .lineLimit(2)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .padding(.vertical, Spacing.xs)
-                            .padding(.horizontal, Spacing.lg)
-
-                            Divider()
-                                .padding(.leading, Spacing.lg + 52 + Spacing.sm)
-                        }
+                        Text(entry.message)
+                            .font(.caption)
+                            .foregroundStyle(entry.typeColor)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .listRowSeparator(.visible)
                 }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
         }
-        .frame(width: 420, height: 400)
         .background(Color(.windowBackgroundColor))
+        .navigationTitle("Changelog")
+        .task { loadChangelog() }
+    }
+
+    private func loadChangelog() {
+        let path = repoPath
+        let raw = runShell(
+            "git -C \"\(path)\" log --oneline --no-decorate -60 2>/dev/null"
+        )
+        entries = raw
+            .components(separatedBy: "\n")
+            .filter { !$0.isEmpty }
+            .compactMap { line -> ChangelogEntry? in
+                let parts = line.split(separator: " ", maxSplits: 1)
+                guard parts.count == 2 else { return nil }
+                return ChangelogEntry(hash: String(parts[0]), message: String(parts[1]))
+            }
     }
 }
