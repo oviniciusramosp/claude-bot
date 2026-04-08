@@ -54,7 +54,7 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
             elif _k == "HEAR_LOCALE":
                 os.environ.setdefault("HEAR_LOCALE", _v)
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "/opt/homebrew/bin/claude")
-CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent))
+CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent / "vault"))
 
 DATA_DIR = Path.home() / ".claude-bot"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -81,6 +81,8 @@ MAX_MESSAGE_LENGTH = 4000
 
 SYSTEM_PROMPT = (
     "You are being accessed via a Telegram bot as a remote fallback. "
+    "Your working directory is the vault (knowledge base). "
+    "Do NOT read or access files outside your working directory unless the user explicitly asks. "
     "Keep responses concise when possible. When showing code, prefer short relevant snippets. "
     "Summarize tool execution results briefly. The user cannot see tool calls in real-time — "
     "describe what you are doing. NEVER use tables — always use bullet lists or numbered lists instead. "
@@ -89,14 +91,13 @@ SYSTEM_PROMPT = (
     "Use emojis to highlight important parts of your responses "
     "(e.g. ✅ for success, ❌ for errors, ⚠️ for warnings, 📁 for files, 🔧 for fixes, "
     "📝 for notes, 🚀 for deployments). "
-    f"This project has a knowledge vault at {VAULT_DIR}/. "
-    f"Check {VAULT_DIR}/Journal/ for recent context. "
-    f"After significant conversations, append a summary to {VAULT_DIR}/Journal/YYYY-MM-DD.md (use today's date). "
-    f"Read {VAULT_DIR}/Tooling.md for tool preferences. "
-    f"Read {VAULT_DIR}/.env for project credentials when needed. "
+    "Check Journal/ for recent context. "
+    "After significant conversations, append a summary to Journal/YYYY-MM-DD.md (use today's date). "
+    "Read Tooling.md for tool preferences. "
+    "Read .env for project credentials when needed. "
     "All vault .md files MUST have YAML frontmatter (title, description, type, created/updated, tags). "
     "Use the description field to scan files before reading them fully. "
-    f"Routines are defined in {VAULT_DIR}/Routines/ — each .md has a schedule in frontmatter. "
+    "Routines are defined in Routines/ — each .md has a schedule in frontmatter. "
     "Journal entries are append-only — never overwrite existing content."
 )
 
@@ -139,9 +140,12 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 ⚡ *Skills*
 • `/skill` — Gerenciar skills (listar, editar)
 
+🎤 *Áudio*
+• `/audio` — Escolher idioma de transcrição
+• Envie mensagens de voz — serão transcritas e enviadas ao Claude
+
 💬 Qualquer outra mensagem é enviada como prompt ao Claude.
-📷 Envie fotos diretamente — o Claude irá analisá-las.
-🎤 Envie áudios — serão transcritos e enviados ao Claude."""
+📷 Envie fotos diretamente — o Claude irá analisá-las."""
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -1897,6 +1901,40 @@ class ClaudeTelegramBot:
         }
         self.send_message("Escolha o modelo:", reply_markup=markup)
 
+    def cmd_audio(self) -> None:
+        """Show audio language picker and current status."""
+        current = HEAR_LOCALE
+        can = self._voice_tools.get("can_transcribe", False)
+        status = "✅ ativo" if can else "❌ indisponível"
+
+        markup = {
+            "inline_keyboard": [
+                [
+                    {"text": "🇧🇷 Português", "callback_data": "audio:pt-BR"},
+                    {"text": "🇺🇸 English", "callback_data": "audio:en-US"},
+                ],
+                [
+                    {"text": "🇪🇸 Español", "callback_data": "audio:es-ES"},
+                    {"text": "🇫🇷 Français", "callback_data": "audio:fr-FR"},
+                ],
+                [
+                    {"text": "🇮🇹 Italiano", "callback_data": "audio:it-IT"},
+                    {"text": "🇩🇪 Deutsch", "callback_data": "audio:de-DE"},
+                ],
+                [
+                    {"text": "🇯🇵 日本語", "callback_data": "audio:ja-JP"},
+                    {"text": "🇨🇳 中文", "callback_data": "audio:zh-CN"},
+                ],
+            ]
+        }
+        self.send_message(
+            f"🎤 *Áudio*\n\n"
+            f"Status: {status}\n"
+            f"Idioma atual: `{current}`\n\n"
+            f"Escolha o idioma para transcrição:",
+            reply_markup=markup,
+        )
+
     def cmd_new(self, name: Optional[str]) -> None:
         # Consolidate current session before creating a new one
         self._consolidate_session()
@@ -2092,8 +2130,8 @@ class ClaudeTelegramBot:
     def _routine_create(self, extra: str) -> None:
         prompt = (
             f"Execute a skill de criacao de rotinas. "
-            f"Leia {VAULT_DIR}/Skills/create-routine.md para instrucoes. "
-            f"Ajude o usuario a criar uma nova rotina em {VAULT_DIR}/Routines/. "
+            "Leia Skills/create-routine.md para instrucoes. "
+            "Ajude o usuario a criar uma nova rotina em Routines/. "
             "Faca as perguntas necessarias sobre: o que a rotina deve fazer, "
             "horarios, dias da semana, modelo, e data limite. "
             "Depois gere o arquivo .md com frontmatter completo e registre no Journal."
@@ -2308,7 +2346,7 @@ class ClaudeTelegramBot:
     # -- Voice transcription --
 
     def _check_voice_tools(self) -> Dict[str, Any]:
-        """Check availability of voice transcription tools, auto-download hear if missing."""
+        """Check availability of voice transcription tools."""
         import shutil as _shutil
         result: Dict[str, Any] = {"ffmpeg": None, "hear": None, "can_transcribe": False}
 
@@ -2320,7 +2358,7 @@ class ClaudeTelegramBot:
             if found:
                 result["ffmpeg"] = found
 
-        # Check hear — configured path, then system PATH, then bundled location
+        # Check hear — configured path, then bundled location, then system PATH
         hear_candidates = []
         if HEAR_PATH:
             hear_candidates.append(HEAR_PATH)
@@ -2334,67 +2372,8 @@ class ClaudeTelegramBot:
             if found:
                 result["hear"] = found
 
-        # Auto-download hear if not found
-        if not result["hear"]:
-            downloaded = self._auto_download_hear()
-            if downloaded:
-                result["hear"] = downloaded
-
         result["can_transcribe"] = bool(result["ffmpeg"] and result["hear"])
         return result
-
-    def _auto_download_hear(self) -> Optional[str]:
-        """Download the 'hear' CLI binary from GitHub releases."""
-        try:
-            logger.info("hear not found — attempting auto-download from GitHub...")
-            api_url = "https://api.github.com/repos/sveinbjornt/hear/releases/latest"
-            req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github.v3+json"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                release = json.loads(resp.read().decode())
-
-            # Find the binary asset (look for 'hear' without extension, or a zip/tar)
-            download_url = None
-            for asset in release.get("assets", []):
-                name = asset.get("name", "")
-                if name == "hear" or name == "hear.zip" or name.endswith(".tar.gz"):
-                    download_url = asset["browser_download_url"]
-                    break
-
-            if not download_url:
-                logger.warning("No suitable hear binary found in latest release assets")
-                return None
-
-            dest = HEAR_BIN_DIR / "hear"
-            asset_name = download_url.rsplit("/", 1)[-1]
-
-            if asset_name == "hear":
-                # Direct binary download
-                urllib.request.urlretrieve(download_url, str(dest))
-            elif asset_name.endswith(".zip"):
-                import zipfile
-                import tempfile
-                tmp = Path(tempfile.mkdtemp())
-                zip_path = tmp / asset_name
-                urllib.request.urlretrieve(download_url, str(zip_path))
-                with zipfile.ZipFile(zip_path) as zf:
-                    # Extract 'hear' binary from zip
-                    for member in zf.namelist():
-                        if Path(member).name == "hear" and not member.endswith("/"):
-                            with zf.open(member) as src, open(dest, "wb") as dst:
-                                dst.write(src.read())
-                            break
-            else:
-                logger.warning("Unsupported asset format: %s", asset_name)
-                return None
-
-            if dest.exists():
-                os.chmod(str(dest), 0o755)
-                logger.info("hear downloaded successfully to %s", dest)
-                return str(dest)
-            return None
-        except Exception as exc:
-            logger.warning("Failed to auto-download hear: %s", exc)
-            return None
 
     def _convert_ogg_to_wav(self, ogg_path: Path) -> Optional[Path]:
         """Convert OGG/Opus audio to WAV (16kHz mono) using ffmpeg."""
@@ -2458,7 +2437,7 @@ class ClaudeTelegramBot:
             self.send_message(
                 "⚠️ Transcrição de áudio indisponível.\n"
                 f"Ferramentas faltando: {', '.join(missing)}\n"
-                "Reinicie o bot após instalar."
+                "Execute `./claude-bot.sh install-deps` e reinicie o bot."
             )
             return
 
@@ -2872,6 +2851,7 @@ class ClaudeTelegramBot:
                 "/routine": lambda: self.cmd_routine(arg),
                 "/agent": lambda: self.cmd_agent(arg),
                 "/skill": lambda: self.cmd_skill(arg),
+                "/audio": lambda: self.cmd_audio(),
             }
 
             fn = handler_map.get(cmd)
@@ -2903,7 +2883,13 @@ class ClaudeTelegramBot:
 
         self._remove_keyboard(callback)
 
-        if data.startswith("model:"):
+        if data.startswith("audio:"):
+            locale = data.split(":", 1)[1]
+            global HEAR_LOCALE
+            HEAR_LOCALE = locale
+            self.answer_callback(cb_id, f"Idioma: {locale}")
+            self.send_message(f"✅ Idioma de transcrição alterado para `{locale}`")
+        elif data.startswith("model:"):
             model = data.split(":", 1)[1]
             self.cmd_model_switch(model)
             self.answer_callback(cb_id, f"Modelo: {model}")
@@ -3078,6 +3064,7 @@ class ClaudeTelegramBot:
             {"command": "timeout", "description": "Alterar timeout"},
             {"command": "workspace", "description": "Alterar diretorio de trabalho"},
             {"command": "effort", "description": "Nivel de esforco (low/medium/high)"},
+            {"command": "audio", "description": "Idioma de transcricao de audio"},
             {"command": "clear", "description": "Resetar sessao atual"},
         ]
         self.tg_request("setMyCommands", {"commands": commands})

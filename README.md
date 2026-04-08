@@ -26,6 +26,7 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Knowledge vault** -- Obsidian-compatible vault with daily journal, notes, skills, and routines
 - **Scheduled routines** -- cron-like system that runs prompts on a schedule
 - **Image analysis** -- send photos from Telegram for Claude to analyze
+- **Voice transcription** -- send voice messages, transcribed via macOS native speech recognition and sent to Claude
 - **macOS service** -- runs as a daemon with auto-start, crash recovery, and menu bar indicator
 
 ---
@@ -38,6 +39,7 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Python 3.8+** (pre-installed on macOS)
 - **Claude Code CLI** installed and authenticated
 - **Telegram account**
+- **ffmpeg** (for voice transcription): `brew install ffmpeg`
 
 ### Step 1: Install Claude Code
 
@@ -87,6 +89,7 @@ Optional settings:
 ```
 
 This will:
+- Install voice transcription dependencies (`hear` CLI, auto-downloaded)
 - Install the bot as a launchd service
 - Auto-start on login
 - Auto-restart on crash
@@ -146,8 +149,14 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/routine list` | List today's routines |
 | `/routine status` | Execution status of today's routines |
 
+### Audio
+| Command | Description |
+|---------|-------------|
+| `/audio` | Language picker for voice transcription (inline keyboard) |
+
 **Text** -- any non-command message goes to Claude as a prompt.
 **Photos** -- images are downloaded and passed to Claude for analysis.
+**Voice** -- voice messages are transcribed via macOS speech recognition and sent to Claude.
 
 ### Status Reactions
 
@@ -292,6 +301,46 @@ Generate a morning summary of...
 
 ---
 
+## Voice Transcription
+
+Send voice messages from Telegram and they'll be transcribed to text using macOS native speech recognition (Apple's SFSpeechRecognizer), then sent to Claude as a prompt.
+
+**Pipeline:** Voice message (OGG/Opus) → ffmpeg (WAV) → `hear` CLI (SFSpeechRecognizer) → text → Claude
+
+### Dependencies
+
+Both are installed automatically by `./claude-bot.sh install`:
+
+- **ffmpeg** -- converts Telegram's OGG/Opus audio to WAV. Install manually with `brew install ffmpeg` if needed.
+- **[hear](https://github.com/sveinbjornt/hear)** -- 50KB CLI that wraps Apple's SFSpeechRecognizer. Auto-downloaded to `~/.claude-bot/bin/hear` during install.
+
+You can also run `./claude-bot.sh install-deps` to install/check dependencies without reinstalling the service.
+
+### Setup
+
+1. **macOS Dictation** must be enabled: System Settings → Keyboard → Dictation → On
+2. Run `./claude-bot.sh install` (or `install-deps`)
+3. Restart the bot
+
+### Language
+
+Use `/audio` in Telegram to pick the transcription language (default: `pt-BR`). Supported languages include Portuguese, English, Spanish, French, Italian, German, Japanese, Chinese, and all other locales supported by Siri.
+
+You can also set the default in `.env`:
+```bash
+HEAR_LOCALE=pt-BR
+```
+
+### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FFMPEG_PATH` | `/opt/homebrew/bin/ffmpeg` | Path to ffmpeg binary |
+| `HEAR_PATH` | *(auto-detected)* | Path to hear binary |
+| `HEAR_LOCALE` | `pt-BR` | Default transcription language |
+
+---
+
 ## Service Management
 
 ```bash
@@ -352,6 +401,9 @@ This blocks parent CLAUDE.md files when Claude CLI runs with `cwd=~/claude-bot/`
 | `TELEGRAM_CHAT_ID` | Yes | -- | Your Telegram chat ID |
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI |
 | `CLAUDE_WORKSPACE` | No | `$HOME` | Default working directory |
+| `FFMPEG_PATH` | No | `/opt/homebrew/bin/ffmpeg` | Path to ffmpeg (voice) |
+| `HEAR_PATH` | No | *(auto-detected)* | Path to hear CLI (voice) |
+| `HEAR_LOCALE` | No | `pt-BR` | Voice transcription language |
 
 ---
 

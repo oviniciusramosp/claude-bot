@@ -35,8 +35,12 @@ YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# Ensure log dir exists
+HEAR_BIN="${LOG_DIR}/bin/hear"
+HEAR_REPO="sveinbjornt/hear"
+
+# Ensure directories exist
 mkdir -p "$LOG_DIR"
+mkdir -p "${LOG_DIR}/bin"
 
 is_loaded() {
     launchctl list 2>/dev/null | grep -q "$LABEL"
@@ -48,9 +52,90 @@ get_pid() {
     pgrep -f "claude-fallback-bot.py" 2>/dev/null | head -1 || true
 }
 
+install_hear() {
+    if [[ -f "$HEAR_BIN" ]]; then
+        echo -e "  hear: ${GREEN}already installed${NC} ($HEAR_BIN)"
+        return 0
+    fi
+
+    echo -e "  hear: ${YELLOW}downloading...${NC}"
+
+    # Get latest release download URL from GitHub API
+    local api_url="https://api.github.com/repos/${HEAR_REPO}/releases/latest"
+    local release_json
+    release_json=$(curl -sL -H "Accept: application/vnd.github.v3+json" "$api_url" 2>/dev/null) || {
+        echo -e "  hear: ${RED}failed to fetch release info${NC}"
+        return 1
+    }
+
+    # Find the binary asset URL (look for 'hear' without extension, or .zip)
+    local download_url
+    download_url=$(echo "$release_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for a in data.get('assets', []):
+    name = a.get('name', '')
+    if name == 'hear' or name == 'hear.zip':
+        print(a['browser_download_url'])
+        break
+" 2>/dev/null)
+
+    if [[ -z "$download_url" ]]; then
+        echo -e "  hear: ${RED}no binary found in latest release${NC}"
+        echo -e "  Download manually from: https://github.com/${HEAR_REPO}/releases"
+        return 1
+    fi
+
+    local asset_name="${download_url##*/}"
+
+    if [[ "$asset_name" == "hear" ]]; then
+        curl -sL -o "$HEAR_BIN" "$download_url" || { echo -e "  hear: ${RED}download failed${NC}"; return 1; }
+    elif [[ "$asset_name" == *.zip ]]; then
+        local tmp_dir
+        tmp_dir=$(mktemp -d)
+        curl -sL -o "${tmp_dir}/${asset_name}" "$download_url" || { echo -e "  hear: ${RED}download failed${NC}"; rm -rf "$tmp_dir"; return 1; }
+        unzip -qo "${tmp_dir}/${asset_name}" -d "$tmp_dir" 2>/dev/null
+        local found
+        found=$(find "$tmp_dir" -name "hear" -type f ! -name "*.zip" | head -1)
+        if [[ -n "$found" ]]; then
+            cp "$found" "$HEAR_BIN"
+        else
+            echo -e "  hear: ${RED}binary not found inside zip${NC}"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        rm -rf "$tmp_dir"
+    fi
+
+    chmod +x "$HEAR_BIN"
+    echo -e "  hear: ${GREEN}installed${NC} ($HEAR_BIN)"
+    return 0
+}
+
+install_deps() {
+    echo -e "${CYAN}Checking dependencies...${NC}"
+
+    # ffmpeg
+    if [[ -x "/opt/homebrew/bin/ffmpeg" ]] || command -v ffmpeg &>/dev/null; then
+        local ffmpeg_path
+        ffmpeg_path=$([[ -x "/opt/homebrew/bin/ffmpeg" ]] && echo "/opt/homebrew/bin/ffmpeg" || command -v ffmpeg)
+        echo -e "  ffmpeg: ${GREEN}found${NC} ($ffmpeg_path)"
+    else
+        echo -e "  ffmpeg: ${RED}not found${NC} — install with: brew install ffmpeg"
+    fi
+
+    # hear
+    install_hear
+
+    echo ""
+}
+
 case "${1:-help}" in
     install)
         echo -e "${CYAN}Installing Claude Bot service...${NC}"
+
+        # Install dependencies
+        install_deps
 
         # Validate files exist
         if [[ ! -f "$PLIST_SRC" ]]; then
@@ -247,6 +332,10 @@ print(f\"Sessions: {len(d.get('sessions', {}))}  |  Active: {d.get('active_sessi
         esac
         ;;
 
+    install-deps)
+        install_deps
+        ;;
+
     help|*)
         echo "Claude Code Telegram Bot Manager"
         echo ""
@@ -254,6 +343,7 @@ print(f\"Sessions: {len(d.get('sessions', {}))}  |  Active: {d.get('active_sessi
         echo ""
         echo "Commands:"
         echo "  install          Install bot as launchd service (auto-start on login)"
+        echo "  install-deps     Install/check voice transcription dependencies"
         echo "  uninstall        Remove bot launchd service"
         echo "  start            Start the bot"
         echo "  stop             Stop the bot"
