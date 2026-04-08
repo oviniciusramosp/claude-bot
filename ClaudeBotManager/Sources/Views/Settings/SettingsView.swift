@@ -6,6 +6,8 @@ struct SettingsView: View {
     @State private var showToken = false
     @State private var isSaving = false
     @State private var savedMessage = ""
+    @State private var validationError = ""
+    @State private var showValidationAlert = false
 
     var body: some View {
         ScrollView {
@@ -105,6 +107,24 @@ struct SettingsView: View {
                     }
                     Spacer()
                     Button("Save") {
+                        // Validate paths before saving
+                        let fm = FileManager.default
+                        let expandedClaude = NSString(string: config.claudePath).expandingTildeInPath
+                        let expandedWorkspace = NSString(string: config.claudeWorkspace).expandingTildeInPath
+
+                        if !fm.fileExists(atPath: expandedClaude) {
+                            validationError = "Claude CLI path does not exist: \(config.claudePath)"
+                            showValidationAlert = true
+                            return
+                        }
+
+                        var isDir: ObjCBool = false
+                        if !fm.fileExists(atPath: expandedWorkspace, isDirectory: &isDir) || !isDir.boolValue {
+                            validationError = "Workspace path is not a valid directory: \(config.claudeWorkspace)"
+                            showValidationAlert = true
+                            return
+                        }
+
                         isSaving = true
                         do {
                             try appState.saveConfig(config)
@@ -125,6 +145,11 @@ struct SettingsView: View {
         .navigationTitle("Settings")
         .onAppear {
             config = appState.botConfig
+        }
+        .alert("Validation Error", isPresented: $showValidationAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(validationError)
         }
     }
 }

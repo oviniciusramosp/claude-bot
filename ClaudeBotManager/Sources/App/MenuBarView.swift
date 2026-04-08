@@ -6,10 +6,12 @@ struct MenuBarLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: "cpu")
+            Image(systemName: appState.isRunning ? "cpu" : "cpu")
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(appState.isRunning ? Color.statusGreen : Color.statusRed)
         }
+        // Force SwiftUI to re-render the MenuBarExtra label when status changes
+        .id("menubar-\(appState.isRunning)-\(appState.botStatusLabel)")
     }
 }
 

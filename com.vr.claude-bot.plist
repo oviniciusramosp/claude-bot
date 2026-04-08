@@ -35,7 +35,7 @@
     </dict>
 
     <key>ThrottleInterval</key>
-    <integer>5</integer>
+    <integer>30</integer>
 
     <key>StandardOutPath</key>
     <string>__HOME__/.claude-bot/launchd-stdout.log</string>

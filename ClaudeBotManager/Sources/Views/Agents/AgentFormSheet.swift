@@ -13,6 +13,7 @@ struct AgentFormSheet: View {
     @State private var instructions = ""
     @State private var isSaving = false
     @State private var idPreview = ""
+    @State private var idError = ""
 
     var body: some View {
         NavigationStack {
@@ -29,11 +30,17 @@ struct AgentFormSheet: View {
                                         .textFieldStyle(.roundedBorder)
                                         .onChange(of: name) { _, v in
                                             idPreview = toKebabCase(v)
+                                            idError = validateAgentId(idPreview)
                                         }
                                     if !idPreview.isEmpty {
                                         Text("ID: \(idPreview)")
                                             .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.tertiary)
+                                            .foregroundStyle(idError.isEmpty ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.red))
+                                    }
+                                    if !idError.isEmpty {
+                                        Text(idError)
+                                            .font(.caption2)
+                                            .foregroundStyle(.red)
                                     }
                                 }
                                 .padding(.leading, 8)
@@ -132,7 +139,7 @@ struct AgentFormSheet: View {
                             dismiss()
                         }
                     }
-                    .disabled(name.isEmpty || isSaving)
+                    .disabled(name.isEmpty || isSaving || !idError.isEmpty)
                 }
             }
         }
@@ -143,5 +150,14 @@ struct AgentFormSheet: View {
         s.lowercased()
             .replacingOccurrences(of: " ", with: "-")
             .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+    }
+
+    private func validateAgentId(_ id: String) -> String {
+        guard !id.isEmpty else { return "" }
+        let pattern = "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$"
+        if id.range(of: pattern, options: .regularExpression) == nil {
+            return "ID must be kebab-case (lowercase letters, numbers, hyphens; cannot start or end with hyphen)"
+        }
+        return ""
     }
 }
