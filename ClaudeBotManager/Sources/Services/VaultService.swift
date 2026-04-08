@@ -373,6 +373,7 @@ actor VaultService {
     }
 
     func deleteSkill(id: String) throws {
+        guard !Skill.builtInIds.contains(id) else { return }
         let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
         let fileURL = skillsURL.appending(component: "\(id).md")
         guard fm.fileExists(atPath: fileURL.path) else { return }

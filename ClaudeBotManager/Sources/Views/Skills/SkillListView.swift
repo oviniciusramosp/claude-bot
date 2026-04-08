@@ -6,16 +6,19 @@ struct SkillListView: View {
     @State private var searchText = ""
     @State private var showCreateSheet = false
 
-    private var filteredSkills: [Skill] {
-        if searchText.isEmpty { return appState.skills }
+    private func filtered(_ skills: [Skill]) -> [Skill] {
+        guard !searchText.isEmpty else { return skills }
         let q = searchText.lowercased()
-        return appState.skills.filter {
+        return skills.filter {
             $0.title.lowercased().contains(q)
             || $0.description.lowercased().contains(q)
             || $0.trigger.lowercased().contains(q)
             || $0.tags.contains { $0.lowercased().contains(q) }
         }
     }
+
+    private var botSkills: [Skill] { filtered(appState.skills.filter { $0.isBuiltIn }) }
+    private var mySkills: [Skill] { filtered(appState.skills.filter { !$0.isBuiltIn }) }
 
     var body: some View {
         ScrollView {
@@ -25,17 +28,19 @@ struct SkillListView: View {
                     title: "No Skills",
                     subtitle: "Skills are markdown files in vault/Skills/."
                 )
-            } else if filteredSkills.isEmpty {
+            } else if botSkills.isEmpty && mySkills.isEmpty {
                 EmptyStateView(
                     symbol: "magnifyingglass",
                     title: "No Results",
                     subtitle: "No skills match \"\(searchText)\"."
                 )
             } else {
-                VStack(spacing: Spacing.lg) {
-                    ForEach(filteredSkills) { skill in
-                        SkillRow(skill: skill)
-                            .onTapGesture { selectedSkill = skill }
+                VStack(spacing: Spacing.xl) {
+                    if !botSkills.isEmpty {
+                        skillSection(title: "Bot Skills", skills: botSkills)
+                    }
+                    if !mySkills.isEmpty {
+                        skillSection(title: "My Skills", skills: mySkills)
                     }
                 }
                 .padding(Spacing.xl)
@@ -58,6 +63,24 @@ struct SkillListView: View {
         }
         .sheet(isPresented: $showCreateSheet) {
             SkillFormSheet()
+        }
+    }
+
+    @ViewBuilder
+    private func skillSection(title: String, skills: [Skill]) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .tracking(0.5)
+                .padding(.horizontal, Spacing.xs)
+            VStack(spacing: Spacing.lg) {
+                ForEach(skills) { skill in
+                    SkillRow(skill: skill)
+                        .onTapGesture { selectedSkill = skill }
+                }
+            }
         }
     }
 }
@@ -103,7 +126,11 @@ struct SkillRow: View {
 
                 Spacer()
 
-                if !skill.tags.isEmpty {
+                if skill.isBuiltIn {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                } else if !skill.tags.isEmpty {
                     HStack(spacing: 4) {
                         ForEach(skill.tags.prefix(2), id: \.self) { tag in
                             Text(tag)

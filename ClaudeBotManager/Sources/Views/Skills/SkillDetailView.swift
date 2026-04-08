@@ -25,13 +25,15 @@ struct SkillDetailView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Close") { dismiss() }
                 }
-                ToolbarItem(placement: .destructiveAction) {
-                    Button(role: .destructive) {
-                        showDeleteConfirm = true
-                    } label: {
-                        Label("Move to Trash", systemImage: "trash")
+                if !skill.isBuiltIn {
+                    ToolbarItem(placement: .destructiveAction) {
+                        Button(role: .destructive) {
+                            showDeleteConfirm = true
+                        } label: {
+                            Label("Move to Trash", systemImage: "trash")
+                        }
+                        .foregroundStyle(Color.statusRed)
                     }
-                    .foregroundStyle(Color.statusRed)
                 }
             }
             .confirmationDialog("Move Skill to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {

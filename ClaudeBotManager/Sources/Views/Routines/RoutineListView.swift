@@ -5,16 +5,16 @@ struct RoutineListView: View {
     @State private var showCreateSheet = false
     @State private var selectedRoutine: Routine? = nil
 
-    /// Routines sorted chronologically by first scheduled time
-    private var sortedRoutines: [Routine] {
-        appState.routines.sorted {
-            ($0.schedule.times.first ?? "99:99") < ($1.schedule.times.first ?? "99:99")
-        }
+    private func sorted(_ routines: [Routine]) -> [Routine] {
+        routines.sorted { ($0.schedule.times.first ?? "99:99") < ($1.schedule.times.first ?? "99:99") }
     }
+
+    private var botRoutines: [Routine] { sorted(appState.routines.filter { $0.isBuiltIn }) }
+    private var myRoutines: [Routine] { sorted(appState.routines.filter { !$0.isBuiltIn }) }
 
     var body: some View {
         ScrollView {
-            VStack(spacing: Spacing.lg) {
+            VStack(spacing: Spacing.xl) {
                 if appState.routines.isEmpty {
                     EmptyStateView(
                         symbol: "clock.arrow.2.circlepath",
@@ -22,8 +22,11 @@ struct RoutineListView: View {
                         subtitle: "Create a routine to schedule automated tasks."
                     )
                 } else {
-                    ForEach(sortedRoutines) { routine in
-                        RoutineRow(routine: routine, onTap: { selectedRoutine = routine })
+                    if !botRoutines.isEmpty {
+                        routineSection(title: "Bot Routines", routines: botRoutines)
+                    }
+                    if !myRoutines.isEmpty {
+                        routineSection(title: "My Routines", routines: myRoutines)
                     }
                 }
             }
@@ -45,6 +48,23 @@ struct RoutineListView: View {
         }
         .sheet(isPresented: $showCreateSheet) {
             RoutineFormSheet()
+        }
+    }
+
+    @ViewBuilder
+    private func routineSection(title: String, routines: [Routine]) -> some View {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+                .tracking(0.5)
+                .padding(.horizontal, Spacing.xs)
+            VStack(spacing: Spacing.lg) {
+                ForEach(routines) { routine in
+                    RoutineRow(routine: routine, onTap: { selectedRoutine = routine })
+                }
+            }
         }
     }
 }

@@ -9,4 +9,8 @@ struct Skill: Identifiable, Hashable, Sendable {
     var created: String
     var updated: String
     var body: String        // full markdown body (instructions)
+
+    /// System skills shipped with the repo — can be viewed but not deleted
+    static let builtInIds: Set<String> = ["create-routine", "create-agent", "create-pipeline", "import-agent"]
+    var isBuiltIn: Bool { Self.builtInIds.contains(id) }
 }
