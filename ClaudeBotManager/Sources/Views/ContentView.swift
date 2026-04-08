@@ -19,8 +19,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .routines: "clock.arrow.2.circlepath"
         case .skills: "bolt"
         case .sessions: "folder"
-        case .logs: "exclamationmark.triangle"
-        case .settings: "gearshape"
+        case .logs: "info.triangle"
+        case .settings: "gear"
         case .changelog: "cloud"
         }
     }
