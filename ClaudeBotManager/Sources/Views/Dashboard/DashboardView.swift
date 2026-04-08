@@ -8,8 +8,8 @@ struct DashboardView: View {
             VStack(spacing: Spacing.xl) {
                 BotStatusCard()
                 HStack(alignment: .top, spacing: Spacing.xl) {
-                    ClaudeUsageCard()
-                    ZAIUsageCard()
+                    ClaudeUsageCard().frame(maxHeight: .infinity)
+                    ZAIUsageCard().frame(maxHeight: .infinity)
                 }
                 TodayRoutinesCard()
             }
@@ -293,7 +293,7 @@ struct ZAIUsageCard: View {
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Z.AI", symbol: "cpu")
+                cardHeader("Z.AI Usage", symbol: "cpu")
 
                 VStack(spacing: Spacing.sm) {
                     Image(systemName: "link.badge.plus")
