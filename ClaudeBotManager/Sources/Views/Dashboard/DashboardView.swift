@@ -6,11 +6,16 @@ struct DashboardView: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: Spacing.lg), GridItem(.flexible(), spacing: Spacing.lg)], spacing: Spacing.lg) {
-                BotStatusCard()
-                ClaudeUsageCard()
-                TodayRoutinesCard()
-                SessionsSummaryCard()
+            // Equal-height grid: HStack rows so both cards in each row share height
+            VStack(spacing: Spacing.lg) {
+                HStack(alignment: .top, spacing: Spacing.lg) {
+                    BotStatusCard()     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ClaudeUsageCard()   .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                HStack(alignment: .top, spacing: Spacing.lg) {
+                    TodayRoutinesCard() .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    SessionsSummaryCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
             .padding(Spacing.xl)
         }
@@ -141,6 +146,13 @@ struct ClaudeUsageCard: View {
         .frame(minHeight: 180)
     }
 
+    // Effective fill for the weekly bar (prefers live API data, falls back to token scan)
+    private var effectiveWeeklyPercent: Double {
+        if usage.isAvailable       { return usage.weeklyPercent }
+        if usage.hasTokenData      { return usage.weeklyTokenPercent }
+        return 0
+    }
+
     // 7-segment weekly bar, shared between isAvailable and plan-info views
     private var weeklyBarSection: some View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
@@ -152,14 +164,22 @@ struct ClaudeUsageCard: View {
                 if usage.isAvailable {
                     Text(usage.weeklyLabel)
                         .font(.caption.monospacedDigit())
+                } else if usage.hasTokenData {
+                    HStack(spacing: 3) {
+                        Text(usage.formatTokens(usage.weeklyTokensUsed))
+                            .font(.caption.monospacedDigit().bold())
+                        Text("/ \(usage.formatTokens(usage.weeklyTokensRef))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
                 } else {
-                    Text("no data")
+                    Text("scanning…")
                         .font(.caption2)
                         .foregroundStyle(.quaternary)
                 }
             }
             WeeklySegmentBar(
-                percent: usage.weeklyPercent,
+                percent: effectiveWeeklyPercent,
                 referencePercent: weekReferencePercent
             )
         }
