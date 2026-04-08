@@ -127,7 +127,6 @@ struct RoutineRow: View {
                     Spacer()
 
                     if routine.isPipeline {
-                        // Pipeline badge instead of model
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.triangle.branch")
                                 .font(.system(size: 10))
@@ -173,7 +172,6 @@ struct RoutineRow: View {
 
                     Spacer()
 
-                    // Show last execution time + duration
                     if let exec = routine.lastExecution {
                         if exec.status == .running, let dur = exec.liveDuration {
                             Text("Running \(dur)")
@@ -195,7 +193,7 @@ struct RoutineRow: View {
                     }
                 }
 
-                // Row 2.5: Error detail (if last execution failed)
+                // Error detail (if last execution failed)
                 if let exec = routine.lastExecution, exec.status == .failed {
                     let errorDetail = buildErrorDetail(exec)
                     if !errorDetail.isEmpty {
@@ -218,38 +216,31 @@ struct RoutineRow: View {
                     }
                 }
 
-                // Row 3: Pipeline timeline (expandable)
-                // Hide compact bar when failed (error box + icon are enough)
+                // Pipeline: expanded steps or compact bar
                 if routine.isPipeline {
                     if isExpanded {
                         pipelineExpandedSteps
                     } else if routine.lastExecution?.status != .failed {
                         pipelineTimeline
                     }
-                }
-            }
-            // Tap on card content opens detail sheet
-            .contentShape(Rectangle())
-            .onTapGesture { onTap() }
 
-            // Expand/collapse chevron — inside card but separate tap zone
-            if routine.isPipeline {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
-                } label: {
-                    HStack {
-                        Spacer()
+                    // Chevron toggle
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+                    } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.tertiary)
-                        Spacer()
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 4)
+                            .contentShape(Rectangle())
                     }
-                    .frame(height: 8)
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         } // GlassCard
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
         .contextMenu { contextMenuItems }
     }
 
