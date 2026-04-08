@@ -42,16 +42,16 @@ Quando precisar diagnosticar problemas do bot, ler `~/.claude-bot/bot.log` (ulti
 ### How Claude CLI is Invoked
 
 ```python
-subprocess.Popen([
-    claude_path, "--output-format", "stream-json",
-    "--model", model, "--verbose",
-    "--session-id", session_id,  # or omitted for new sessions
-    "--resume",                  # resumes existing session
-    "-p", prompt,
-], cwd=workspace)
+runner.run(
+    prompt=prompt,
+    model=model,
+    session_id=session_id,      # None for fresh sessions (routines always use None)
+    workspace=workspace,        # cwd for the subprocess
+    system_prompt=SYSTEM_PROMPT # None when minimal_context=True
+)
 ```
 
-The `--resume` flag enables real session persistence (Claude maintains context across messages).
+O `ClaudeRunner` monta o comando com `--print --dangerously-skip-permissions --output-format stream-json`. O `--append-system-prompt` instrui o Claude a ler o vault (Journal, Tooling, etc.) — pode ser omitido via `system_prompt=None` quando a rotina usa `context: minimal`.
 
 **Workspace padrao:** `vault/` — o bot opera dentro do vault por padrao. Agentes mudam o cwd para `vault/Agents/{id}/`. O Claude CLI carrega CLAUDE.md walking up da hierarquia, entao:
 - Sessao normal: `vault/CLAUDE.md` (primario) + este arquivo (pai)
@@ -172,15 +172,61 @@ Formato da mensagem de commit:
 - `refactor: separa CLAUDE.md em dev/runtime`
 - `chore: bump version 2.0.0 → 2.1.0`
 
+## Routines
+
+### Frontmatter fields
+
+| Campo | Tipo | Default | Descricao |
+|-------|------|---------|-----------|
+| `type` | string | `routine` | `routine` ou `pipeline` |
+| `schedule.times` | list | — | Horarios HH:MM (24h) |
+| `schedule.days` | list | `["*"]` | Dias da semana ou `["*"]` para todos |
+| `schedule.until` | string | — | Data limite YYYY-MM-DD (opcional) |
+| `model` | string | `sonnet` | Modelo a usar |
+| `agent` | string | — | Agente para rotear a execucao |
+| `enabled` | bool | `true` | Ativa/desativa a rotina |
+| `context` | string | `full` | `minimal` = pula system prompt do vault, usa apenas CLAUDE.md |
+| `notify` | string | `final` | Pipeline only: `final\|all\|summary\|none` |
+
+### Contexto minimal vs full
+
+- **`full`** (default): O Claude recebe o `SYSTEM_PROMPT` que instrui a ler Journal, Tooling, vault. Bom para rotinas que precisam de contexto do vault.
+- **`minimal`**: O `--append-system-prompt` eh omitido. O Claude roda apenas com os CLAUDE.md da hierarquia de diretorios (automatico pelo CLI). Economiza tokens e eh mais rapido para tarefas pontuais.
+
+### Pipeline notifications
+
+Pipelines notificam via `_notify_success` / `_notify_failure`. O step marcado com `output: telegram` tem seu output enviado ao Telegram. O campo `notify` controla:
+- `final` — envia output do step marcado (ou ultimo step) ao completar
+- `all` — envia progresso a cada step completado
+- `summary` — envia resumo compacto (X/Y steps in Nm Ns)
+- `none` — silencioso (falhas sempre notificam)
+
+### Rotina `NO_REPLY`
+
+Se o output de uma rotina (nao pipeline) for exatamente `NO_REPLY`, o bot nao envia nada ao Telegram. Usado para rotinas que enviam mensagens manualmente ou que devem rodar em silencio.
+
+### Rotinas built-in (commitadas no repo)
+
+| Rotina | Descricao |
+|--------|-----------|
+| `update-check` | Verifica diariamente se ha updates do Claude Code CLI (brew) ou do repo (git). Notifica apenas quando ha algo para atualizar. |
+
 ## ClaudeBotManager
 
 App macOS nativa (SwiftUI) em `ClaudeBotManager/`. Menu bar app para gerenciar o bot:
 - Dashboard com status do bot e sessoes
-- Gerenciamento de agentes e rotinas
+- Gerenciamento de agentes, rotinas e skills
+- Delete via Lixeira do macOS (restauravel pelo Finder)
+- Toggle de contexto minimal para rotinas
 - Edicao de settings (.env)
 - Visualizacao de logs
 
-Build: `swift build` no diretorio `ClaudeBotManager/`.
+Build com Xcode toolchain (requer macOS 26 SDK):
+```bash
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+  /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift build \
+  --package-path ClaudeBotManager
+```
 
 ## Vault
 

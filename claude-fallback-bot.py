@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.1.0"  # Split CLAUDE.md dev/runtime, vault as default workspace
+BOT_VERSION = "2.2.0"  # Skills UI, trash delete, minimal context, pipeline notify fix
 
 import http.server
 import json
