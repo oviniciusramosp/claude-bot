@@ -340,6 +340,7 @@ class RoutineTask:
     model: str
     time_slot: str
     agent: Optional[str] = None
+    minimal_context: bool = False
 
 
 @dataclass
@@ -366,6 +367,7 @@ class PipelineTask:
     time_slot: str
     agent: Optional[str] = None
     notify: str = "final"
+    minimal_context: bool = False
 
 
 class RoutineStateManager:
@@ -588,6 +590,7 @@ class RoutineScheduler:
                                 model=model,
                                 time_slot=t_str,
                                 agent=fm.get("agent"),
+                                minimal_context=bool(fm.get("context") == "minimal"),
                             )
                             self._enqueue(task)
             except Exception as exc:
@@ -679,6 +682,7 @@ class RoutineScheduler:
             time_slot=t_str,
             agent=default_agent,
             notify=str(fm.get("notify", "final")),
+            minimal_context=bool(fm.get("context") == "minimal"),
         )
         self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=[s.id for s in steps])
         self._enqueue_pipeline(task)
@@ -982,6 +986,7 @@ class ClaudeRunner:
         workspace: str = CLAUDE_WORKSPACE,
         max_budget: Optional[float] = None,
         effort: Optional[str] = None,
+        system_prompt: Optional[str] = SYSTEM_PROMPT,
     ) -> None:
         cmd = [
             CLAUDE_PATH,
@@ -997,10 +1002,9 @@ class ClaudeRunner:
             cmd += ["--max-budget-usd", str(max_budget)]
         if effort:
             cmd += ["--reasoning-effort", effort]
-        cmd += [
-            "--append-system-prompt", SYSTEM_PROMPT,
-            "-p", prompt,
-        ]
+        if system_prompt:
+            cmd += ["--append-system-prompt", system_prompt]
+        cmd += ["-p", prompt]
 
         logger.info("Running: %s", " ".join(cmd[:6]) + " ...")
         self.running = True
@@ -1408,7 +1412,8 @@ class PipelineExecutor:
                 ws = str(agent_dir)
 
         try:
-            runner.run(prompt, model=step.model, workspace=ws)
+            runner.run(prompt, model=step.model, workspace=ws,
+                       system_prompt=None if self.task.minimal_context else SYSTEM_PROMPT)
             # Wait for completion with dual timeout:
             #   - inactivity_timeout: max seconds without any output from Claude
             #   - timeout: max wall-clock seconds (hard limit)
@@ -2600,7 +2605,8 @@ class ClaudeTelegramBot:
     def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
                           no_output_timeout: int = 90,
                           max_total_timeout: int = 600,
-                          routine_mode: bool = False) -> None:
+                          routine_mode: bool = False,
+                          system_prompt: Optional[str] = SYSTEM_PROMPT) -> None:
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -2636,6 +2642,7 @@ class ClaudeTelegramBot:
                 "session_id": session.session_id,
                 "workspace": session.workspace,
                 "effort": self.effort,
+                "system_prompt": system_prompt,
             },
             daemon=True,
         )
@@ -2880,7 +2887,8 @@ class ClaudeTelegramBot:
         self.timeout_seconds = 300  # 5 min inactivity for routines
         try:
             self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200,
-                                    routine_mode=True)
+                                    routine_mode=True,
+                                    system_prompt=None if task.minimal_context else SYSTEM_PROMPT)
             # Check if there was an error
             if self.runner.error_text:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", self.runner.error_text[:200])
@@ -3206,6 +3214,7 @@ class ClaudeTelegramBot:
                             model=str(fm.get("model", "sonnet")),
                             time_slot=time_slot,
                             agent=fm.get("agent"),
+                            minimal_context=bool(fm.get("context") == "minimal"),
                         )
                         bot.routine_state.set_status(name, time_slot, "running")
                         bot._enqueue_routine(task)

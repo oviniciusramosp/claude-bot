@@ -148,7 +148,8 @@ actor VaultService {
                 updated: fm_data["updated"] as? String ?? today(),
                 tags: fm_data["tags"] as? [String] ?? ["routine"],
                 routineType: routineType,
-                stepCount: stepCount
+                stepCount: stepCount,
+                minimalContext: (fm_data["context"] as? String) == "minimal"
             )
             routines.append(routine)
         }
@@ -177,6 +178,7 @@ actor VaultService {
         ]
         if let agent = routine.agentId { frontmatter["agent"] = agent }
         if isPipeline { frontmatter["notify"] = routine.notify }
+        if routine.minimalContext { frontmatter["context"] = "minimal" }
         if let until = routine.schedule.until {
             var sched = frontmatter["schedule"] as! [String: Any]
             sched["until"] = until

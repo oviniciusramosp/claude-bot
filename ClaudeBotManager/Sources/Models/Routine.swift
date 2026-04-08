@@ -15,6 +15,7 @@ struct Routine: Identifiable, Hashable, Sendable {
     var routineType: String = "routine"  // "routine" or "pipeline"
     var stepCount: Int = 0               // number of pipeline steps (0 for regular)
     var notify: String = "final"         // pipeline notify mode: final | all | summary | none
+    var minimalContext: Bool = false      // true = skip vault system prompt, use only CLAUDE.md
     var pipelineStepDefs: [PipelineStepDef] = []  // step definitions for UI editing
 
     struct Schedule: Hashable, Sendable {

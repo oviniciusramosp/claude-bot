@@ -158,8 +158,20 @@ struct RoutineConfigTab: View {
                 Divider()
                 modelPicker
                 agentPicker
+                contextToggle
             }
         }
+    }
+
+    private var contextToggle: some View {
+        HStack {
+            Text("Minimal Context").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Toggle("", isOn: $routine.minimalContext)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .help("When enabled, the routine runs with only CLAUDE.md — skips vault instructions (Journal, Tooling, etc.)")
     }
 
     private var scheduleHeader: some View {
