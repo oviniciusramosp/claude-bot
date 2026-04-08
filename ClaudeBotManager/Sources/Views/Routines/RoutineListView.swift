@@ -128,7 +128,7 @@ struct RoutineRow: View {
 
                     if routine.isPipeline {
                         HStack(spacing: 4) {
-                            Image(systemName: "arrow.triangle.branch")
+                            Image(systemName: "checklist")
                                 .font(.system(size: 10))
                             Text("\(routine.stepCount) steps")
                                 .font(.system(size: 10))
