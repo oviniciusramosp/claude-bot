@@ -1379,6 +1379,7 @@ class PipelineExecutor:
         self._cancelled = threading.Event()
         self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
         self._bot = None  # set by _enqueue_pipeline if available
+        self._progress_msg_id: Optional[int] = None  # Telegram message ID for live progress
 
     def _wait_for_free_slot(self, max_wait: int = 300) -> bool:
         """Wait up to max_wait seconds for active Claude CLI processes to finish.
@@ -1428,13 +1429,17 @@ class PipelineExecutor:
         step_ids = [s.id for s in self.task.steps]
         self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running", steps_init=step_ids)
 
+        # Send live progress message to Telegram
+        self._send_progress_message()
+
         start_time = time.time()
+        self._start_time = start_time
         try:
             self._run_dag_loop(data_dir)
         except Exception as exc:
             logger.error("Pipeline %s error: %s", self.task.name, exc)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=str(exc)[:200])
-            self._notify_failure(str(exc))
+            self._finalize_progress(success=False, error=str(exc), elapsed=int(time.time() - start_time))
             return False
 
         # Determine final status
@@ -1443,13 +1448,14 @@ class PipelineExecutor:
 
         if all_completed:
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "completed")
+            self._finalize_progress(success=True, elapsed=elapsed)
             self._notify_success(elapsed)
             logger.info("Pipeline %s completed in %ds", self.task.name, elapsed)
         else:
             failed_steps = [sid for sid, st in self._step_status.items() if st == "failed"]
             err = f"Steps failed: {', '.join(failed_steps)}"
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=err)
-            self._notify_failure(err)
+            self._finalize_progress(success=False, error=err, elapsed=elapsed)
             logger.warning("Pipeline %s failed: %s", self.task.name, err)
 
         # Cleanup workspace (keep on failure for debugging)
@@ -1536,9 +1542,8 @@ class PipelineExecutor:
                         else:
                             self._cascade_skip(step.id)
 
-            # Notify progress if mode is "all"
-            if self.task.notify == "all":
-                self._notify_progress()
+            # Update live progress message after each wave
+            self._update_progress()
 
     def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute a single pipeline step using ClaudeRunner."""
@@ -1687,20 +1692,74 @@ class PipelineExecutor:
                                            error=f"Dependency {failed_id} failed")
                 self._cascade_skip(step.id)  # Recurse
 
-    def _notify_progress(self) -> None:
-        """Send progress notification (for notify=all mode)."""
-        total = len(self.task.steps)
-        done = sum(1 for st in self._step_status.values() if st in ("completed", "failed", "skipped"))
-        last_completed = None
+    # -- Live progress message in Telegram --
+
+    def _build_progress_text(self, elapsed: int = 0) -> str:
+        """Build the progress status text for the live Telegram message."""
+        icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏳"}
+        lines = [f"🔗 *Pipeline: {self.task.title}*", ""]
         for step in self.task.steps:
-            if self._step_status[step.id] == "completed":
-                last_completed = step.name
-        if last_completed:
-            msg = f"Pipeline {self.task.title}: step {done}/{total} done ({last_completed})"
-            try:
-                self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
-            except Exception:
-                pass
+            st = self._step_status.get(step.id, "pending")
+            icon = icons.get(st, "⏳")
+            lines.append(f"{icon} {step.name}")
+        total = len(self.task.steps)
+        done = sum(1 for st in self._step_status.values() if st == "completed")
+        running = sum(1 for st in self._step_status.values() if st == "running")
+        elapsed_str = f" — {elapsed // 60}m{elapsed % 60:02d}s" if elapsed else ""
+        status = f"\n_{done}/{total} concluídos"
+        if running:
+            status += f", {running} rodando"
+        status += f"{elapsed_str}_"
+        lines.append(status)
+        return "\n".join(lines)
+
+    def _send_progress_message(self) -> None:
+        """Send the initial progress message and store its message_id."""
+        try:
+            text = self._build_progress_text()
+            msg_id = self.bot.send_message(text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+            self._progress_msg_id = msg_id
+        except Exception:
+            pass
+
+    def _update_progress(self) -> None:
+        """Edit the progress message with current step statuses."""
+        if not self._progress_msg_id:
+            return
+        try:
+            elapsed = int(time.time() - (self._start_time if hasattr(self, '_start_time') else time.time()))
+            text = self._build_progress_text(elapsed)
+            self.bot.edit_message(self._progress_msg_id, text)
+        except Exception:
+            pass
+
+    def _finalize_progress(self, success: bool, error: str = "", elapsed: int = 0) -> None:
+        """Finalize the progress message: delete on success, update with error on failure."""
+        if not self._progress_msg_id:
+            return
+        try:
+            if success:
+                self.bot.delete_message(self._progress_msg_id, chat_id=self.ctx.chat_id)
+            else:
+                icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏳"}
+                lines = [f"❌ *Pipeline: {self.task.title}* — FAILED", ""]
+                for step in self.task.steps:
+                    st = self._step_status.get(step.id, "pending")
+                    icon = icons.get(st, "⏳")
+                    err_detail = ""
+                    if st == "failed" and step.id in self._step_errors:
+                        err_detail = f" — `{self._step_errors[step.id][:60]}`"
+                    lines.append(f"{icon} {step.name}{err_detail}")
+                mins, secs = elapsed // 60, elapsed % 60
+                lines.append(f"\n_Erro: {error[:100]}_")
+                lines.append(f"_Duração: {mins}m{secs:02d}s_")
+                self.bot.edit_message(self._progress_msg_id, "\n".join(lines))
+        except Exception:
+            pass
+
+    def _notify_progress(self) -> None:
+        """Legacy progress notification (for notify=all mode)."""
+        self._update_progress()
 
     def _notify_success(self, elapsed: int) -> None:
         """Send final success notification based on notify mode."""
@@ -2068,8 +2127,9 @@ class ClaudeTelegramBot:
             logger.warning("editMessageText error: %s", exc)
             return None
 
-    def delete_message(self, message_id: int) -> bool:
-        chat_id = self._chat_id
+    def delete_message(self, message_id: int, chat_id: Optional[str] = None) -> bool:
+        if chat_id is None:
+            chat_id = self._chat_id
         resp = self.tg_request("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
         return bool(resp and resp.get("ok"))
 
