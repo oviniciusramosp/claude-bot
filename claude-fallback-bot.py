@@ -51,6 +51,8 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("FFMPEG_PATH", _v)
             elif _k == "HEAR_PATH":
                 os.environ.setdefault("HEAR_PATH", _v)
+            elif _k == "HEAR_LOCALE":
+                os.environ.setdefault("HEAR_LOCALE", _v)
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "/opt/homebrew/bin/claude")
 CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent))
 
@@ -69,6 +71,7 @@ HEAR_BIN_DIR = DATA_DIR / "bin"
 
 FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "/opt/homebrew/bin/ffmpeg")
 HEAR_PATH = os.environ.get("HEAR_PATH", "")
+HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 
 DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
@@ -2413,12 +2416,13 @@ class ClaudeTelegramBot:
             logger.error("ffmpeg conversion error: %s", exc)
             return None
 
-    def _transcribe_audio(self, wav_path: Path) -> Optional[str]:
+    def _transcribe_audio(self, wav_path: Path, locale: str = "") -> Optional[str]:
         """Transcribe WAV audio to text using the 'hear' CLI (Apple SFSpeechRecognizer)."""
+        locale = locale or HEAR_LOCALE
         try:
+            cmd = [self._voice_tools["hear"], "-l", locale, "-i", str(wav_path)]
             proc = subprocess.run(
-                [self._voice_tools["hear"], str(wav_path)],
-                capture_output=True, text=True, timeout=120,
+                cmd, capture_output=True, text=True, timeout=120,
             )
             if proc.returncode != 0:
                 logger.error("hear transcription failed (rc=%d): %s", proc.returncode, proc.stderr[:500])
