@@ -21,7 +21,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .sessions: "folder"
         case .logs: "exclamationmark.triangle"
         case .settings: "gearshape"
-        case .changelog: "clock.arrow.2.circlepath"
+        case .changelog: "cloud"
         }
     }
 }
@@ -29,10 +29,11 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @State private var selection: SidebarItem = .dashboard
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
         ZStack {
-            NavigationSplitView(columnVisibility: .constant(.all)) {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
                 SidebarView(selection: $selection)
             } detail: {
                 switch selection {

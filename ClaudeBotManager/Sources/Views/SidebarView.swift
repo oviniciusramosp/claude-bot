@@ -24,9 +24,6 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .navigationTitle("Claude Bot")
         .frame(minWidth: 180, idealWidth: 200)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            SidebarFooterView()
-        }
     }
 
     private func sidebarLabel(_ item: SidebarItem) -> some View {
@@ -71,92 +68,6 @@ struct SidebarView: View {
     }
 }
 
-// MARK: - Sidebar Footer
-
-struct SidebarFooterView: View {
-    @EnvironmentObject var appState: AppState
-
-    @State private var updateAvailable = false
-    @State private var isUpdating = false
-    @State private var showUpdateConfirm = false
-
-    private var repoPath: String {
-        URL(fileURLWithPath: appState.vaultPath).deletingLastPathComponent().path
-    }
-
-    private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: Spacing.sm) {
-                Button {
-                    if updateAvailable { showUpdateConfirm = true }
-                } label: {
-                    HStack(spacing: 5) {
-                        Text("v\(appVersion)")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        if isUpdating {
-                            ProgressView()
-                                .controlSize(.mini)
-                                .frame(width: 10, height: 10)
-                        } else if updateAvailable {
-                            Circle()
-                                .fill(.orange)
-                                .frame(width: 6, height: 6)
-                        }
-                    }
-                }
-                .buttonStyle(.plain)
-                .help(updateAvailable ? "Update available — click to pull & rebuild" : "Up to date")
-                .disabled(isUpdating)
-
-                Spacer()
-            }
-            .padding(.horizontal, Spacing.md)
-            .padding(.vertical, Spacing.sm)
-        }
-        .background(.regularMaterial)
-        .onAppear { checkForUpdates() }
-        .confirmationDialog(
-            "Update Available",
-            isPresented: $showUpdateConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("Pull & Rebuild") { performUpdate() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The app will restart after pulling the latest changes from git.")
-        }
-    }
-
-    private func checkForUpdates() {
-        let path = repoPath
-        Task.detached(priority: .background) {
-            let result = runShell(
-                "git -C \"\(path)\" fetch --quiet 2>/dev/null; " +
-                "git -C \"\(path)\" log HEAD..origin/main --oneline 2>/dev/null | wc -l"
-            )
-            let count = Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-            await MainActor.run { updateAvailable = count > 0 }
-        }
-    }
-
-    private func performUpdate() {
-        isUpdating = true
-        let path = repoPath
-        let buildScript = "\(path)/ClaudeBotManager/build-app.sh"
-        Task.detached(priority: .background) {
-            _ = runShell(
-                "cd \"\(path)\" && git pull --ff-only 2>&1 && bash \"\(buildScript)\" 2>&1"
-            )
-        }
-    }
-}
-
 // MARK: - Shell helper (nonisolated, safe to call from detached tasks)
 
 @discardableResult
@@ -195,13 +106,52 @@ struct ChangelogEntry: Identifiable {
 struct ChangelogPageView: View {
     @EnvironmentObject var appState: AppState
     @State private var entries: [ChangelogEntry] = []
+    @State private var updateAvailable = false
+    @State private var isUpdating = false
+    @State private var showUpdateConfirm = false
 
     private var repoPath: String {
         URL(fileURLWithPath: appState.vaultPath).deletingLastPathComponent().path
     }
 
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            // Toolbar: version + update button
+            HStack {
+                Text("v\(appVersion)")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+
+                if updateAvailable {
+                    Button {
+                        showUpdateConfirm = true
+                    } label: {
+                        Label("Update Available", systemImage: "arrow.down.circle.fill")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
+                } else if isUpdating {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Updating…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.md)
+
+            Divider()
+
+            // Commit list
             if entries.isEmpty {
                 VStack(spacing: Spacing.md) {
                     Image(systemName: "doc.text.magnifyingglass")
@@ -234,7 +184,20 @@ struct ChangelogPageView: View {
         }
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Changelog")
-        .task { loadChangelog() }
+        .task {
+            loadChangelog()
+            checkForUpdates()
+        }
+        .confirmationDialog(
+            "Update Available",
+            isPresented: $showUpdateConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Pull & Rebuild") { performUpdate() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The app will restart after pulling the latest changes from git.")
+        }
     }
 
     private func loadChangelog() {
@@ -250,5 +213,28 @@ struct ChangelogPageView: View {
                 guard parts.count == 2 else { return nil }
                 return ChangelogEntry(hash: String(parts[0]), message: String(parts[1]))
             }
+    }
+
+    private func checkForUpdates() {
+        let path = repoPath
+        Task.detached(priority: .background) {
+            let result = runShell(
+                "git -C \"\(path)\" fetch --quiet 2>/dev/null; " +
+                "git -C \"\(path)\" log HEAD..origin/main --oneline 2>/dev/null | wc -l"
+            )
+            let count = Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            await MainActor.run { updateAvailable = count > 0 }
+        }
+    }
+
+    private func performUpdate() {
+        isUpdating = true
+        let path = repoPath
+        let buildScript = "\(path)/ClaudeBotManager/build-app.sh"
+        Task.detached(priority: .background) {
+            _ = runShell(
+                "cd \"\(path)\" && git pull --ff-only 2>&1 && bash \"\(buildScript)\" 2>&1"
+            )
+        }
     }
 }
