@@ -102,8 +102,14 @@ struct ClaudeUsageCard: View {
     var usage: ClaudeUsage { appState.claudeUsage }
 
     private var weekReferencePercent: Double {
-        let cal = Calendar.current
         let now = Date()
+        // Use the actual 7-day window from the API reset time (each segment = 24h from session start)
+        if let resetsAt = usage.weeklyResetsAt {
+            let windowStart = resetsAt.addingTimeInterval(-7 * 24 * 3600)
+            return max(0, min(1, now.timeIntervalSince(windowStart) / (7 * 24 * 3600)))
+        }
+        // Fallback: Monday-anchored calendar week
+        let cal = Calendar.current
         let weekday = cal.component(.weekday, from: now)       // 1=Sun … 7=Sat
         let dayIndex = (weekday - 2 + 7) % 7                  // Mon=0 … Sun=6
         let hour   = cal.component(.hour,   from: now)
