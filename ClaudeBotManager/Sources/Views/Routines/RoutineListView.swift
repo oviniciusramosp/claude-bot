@@ -194,16 +194,26 @@ struct RoutineRow: View {
                 }
 
                 // Row 2.5: Error detail (if last execution failed)
-                if let exec = routine.lastExecution, exec.status == .failed, let err = exec.error {
-                    Text(err)
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(red: 1.0, green: 0.220, blue: 0.235))
-                        .lineLimit(2)
-                        .padding(.horizontal, Spacing.sm)
-                        .padding(.vertical, 4)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(red: 1.0, green: 0.220, blue: 0.235).opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                if let exec = routine.lastExecution, exec.status == .failed {
+                    let errorDetail = buildErrorDetail(exec)
+                    if !errorDetail.isEmpty {
+                        Text(errorDetail)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(Color(red: 1.0, green: 0.220, blue: 0.235))
+                            .lineLimit(6)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, Spacing.sm)
+                            .padding(.vertical, 4)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(red: 1.0, green: 0.220, blue: 0.235).opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .contextMenu {
+                                Button("Copy Error") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(errorDetail, forType: .string)
+                                }
+                            }
+                    }
                 }
 
                 // Row 3: Pipeline timeline
@@ -211,10 +221,7 @@ struct RoutineRow: View {
                     pipelineTimeline
                 }
 
-                // Running pulse bar (only for non-pipeline routines; pipelines have step timeline)
-                if isRunning && !routine.isPipeline {
-                    runningBar
-                }
+                // (pulse bar removed — spinner icon is sufficient)
             }
         }
         .contentShape(Rectangle())
@@ -335,6 +342,19 @@ struct RoutineRow: View {
     }
 
     // MARK: - Helpers
+
+    private func buildErrorDetail(_ exec: RoutineExecution) -> String {
+        // For pipelines: show per-step errors, not just "Steps failed: x"
+        if exec.isPipeline && !exec.pipelineSteps.isEmpty {
+            let failedSteps = exec.pipelineSteps.filter { $0.status == .failed && $0.error != nil }
+            if !failedSteps.isEmpty {
+                return failedSteps.map { step in
+                    "\(step.id): \(step.error ?? "unknown error")"
+                }.joined(separator: "\n")
+            }
+        }
+        return exec.error ?? ""
+    }
 
     private func humanReadableDays(_ days: [String]) -> String {
         if days.contains("*") { return "Daily" }
