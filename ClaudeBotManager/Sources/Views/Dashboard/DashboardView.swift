@@ -2,20 +2,13 @@ import SwiftUI
 
 struct DashboardView: View {
     @EnvironmentObject var appState: AppState
-    @State private var showRestartConfirm = false
 
     var body: some View {
         ScrollView {
-            // Equal-height grid: HStack rows so both cards in each row share height
-            VStack(spacing: Spacing.lg) {
-                HStack(alignment: .top, spacing: Spacing.lg) {
-                    BotStatusCard()     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    ClaudeUsageCard()   .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-                HStack(alignment: .top, spacing: Spacing.lg) {
-                    TodayRoutinesCard() .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    SessionsSummaryCard().frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
+            VStack(spacing: Spacing.xl) {
+                BotStatusCard()
+                ClaudeUsageCard()
+                TodayRoutinesCard()
             }
             .padding(Spacing.xl)
         }
@@ -32,65 +25,87 @@ struct BotStatusCard: View {
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: Spacing.lg) {
-                HStack {
-                    SectionHeader(title: "Bot Status", symbol: "cpu")
-                    Spacer()
-                    StatusDot(isRunning: appState.isRunning, size: 10)
+            HStack(spacing: Spacing.xl) {
+                // Robot illustration
+                if let img = Bundle.module.image(forResource: "bot-avatar") {
+                    Image(nsImage: img)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: 160, maxHeight: 164)
                 }
 
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text(appState.botStatusLabel)
-                        .font(.title2.bold())
-                        .foregroundStyle(appState.isRunning ? .primary : .secondary)
+                // Status info
+                VStack(alignment: .leading, spacing: Spacing.md) {
+                    cardHeader("Bot Status", symbol: "desktopcomputer")
 
-                    if case .running(let pid, _) = appState.botStatus {
-                        Text("PID \(pid)")
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                    HStack(spacing: Spacing.sm) {
+                        Text(statusText)
+                            .font(.title2.bold())
+                            .foregroundStyle(appState.isRunning ? .primary : .secondary)
+                        StatusDot(isRunning: appState.isRunning, size: 10)
                     }
-                }
 
-                HStack(spacing: Spacing.sm) {
-                    if appState.isRunning {
-                        Button(role: .destructive) {
-                            Task { await appState.stopBot() }
+                    if case .running(let pid, let uptime) = appState.botStatus {
+                        Text("\(formatUptime(uptime)) - PID \(pid)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: Spacing.md) {
+                        if appState.isRunning {
+                            Button(role: .destructive) {
+                                Task { await appState.stopBot() }
+                            } label: {
+                                Label("Stop", systemImage: "stop.fill").font(.callout)
+                            }
+                            .buttonStyle(.bordered)
+                        } else {
+                            Button {
+                                Task { await appState.startBot() }
+                            } label: {
+                                Label("Start", systemImage: "play.fill").font(.callout)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+
+                        Button {
+                            isRestarting = true
+                            Task {
+                                await appState.restartBot()
+                                isRestarting = false
+                            }
                         } label: {
-                            Label("Stop", systemImage: "stop.fill")
-                                .font(.callout)
+                            Label(
+                                isRestarting ? "Restarting…" : "Restart",
+                                systemImage: "arrow.trianglehead.2.clockwise"
+                            )
+                            .font(.callout)
                         }
                         .buttonStyle(.bordered)
-                    } else {
-                        Button {
-                            Task { await appState.startBot() }
-                        } label: {
-                            Label("Start", systemImage: "play.fill")
-                                .font(.callout)
-                        }
-                        .buttonStyle(.borderedProminent)
+                        .disabled(isRestarting)
                     }
-
-                    Button {
-                        isRestarting = true
-                        Task {
-                            await appState.restartBot()
-                            isRestarting = false
-                        }
-                    } label: {
-                        if isRestarting {
-                            Label("Restarting…", systemImage: "arrow.trianglehead.2.clockwise")
-                                .font(.callout)
-                        } else {
-                            Label("Restart", systemImage: "arrow.trianglehead.2.clockwise")
-                                .font(.callout)
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(isRestarting)
                 }
+
+                Spacer(minLength: 0)
             }
         }
-        .frame(minHeight: 180)
+    }
+
+    private var statusText: String {
+        switch appState.botStatus {
+        case .running: return "Running"
+        case .stopped: return "Stopped"
+        case .unknown: return "Unknown"
+        }
+    }
+
+    private func formatUptime(_ t: TimeInterval) -> String {
+        let s = Int(t)
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s/60)m" }
+        if s < 86400 { return "\(s/3600)h \((s%3600)/60)min" }
+        return "\(s/86400)d \((s%86400)/3600)h"
     }
 }
 
@@ -99,49 +114,53 @@ struct BotStatusCard: View {
 struct ClaudeUsageCard: View {
     @EnvironmentObject var appState: AppState
 
-    var usage: ClaudeUsage { appState.claudeUsage }
+    private var usage: ClaudeUsage { appState.claudeUsage }
 
+    // Elapsed fraction of the 7-day window
     private var weekReferencePercent: Double {
         let now = Date()
-        // Use the actual 7-day window from the API reset time (each segment = 24h from session start)
         if let resetsAt = usage.weeklyResetsAt {
             let windowStart = resetsAt.addingTimeInterval(-7 * 24 * 3600)
             return max(0, min(1, now.timeIntervalSince(windowStart) / (7 * 24 * 3600)))
         }
-        // Fallback: Monday-anchored calendar week
         let cal = Calendar.current
-        let weekday = cal.component(.weekday, from: now)       // 1=Sun … 7=Sat
-        let dayIndex = (weekday - 2 + 7) % 7                  // Mon=0 … Sun=6
+        let weekday = cal.component(.weekday, from: now)
+        let dayIndex = (weekday - 2 + 7) % 7
         let hour   = cal.component(.hour,   from: now)
         let minute = cal.component(.minute, from: now)
         return (Double(dayIndex) + (Double(hour) * 60 + Double(minute)) / 1440.0) / 7.0
     }
 
+    private var effectiveWeeklyPercent: Double {
+        if usage.isAvailable  { return usage.weeklyPercent }
+        if usage.hasTokenData { return usage.weeklyTokenPercent }
+        return 0
+    }
+
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: Spacing.lg) {
-                SectionHeader(title: "Claude Plan", symbol: "bolt.circle")
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                cardHeader("Claude Usage", symbol: "bolt.circle")
 
-                if usage.isAvailable {
-                    VStack(spacing: Spacing.md) {
-                        UsageBar(
-                            percent: usage.sessionPercent,
-                            label: "5-Hour Session",
-                            sublabel: usage.sessionLabel
-                        )
-                        weeklyBarSection
-                    }
+                if usage.isAvailable || usage.hasTokenData {
+                    // Large percentage
+                    Text("\(Int(effectiveWeeklyPercent * 100))%")
+                        .font(.title2.bold())
 
-                    if let reset = usage.weeklyResetsAt {
-                        HStack {
-                            Image(systemName: "clock")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                            Text("Week resets \(reset, style: .relative)")
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
-                        }
-                    }
+                    // Segmented bar
+                    WeeklySegmentBar(
+                        percent: effectiveWeeklyPercent,
+                        referencePercent: weekReferencePercent
+                    )
+
+                    // Pace info
+                    paceRow
+
+                    // Renew info
+                    renewRow
+
+                    // Stat chips
+                    statChips
                 } else if usage.hasPlanInfo {
                     planInfoView
                 } else {
@@ -149,51 +168,70 @@ struct ClaudeUsageCard: View {
                 }
             }
         }
-        .frame(minHeight: 180)
     }
 
-    // Effective fill for the weekly bar (prefers live API data, falls back to token scan)
-    private var effectiveWeeklyPercent: Double {
-        if usage.isAvailable       { return usage.weeklyPercent }
-        if usage.hasTokenData      { return usage.weeklyTokenPercent }
-        return 0
+    // "On pace: -2% (expected 58%)" or "Above pace: +30% (expected 58%)"
+    private var paceRow: some View {
+        let expected = Int(weekReferencePercent * 100)
+        let actual   = Int(effectiveWeeklyPercent * 100)
+        let offset   = actual - expected
+        let label: String
+        if offset <= 0 {
+            label = "On pace: \(offset)% (expected \(expected)%)"
+        } else {
+            label = "Above pace: +\(offset)% (expected \(expected)%)"
+        }
+
+        return HStack(spacing: 4) {
+            Image(systemName: "timer")
+            Text(label)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 
-    // 7-segment weekly bar, shared between isAvailable and plan-info views
-    private var weeklyBarSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.xs) {
-            HStack {
-                Text("7-Day Window")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if usage.isAvailable {
-                    Text(usage.weeklyLabel)
-                        .font(.caption.monospacedDigit())
-                } else if usage.hasTokenData {
-                    HStack(spacing: 3) {
-                        Text(usage.formatTokens(usage.weeklyTokensUsed))
-                            .font(.caption.monospacedDigit().bold())
-                        Text("/ \(usage.formatTokens(usage.weeklyTokensRef))")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Text("scanning…")
-                        .font(.caption2)
-                        .foregroundStyle(.quaternary)
-                }
+    // "Renew Friday 20:00 (3 day 22h)"
+    @ViewBuilder
+    private var renewRow: some View {
+        if let reset = usage.weeklyResetsAt {
+            let dayName = { () -> String in
+                let f = DateFormatter()
+                f.dateFormat = "EEEE"
+                return f.string(from: reset)
+            }()
+            let timeStr = { () -> String in
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm"
+                return f.string(from: reset)
+            }()
+            let remaining = { () -> String in
+                let secs = Int(max(0, reset.timeIntervalSinceNow))
+                let d = secs / 86400
+                let h = (secs % 86400) / 3600
+                if d > 0 { return "\(d) day \(h)h" }
+                return "\(h)h"
+            }()
+
+            HStack(spacing: 4) {
+                Image(systemName: "clock")
+                Text("Renew \(dayName) \(timeStr) (\(remaining))")
             }
-            WeeklySegmentBar(
-                percent: effectiveWeeklyPercent,
-                referencePercent: weekReferencePercent
-            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    // 3 stat chips: agents, routines, skills
+    private var statChips: some View {
+        HStack(spacing: Spacing.sm) {
+            DashboardChip(symbol: "person.2", value: appState.agents.count)
+            DashboardChip(symbol: "clock.arrow.circlepath", value: appState.routines.count)
+            DashboardChip(symbol: "bolt", value: appState.skills.count)
         }
     }
 
     private var planInfoView: some View {
         VStack(alignment: .leading, spacing: Spacing.md) {
-            // Plan name + tier pill
             HStack(spacing: Spacing.sm) {
                 Image(systemName: "checkmark.seal.fill")
                     .foregroundStyle(Color.statusGreen)
@@ -203,16 +241,16 @@ struct ClaudeUsageCard: View {
                         .font(.callout.bold())
                     if let tier = usage.rateTier {
                         Text("\(tier) rate limit")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
 
-            // Weekly bar (reference line only — no fill without data)
-            weeklyBarSection
+            WeeklySegmentBar(
+                percent: effectiveWeeklyPercent,
+                referencePercent: weekReferencePercent
+            )
 
-            // Credentials status
             if let exp = usage.credentialsExpireAt {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: usage.credentialsAreValid ? "key.fill" : "key.slash")
@@ -221,8 +259,7 @@ struct ClaudeUsageCard: View {
                     Text(usage.credentialsAreValid
                          ? "Credentials valid · expires \(exp, style: .relative)"
                          : "Credentials expired")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
@@ -232,14 +269,11 @@ struct ClaudeUsageCard: View {
     private var noCredentialsView: some View {
         VStack(spacing: Spacing.sm) {
             Image(systemName: "key.slash")
-                .font(.title2)
-                .foregroundStyle(.tertiary)
+                .font(.title2).foregroundStyle(.tertiary)
             Text("No credentials found")
-                .font(.callout)
-                .foregroundStyle(.tertiary)
+                .font(.callout).foregroundStyle(.tertiary)
             Text("Sign in to Claude Code CLI first")
-                .font(.caption)
-                .foregroundStyle(.quaternary)
+                .font(.caption).foregroundStyle(.quaternary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, Spacing.sm)
@@ -251,141 +285,181 @@ struct ClaudeUsageCard: View {
 struct TodayRoutinesCard: View {
     @EnvironmentObject var appState: AppState
 
-    private var todayExecutions: [RoutineExecution] {
+    private var allExecutions: [RoutineExecution] {
         appState.routines.flatMap { $0.todayExecutions }
     }
 
-    private var completed: Int { todayExecutions.filter { $0.status == .completed }.count }
-    private var failed: Int { todayExecutions.filter { $0.status == .failed }.count }
-    private var running: Int { todayExecutions.filter { $0.status == .running }.count }
-    private var pending: Int { todayExecutions.filter { $0.status == .pending }.count }
+    /// All scheduled time slots today (from routine definitions), paired with their execution if any
+    private var timeline: [(routine: Routine, time: String, execution: RoutineExecution?)] {
+        var entries: [(routine: Routine, time: String, execution: RoutineExecution?)] = []
+
+        for routine in appState.routines where routine.enabled {
+            for time in routine.schedule.times {
+                let exec = routine.todayExecutions.first { $0.timeSlot == time }
+                entries.append((routine: routine, time: time, execution: exec))
+            }
+        }
+        return entries.sorted { $0.time < $1.time }
+    }
+
+    private var completedCount: Int { allExecutions.filter { $0.status == .completed }.count }
+    private var scheduledCount: Int {
+        timeline.filter { entry in
+            entry.execution == nil || entry.execution?.status == .pending
+        }.count
+    }
+    private var failedCount: Int { allExecutions.filter { $0.status == .failed }.count }
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: Spacing.lg) {
-                SectionHeader(title: "Today's Routines", symbol: "clock.arrow.2.circlepath")
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                cardHeader("Today's Routines", symbol: "clock.arrow.2.circlepath")
 
-                if todayExecutions.isEmpty {
+                if timeline.isEmpty {
                     HStack {
-                        Image(systemName: "moon.zzz")
-                            .foregroundStyle(.tertiary)
-                        Text("No executions today")
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
+                        Image(systemName: "moon.zzz").foregroundStyle(.tertiary)
+                        Text("No routines scheduled today")
+                            .font(.callout).foregroundStyle(.tertiary)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, Spacing.sm)
                 } else {
-                    HStack(spacing: Spacing.xl) {
-                        StatPill(value: completed, label: "Done", color: .statusGreen)
-                        StatPill(value: failed, label: "Failed", color: .statusRed)
-                        if running > 0 {
-                            StatPill(value: running, label: "Running", color: .statusBlue)
+                    HStack(alignment: .top, spacing: Spacing.xl) {
+                        // Left: Summary stats
+                        VStack(spacing: Spacing.sm) {
+                            RoutineStatCard(label: "Done", count: completedCount, color: .statusGreen, symbol: "checkmark")
+                            RoutineStatCard(label: "Scheduled", count: scheduledCount, color: .secondary, symbol: "clock")
+                            if failedCount > 0 {
+                                RoutineStatCard(label: "Failed", count: failedCount, color: .statusRed, symbol: "exclamationmark.triangle")
+                            }
                         }
-                    }
+                        .frame(width: 160)
 
-                    VStack(alignment: .leading, spacing: Spacing.sm) {
-                        ForEach(appState.routines.prefix(4)) { routine in
-                            if let last = routine.lastExecution {
-                                RoutineStatusRow(name: routine.title, execution: last)
+                        // Right: Timeline
+                        VStack(alignment: .leading, spacing: 0) {
+                            let nowTime = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: Date()) }()
+
+                            ForEach(Array(timeline.enumerated()), id: \.offset) { idx, entry in
+                                let isPast = entry.time <= nowTime
+                                let nextIsFuture = idx + 1 < timeline.count && timeline[idx + 1].time > nowTime
+
+                                TimelineRow(
+                                    time: entry.time,
+                                    name: entry.routine.title,
+                                    status: entry.execution?.status ?? .pending
+                                )
+                                .padding(.vertical, 5)
+
+                                // Progress line between past and future entries
+                                if isPast && nextIsFuture {
+                                    HStack(spacing: 0) {
+                                        Rectangle()
+                                            .fill(Color.statusRed.opacity(0.5))
+                                            .frame(height: 2)
+                                        Circle()
+                                            .fill(Color.statusRed)
+                                            .frame(width: 8, height: 8)
+                                    }
+                                    .padding(.vertical, 4)
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        .frame(minHeight: 180)
     }
 }
 
-struct StatPill: View {
+// MARK: - Helper Components
+
+/// Section header matching Figma style — icon + title, 50% opacity
+private func cardHeader(_ title: String, symbol: String) -> some View {
+    HStack(spacing: 5) {
+        Image(systemName: symbol)
+            .font(.body)
+            .opacity(0.5)
+        Text(title)
+            .font(.subheadline.bold())
+            .tracking(-0.6)
+            .opacity(0.5)
+    }
+    .foregroundStyle(.primary)
+}
+
+/// Stat chip at bottom of usage card
+struct DashboardChip: View {
+    var symbol: String
     var value: Int
-    var label: String
-    var color: Color
 
     var body: some View {
-        VStack(spacing: Spacing.xs) {
-            Text("\(value)")
-                .font(.title2.bold())
-                .foregroundStyle(color)
-            Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+        HStack(spacing: 4) {
+            Image(systemName: symbol).font(.caption)
+            Text("\(value)").font(.caption)
         }
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity)
+        .background(Color.primary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
 
-struct RoutineStatusRow: View {
+/// Summary stat card for Today's Routines left column
+struct RoutineStatCard: View {
+    var label: String
+    var count: Int
+    var color: Color
+    var symbol: String
+
+    var body: some View {
+        HStack {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.caption)
+                    .foregroundStyle(color)
+                Text(label)
+                    .font(.caption)
+            }
+            Spacer()
+            Text("\(count)")
+                .font(.title2.bold())
+        }
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.lg)
+        .background(Color.primary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// Single row in the routines timeline
+struct TimelineRow: View {
+    var time: String
     var name: String
-    var execution: RoutineExecution
+    var status: RoutineExecution.Status
 
     private var statusColor: Color {
-        switch execution.status {
+        switch status {
         case .completed: .statusGreen
-        case .failed: .statusRed
-        case .running: .statusBlue
+        case .failed:    .statusRed
+        case .running:   .statusBlue
         case .pending, .skipped: .secondary
         }
     }
 
     var body: some View {
         HStack(spacing: Spacing.sm) {
-            Image(systemName: execution.status.symbol)
+            Text(time)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 40, alignment: .trailing)
+            Image(systemName: status.symbol)
+                .font(.caption)
                 .foregroundStyle(statusColor)
-                .font(.callout)
             Text(name)
-                .font(.callout)
+                .font(.caption.bold())
                 .lineLimit(1)
-            Spacer()
-            Text(execution.timeSlot)
-                .font(.callout.monospacedDigit())
-                .foregroundStyle(.tertiary)
         }
-    }
-}
-
-// MARK: - Sessions Summary Card
-
-struct SessionsSummaryCard: View {
-    @EnvironmentObject var appState: AppState
-
-    var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: Spacing.lg) {
-                SectionHeader(title: "Sessions", symbol: "list.bullet.rectangle")
-
-                HStack(spacing: Spacing.xl) {
-                    StatPill(value: appState.sessions.sessions.count, label: "Total", color: .statusBlue)
-                    if let active = appState.sessions.active {
-                        VStack(alignment: .leading, spacing: Spacing.xs) {
-                            Text("Active")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Text(active.name)
-                                .font(.callout.bold())
-                                .lineLimit(1)
-                        }
-                    }
-                }
-
-                if let active = appState.sessions.active {
-                    VStack(alignment: .leading, spacing: Spacing.sm) {
-                        SettingRow("Model") { ModelBadge(model: active.model) }
-                        if let agentId = active.agentId {
-                            SettingRow("Agent") {
-                                Text(appState.agents.first { $0.id == agentId }?.name ?? agentId)
-                                    .font(.callout)
-                                    .lineLimit(1)
-                            }
-                        }
-                        SettingRow("Messages") {
-                            Text("\(active.messageCount)")
-                                .font(.callout.monospacedDigit())
-                        }
-                    }
-                }
-            }
-        }
-        .frame(minHeight: 180)
     }
 }

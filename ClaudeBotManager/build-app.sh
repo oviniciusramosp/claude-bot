@@ -21,6 +21,11 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 cp "$PLIST_SRC" "$APP_BUNDLE/Contents/Info.plist"
 
+# Copy SPM resource bundles (e.g. images) into the app
+for bundle in "$BUILD_DIR"/*.bundle; do
+    [ -d "$bundle" ] && cp -R "$bundle" "$APP_BUNDLE/Contents/Resources/"
+done
+
 echo "→ Signing with ad-hoc identity..."
 codesign --sign - --force --deep "$APP_BUNDLE"
 

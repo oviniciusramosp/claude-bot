@@ -208,60 +208,94 @@ struct TagChip: View {
 }
 
 // MARK: - Weekly Segment Bar
-// 7-segment progress bar with a time-reference marker (no clip applied so arrow cap overflows naturally)
+// 7 separate segments with gaps and a pill-shaped reference marker (Figma spec)
 
 struct WeeklySegmentBar: View {
-    var percent: Double           // actual fill 0–1 (0 = no data)
-    var referencePercent: Double  // elapsed fraction of the 7-day window (0–1)
+    var percent: Double             // actual fill 0–1
+    var referencePercent: Double    // elapsed fraction of the 7-day window 0–1
+    var barColor: Color = .statusBlue
 
-    private var barColor: Color {
-        if percent < 0.6 { return .statusGreen }
-        if percent < 0.85 { return .statusYellow }
-        return .statusRed
-    }
+    private let segmentCount = 7
+    private let segmentGap: CGFloat = 2
+    private let barHeight: CGFloat = 10
 
     var body: some View {
         GeometryReader { geo in
-            let w = geo.size.width
-            let refX = (w * min(max(referencePercent, 0), 1)).rounded()
+            let totalGaps = segmentGap * CGFloat(segmentCount - 1)
+            let segW = (geo.size.width - totalGaps) / CGFloat(segmentCount)
 
-            // Bar background
-            RoundedRectangle(cornerRadius: 4)
-                .fill(Color.primary.opacity(0.08))
-                .frame(width: w, height: 8)
-                .offset(y: 7)
-
-            // Bar fill (animated)
-            if percent > 0 {
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(barColor)
-                    .frame(width: (w * min(percent, 1.0)).rounded(), height: 8)
-                    .offset(y: 7)
-                    .animation(.easeInOut(duration: 0.5), value: percent)
+            // — Segments —
+            HStack(spacing: segmentGap) {
+                ForEach(0..<segmentCount, id: \.self) { i in
+                    segmentView(index: i, segmentWidth: segW)
+                }
             }
 
-            // Segment dividers — 6 hairlines splitting into 7 × 24h slots
-            ForEach(1..<7, id: \.self) { i in
-                Rectangle()
-                    .fill(Color.primary.opacity(0.12))
-                    .frame(width: 1, height: 8)
-                    .offset(x: (w * CGFloat(i) / 7).rounded() - 0.5, y: 7)
-            }
-
-            // Reference: vertical line through bar
-            Rectangle()
-                .fill(Color.primary.opacity(0.5))
-                .frame(width: 1.5, height: 10)
-                .offset(x: refX - 0.75, y: 5)
-
-            // Reference: downward-pointing cap above bar
-            Image(systemName: "arrowtriangle.down.fill")
-                .font(.system(size: 5))
-                .foregroundStyle(Color.primary.opacity(0.6))
-                .frame(width: 8, height: 6, alignment: .center)
-                .offset(x: refX - 4, y: 0)
+            // — Reference marker (white pill) —
+            let refX = geo.size.width * min(max(referencePercent, 0), 1)
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color.white)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color(white: 0.75), lineWidth: 1)
+                )
+                .frame(width: 4, height: 18)
+                .shadow(color: .black.opacity(0.25), radius: 2, x: 0, y: 2)
+                .offset(x: refX - 2, y: -4)
         }
-        .frame(height: 15)
+        .frame(height: barHeight)
+    }
+
+    /// Each segment: background (unfilled) + colored fill clipped to the right fraction
+    @ViewBuilder
+    private func segmentView(index: Int, segmentWidth: CGFloat) -> some View {
+        let corners = segmentCorners(index)
+        let fillFraction = segmentFillFraction(index)
+
+        ZStack(alignment: .leading) {
+            // Background (unfilled)
+            UnevenRoundedRectangle(
+                topLeadingRadius: corners.leading,
+                bottomLeadingRadius: corners.leading,
+                bottomTrailingRadius: corners.trailing,
+                topTrailingRadius: corners.trailing
+            )
+            .fill(Color.primary.opacity(0.05))
+
+            // Fill
+            if fillFraction > 0 {
+                UnevenRoundedRectangle(
+                    topLeadingRadius: corners.leading,
+                    bottomLeadingRadius: corners.leading,
+                    bottomTrailingRadius: fillFraction >= 1 ? corners.trailing : 2,
+                    topTrailingRadius: fillFraction >= 1 ? corners.trailing : 2
+                )
+                .fill(barColor)
+                .frame(width: segmentWidth * min(fillFraction, 1))
+                .animation(.easeInOut(duration: 0.5), value: percent)
+            }
+        }
+        .frame(width: segmentWidth, height: barHeight)
+    }
+
+    /// Corner radii: first segment rounded-left, last rounded-right, middle = 2
+    private func segmentCorners(_ index: Int) -> (leading: CGFloat, trailing: CGFloat) {
+        let cap: CGFloat = barHeight / 2  // full capsule end
+        let flat: CGFloat = 2
+        if index == 0                   { return (cap, flat) }
+        if index == segmentCount - 1    { return (flat, cap) }
+        return (flat, flat)
+    }
+
+    /// How much of this segment is filled (0 = empty, 1 = full, 0..<1 = partial)
+    private func segmentFillFraction(_ index: Int) -> CGFloat {
+        let segStart = CGFloat(index) / CGFloat(segmentCount)
+        let segEnd   = CGFloat(index + 1) / CGFloat(segmentCount)
+        let pct      = CGFloat(min(max(percent, 0), 1))
+
+        if pct >= segEnd   { return 1 }
+        if pct <= segStart { return 0 }
+        return (pct - segStart) / (segEnd - segStart)
     }
 }
 

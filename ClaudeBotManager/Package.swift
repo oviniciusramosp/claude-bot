@@ -14,6 +14,7 @@ let package = Package(
             name: "ClaudeBotManager",
             dependencies: ["Yams"],
             path: "Sources",
+            resources: [.process("Resources")]
         )
     ]
 )
