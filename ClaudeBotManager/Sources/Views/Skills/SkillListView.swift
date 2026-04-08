@@ -5,25 +5,28 @@ struct SkillListView: View {
     @State private var selectedSkill: Skill? = nil
 
     var body: some View {
-        Group {
+        ScrollView {
             if appState.skills.isEmpty {
                 EmptyStateView(
-                    symbol: "wand.and.stars",
+                    symbol: SidebarItem.skills.symbol,
                     title: "No Skills",
                     subtitle: "Skills are markdown files in vault/Skills/."
                 )
             } else {
-                List(appState.skills) { skill in
-                    SkillRow(skill: skill)
-                        .onTapGesture { selectedSkill = skill }
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .padding(.vertical, 2)
+                LazyVGrid(
+                    columns: [GridItem(.flexible(), spacing: Spacing.xl),
+                              GridItem(.flexible(), spacing: Spacing.xl)],
+                    spacing: Spacing.xl
+                ) {
+                    ForEach(appState.skills) { skill in
+                        SkillCard(skill: skill)
+                            .onTapGesture { selectedSkill = skill }
+                    }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                .padding(Spacing.xl)
             }
         }
+        .background(Color(.windowBackgroundColor))
         .navigationTitle("Skills")
         .sheet(item: $selectedSkill) { skill in
             SkillDetailView(skill: skill)
@@ -31,50 +34,58 @@ struct SkillListView: View {
     }
 }
 
-struct SkillRow: View {
+struct SkillCard: View {
     var skill: Skill
 
     var body: some View {
-        GlassCard(padding: 12) {
-            HStack(spacing: 12) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 18))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 24)
+        GlassCard(padding: Spacing.xl) {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                // Header: icon + title
+                HStack {
+                    Image(systemName: SidebarItem.skills.symbol)
+                        .font(.system(size: 24))
+                        .foregroundStyle(Color.statusBlue)
+                    Spacer()
+                    if !skill.tags.isEmpty {
+                        HStack(spacing: 4) {
+                            ForEach(skill.tags.prefix(2), id: \.self) { tag in
+                                Text(tag)
+                                    .font(.system(size: 10))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.black.opacity(0.05))
+                                    .clipShape(Capsule())
+                                    .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+                            }
+                        }
+                    }
+                }
 
-                VStack(alignment: .leading, spacing: 3) {
+                // Title + description
+                VStack(alignment: .leading, spacing: Spacing.xs) {
                     Text(skill.title)
-                        .font(.callout.bold())
+                        .font(.system(size: 15, weight: .bold))
+                        .tracking(-0.6)
                         .lineLimit(1)
 
                     if !skill.description.isEmpty {
                         Text(skill.description)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                             .lineLimit(2)
-                    }
-
-                    if !skill.trigger.isEmpty {
-                        Label(skill.trigger, systemImage: "bolt.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
                     }
                 }
 
-                Spacer()
-
-                if !skill.tags.isEmpty {
+                // Trigger
+                if !skill.trigger.isEmpty {
                     HStack(spacing: 4) {
-                        ForEach(skill.tags.prefix(3), id: \.self) { tag in
-                            Text(tag)
-                                .font(.caption2)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.primary.opacity(0.06))
-                                .clipShape(Capsule())
-                                .foregroundStyle(.secondary)
-                        }
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color.statusBlue)
+                        Text(skill.trigger)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+                            .lineLimit(1)
                     }
                 }
             }
