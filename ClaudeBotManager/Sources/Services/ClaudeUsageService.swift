@@ -3,15 +3,94 @@ import Foundation
 actor ClaudeUsageService {
 
     func fetchUsage() async -> ClaudeUsage {
-        // Start with Keychain plan info
+        // Start with Keychain credentials/plan info
         var usage = readFromKeychain() ?? .unavailable
 
-        // Scan local project JSONL files for real token counts
+        // Try to get real utilization from the Anthropic usage API
+        if let apiUsage = await fetchFromAPI(oauthToken: keychainOAuthToken()) {
+            usage.sessionPercent  = apiUsage.sessionPercent
+            usage.weeklyPercent   = apiUsage.weeklyPercent
+            usage.sessionResetsAt = apiUsage.sessionResetsAt
+            usage.weeklyResetsAt  = apiUsage.weeklyResetsAt
+            usage.isAvailable     = true
+        }
+
+        // Scan local project JSONL files for real token counts (shown as supplemental info)
         let (thisWeek, reference) = scanWeeklyTokens()
         usage.weeklyTokensUsed = thisWeek
         usage.weeklyTokensRef  = reference
 
         return usage
+    }
+
+    // MARK: - Live API (anthropic.com/api/oauth/usage)
+
+    /// Fetches real session and weekly utilization from the Anthropic usage API.
+    private func fetchFromAPI(oauthToken: String?) async -> ClaudeUsage? {
+        guard let token = oauthToken, !token.isEmpty else { return nil }
+
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else { return nil }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)",         forHTTPHeaderField: "Authorization")
+        request.setValue("claude_cli_macos",        forHTTPHeaderField: "anthropic-client-platform")
+        request.setValue("2023-06-01",              forHTTPHeaderField: "anthropic-version")
+        request.setValue("oauth-2025-04-20",        forHTTPHeaderField: "anthropic-beta")
+        request.setValue("application/json",        forHTTPHeaderField: "Accept")
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+
+        let isoFmt = ISO8601DateFormatter()
+        isoFmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+
+        func parseDate(_ obj: [String: Any]?, key: String) -> Date? {
+            guard let str = obj?[key] as? String else { return nil }
+            return isoFmt.date(from: str)
+        }
+
+        let fiveHour  = json["five_hour"]  as? [String: Any]
+        let sevenDay  = json["seven_day"]  as? [String: Any]
+
+        let sessionPct = (fiveHour?["utilization"] as? Double ?? 0) / 100.0
+        let weeklyPct  = (sevenDay?["utilization"]  as? Double ?? 0) / 100.0
+
+        return ClaudeUsage(
+            sessionPercent:  sessionPct,
+            weeklyPercent:   weeklyPct,
+            sessionResetsAt: parseDate(fiveHour, key: "resets_at"),
+            weeklyResetsAt:  parseDate(sevenDay,  key: "resets_at"),
+            isAvailable:     true,
+            planName:        nil,
+            rateTier:        nil,
+            credentialsExpireAt: nil
+        )
+    }
+
+    /// Extracts the raw OAuth access token from the Keychain credentials JSON.
+    private func keychainOAuthToken() -> String? {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        do { try process.run(); process.waitUntilExit() } catch { return nil }
+        guard process.terminationStatus == 0 else { return nil }
+
+        let raw = pipe.fileHandleForReading.readDataToEndOfFile()
+        guard let trimmed = String(data: raw, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let jsonData = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
+              let oauth = json["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String
+        else { return nil }
+
+        return token
     }
 
     // MARK: - Keychain (plan / credentials)
