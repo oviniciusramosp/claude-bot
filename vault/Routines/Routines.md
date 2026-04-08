@@ -19,3 +19,4 @@ Rotinas agendadas que executam prompts no Claude Code automaticamente.
 
 
 - [[teste-routine]] — Ping o usuario para ele saber que a rotina funcionou
+- [[update-check]] — Verifica diariamente se ha updates do Claude Code ou do repo
