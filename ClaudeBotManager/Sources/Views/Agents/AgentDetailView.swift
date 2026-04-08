@@ -47,20 +47,20 @@ struct AgentDetailView: View {
                     Button(role: .destructive) {
                         showDeleteConfirm = true
                     } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("Move to Trash", systemImage: "trash")
                     }
                     .foregroundStyle(Color.statusRed)
                 }
             }
-            .confirmationDialog("Delete Agent?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-                Button("Delete \(agent.name)", role: .destructive) {
+            .confirmationDialog("Move Agent to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+                Button("Move to Trash", role: .destructive) {
                     Task {
                         try? await appState.deleteAgent(id: agent.id)
                         dismiss()
                     }
                 }
             } message: {
-                Text("This will permanently delete the agent and all its files.")
+                Text("The agent and all its files will be moved to Trash. You can restore from Finder.")
             }
         }
         .frame(minWidth: 600, minHeight: 500)

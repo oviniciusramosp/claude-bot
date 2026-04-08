@@ -93,7 +93,7 @@ actor VaultService {
     func deleteAgent(id: String) throws {
         let agentURL = agentDirURL(for: id)
         guard fm.fileExists(atPath: agentURL.path) else { return }
-        try fm.removeItem(at: agentURL)
+        try fm.trashItem(at: agentURL, resultingItemURL: nil)
         try removeFromAgentsIndex(id: id)
     }
 
@@ -297,13 +297,57 @@ actor VaultService {
         let routinesURL = vaultURL.appending(component: "Routines", directoryHint: .isDirectory)
         let fileURL = routinesURL.appending(component: "\(id).md")
         guard fm.fileExists(atPath: fileURL.path) else { return }
-        try fm.removeItem(at: fileURL)
-        // Also remove pipeline step directory if it exists
+        try fm.trashItem(at: fileURL, resultingItemURL: nil)
+        // Also trash pipeline step directory if it exists
         let pipelineDir = routinesURL.appending(component: id, directoryHint: .isDirectory)
         if fm.fileExists(atPath: pipelineDir.path) {
-            try fm.removeItem(at: pipelineDir)
+            try fm.trashItem(at: pipelineDir, resultingItemURL: nil)
         }
         try removeFromRoutinesIndex(id: id)
+    }
+
+    // MARK: - Skills
+
+    func loadSkills() throws -> [Skill] {
+        let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
+        guard fm.fileExists(atPath: skillsURL.path) else { return [] }
+
+        let entries = try fm.contentsOfDirectory(atPath: skillsURL.path)
+        var skills: [Skill] = []
+
+        for entry in entries {
+            guard entry.hasSuffix(".md") && entry != "Skills.md" else { continue }
+            let fileURL = skillsURL.appending(component: entry)
+            let content = try String(contentsOf: fileURL, encoding: .utf8)
+            let (fm_data, body) = FrontmatterParser.parse(content)
+
+            let name = String(entry.dropLast(3))
+            let cleanBody = body
+                .replacingOccurrences(of: "[[Skills]]\n", with: "")
+                .replacingOccurrences(of: "[[Skills]]", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let skill = Skill(
+                id: name,
+                title: fm_data["title"] as? String ?? name,
+                description: fm_data["description"] as? String ?? "",
+                trigger: fm_data["trigger"] as? String ?? "",
+                tags: fm_data["tags"] as? [String] ?? ["skill"],
+                created: fm_data["created"] as? String ?? today(),
+                updated: fm_data["updated"] as? String ?? today(),
+                body: cleanBody
+            )
+            skills.append(skill)
+        }
+        return skills.sorted { $0.title < $1.title }
+    }
+
+    func deleteSkill(id: String) throws {
+        let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
+        let fileURL = skillsURL.appending(component: "\(id).md")
+        guard fm.fileExists(atPath: fileURL.path) else { return }
+        try fm.trashItem(at: fileURL, resultingItemURL: nil)
+        try removeFromSkillsIndex(id: id)
     }
 
     // MARK: - Index helpers
@@ -338,6 +382,14 @@ actor VaultService {
 
     private func removeFromRoutinesIndex(id: String) throws {
         let indexURL = vaultURL.appending(component: "Routines").appending(component: "Routines.md")
+        guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)]]") }
+        content = lines.joined(separator: "\n")
+        try content.write(to: indexURL, atomically: true, encoding: .utf8)
+    }
+
+    private func removeFromSkillsIndex(id: String) throws {
+        let indexURL = vaultURL.appending(component: "Skills").appending(component: "Skills.md")
         guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
         let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)]]") }
         content = lines.joined(separator: "\n")

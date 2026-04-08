@@ -84,17 +84,19 @@ struct RoutineDetailView: View {
                 }
                 ToolbarItem(placement: .destructiveAction) {
                     Button(role: .destructive) { showDeleteConfirm = true } label: {
-                        Label("Delete", systemImage: "trash")
+                        Label("Move to Trash", systemImage: "trash")
                     }
                 }
             }
-            .confirmationDialog("Delete Routine?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-                Button("Delete \(routine.title)", role: .destructive) {
+            .confirmationDialog("Move to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+                Button("Move to Trash", role: .destructive) {
                     Task {
                         try? await appState.deleteRoutine(id: routine.id)
                         dismiss()
                     }
                 }
+            } message: {
+                Text("The routine will be moved to Trash. You can restore from Finder.")
             }
         }
         .frame(minWidth: 620, minHeight: 520)

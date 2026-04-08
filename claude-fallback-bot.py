@@ -11,7 +11,9 @@ import http.server
 import json
 import logging
 import os
+import secrets
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -75,6 +77,8 @@ HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 
 DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
+CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
+PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
@@ -369,6 +373,7 @@ class RoutineStateManager:
 
     def __init__(self) -> None:
         ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.Lock()
         self._cleanup_stale_running()
 
     def _cleanup_stale_running(self) -> None:
@@ -420,19 +425,20 @@ class RoutineStateManager:
         return entry.get("status") in ("completed", "running", "failed")
 
     def set_status(self, routine_name: str, time_slot: str, status: str, error: Optional[str] = None) -> None:
-        data = self._load()
-        if routine_name not in data:
-            data[routine_name] = {}
-        entry = data[routine_name].get(time_slot, {})
-        entry["status"] = status
-        if status == "running":
-            entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        elif status in ("completed", "failed"):
-            entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        if error:
-            entry["error"] = error
-        data[routine_name][time_slot] = entry
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            if routine_name not in data:
+                data[routine_name] = {}
+            entry = data[routine_name].get(time_slot, {})
+            entry["status"] = status
+            if status == "running":
+                entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            elif status in ("completed", "failed"):
+                entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            if error:
+                entry["error"] = error
+            data[routine_name][time_slot] = entry
+            self._save(data)
 
     def get_today_state(self) -> Dict:
         return self._load()
@@ -442,48 +448,62 @@ class RoutineStateManager:
     def set_pipeline_status(self, name: str, time_slot: str, status: str,
                             steps_init: Optional[list] = None, error: Optional[str] = None) -> None:
         """Set pipeline-level status. Optionally initialize step statuses from step id list."""
-        data = self._load()
-        if name not in data:
-            data[name] = {}
-        entry = data[name].get(time_slot, {})
-        entry["status"] = status
-        entry["type"] = "pipeline"
-        if status == "running" and "started_at" not in entry:
-            entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        elif status in ("completed", "failed"):
-            entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        if error:
-            entry["error"] = error
-        if steps_init is not None and "steps" not in entry:
-            entry["steps"] = {sid: {"status": "pending", "attempt": 0} for sid in steps_init}
-        data[name][time_slot] = entry
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            if name not in data:
+                data[name] = {}
+            entry = data[name].get(time_slot, {})
+            entry["status"] = status
+            entry["type"] = "pipeline"
+            if status == "running" and "started_at" not in entry:
+                entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            elif status in ("completed", "failed"):
+                entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            if error:
+                entry["error"] = error
+            if steps_init is not None and "steps" not in entry:
+                entry["steps"] = {sid: {"status": "pending", "attempt": 0} for sid in steps_init}
+            data[name][time_slot] = entry
+            self._save(data)
 
     def set_step_status(self, pipeline_name: str, time_slot: str, step_id: str,
                         status: str, error: Optional[str] = None, attempt: Optional[int] = None) -> None:
         """Update a single step within a pipeline run."""
-        data = self._load()
-        entry = data.get(pipeline_name, {}).get(time_slot, {})
-        steps = entry.get("steps", {})
-        step = steps.get(step_id, {})
-        step["status"] = status
-        if status == "running":
-            step["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        elif status in ("completed", "failed", "skipped"):
-            step["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        if error:
-            step["error"] = error
-        if attempt is not None:
-            step["attempt"] = attempt
-        steps[step_id] = step
-        entry["steps"] = steps
-        data.setdefault(pipeline_name, {})[time_slot] = entry
-        self._save(data)
+        with self._lock:
+            data = self._load()
+            entry = data.get(pipeline_name, {}).get(time_slot, {})
+            steps = entry.get("steps", {})
+            step = steps.get(step_id, {})
+            step["status"] = status
+            if status == "running":
+                step["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            elif status in ("completed", "failed", "skipped"):
+                step["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            if error:
+                step["error"] = error
+            if attempt is not None:
+                step["attempt"] = attempt
+            steps[step_id] = step
+            entry["steps"] = steps
+            data.setdefault(pipeline_name, {})[time_slot] = entry
+            self._save(data)
 
     def get_pipeline_steps(self, pipeline_name: str, time_slot: str) -> Dict:
         """Read step-level status for a pipeline run."""
         data = self._load()
         return data.get(pipeline_name, {}).get(time_slot, {}).get("steps", {})
+
+
+def _cleanup_stale_pipeline_workspaces() -> None:
+    """Remove /tmp/claude-pipeline-* directories older than 24 hours."""
+    cutoff = time.time() - PIPELINE_WORKSPACE_MAX_AGE
+    for p in Path("/tmp").glob("claude-pipeline-*"):
+        try:
+            if p.is_dir() and p.stat().st_mtime < cutoff:
+                shutil.rmtree(p, ignore_errors=True)
+                logger.info("Cleaned up stale pipeline workspace: %s", p)
+        except OSError:
+            pass
 
 
 class RoutineScheduler:
@@ -523,10 +543,22 @@ class RoutineScheduler:
                 fm, body = get_frontmatter_and_body(md_file)
                 if not fm or not body:
                     continue
+                # P2-05: Validate required frontmatter fields
+                _missing = [f for f in ("title", "type", "schedule", "model", "enabled")
+                            if f not in fm]
+                if _missing:
+                    logger.warning("Routine %s skipped — missing required fields: %s",
+                                   md_file.name, ", ".join(_missing))
+                    continue
                 if not fm.get("enabled", False):
                     continue
                 schedule = fm.get("schedule", {})
                 if not isinstance(schedule, dict):
+                    logger.warning("Routine %s skipped — 'schedule' must be a mapping", md_file.name)
+                    continue
+                if not isinstance(schedule.get("times"), list) or not schedule["times"]:
+                    logger.warning("Routine %s skipped — 'schedule.times' must be a non-empty list",
+                                   md_file.name)
                     continue
                 # Check expiry
                 until = schedule.get("until") or fm.get("until")
@@ -539,8 +571,6 @@ class RoutineScheduler:
                         continue
                 # Check time
                 times = schedule.get("times", [])
-                if not isinstance(times, list):
-                    continue
                 routine_name = md_file.stem
                 model = str(fm.get("model", "sonnet"))
                 routine_type = str(fm.get("type", "routine"))
@@ -611,6 +641,35 @@ class RoutineScheduler:
         if not steps:
             logger.error("Pipeline %s: no valid steps after parsing", routine_name)
             return
+
+        # P2-04: DAG cycle detection via DFS
+        step_ids_set = {s.id for s in steps}
+        adj: Dict[str, list] = {s.id: [d for d in s.depends_on if d in step_ids_set] for s in steps}
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: Dict[str, int] = {sid: WHITE for sid in step_ids_set}
+
+        def _dfs_cycle(node: str, path: list) -> Optional[list]:
+            color[node] = GRAY
+            path.append(node)
+            for dep in adj[node]:
+                if color[dep] == GRAY:
+                    cycle_start = path.index(dep)
+                    return path[cycle_start:]
+                if color[dep] == WHITE:
+                    result = _dfs_cycle(dep, path)
+                    if result is not None:
+                        return result
+            path.pop()
+            color[node] = BLACK
+            return None
+
+        for sid in step_ids_set:
+            if color[sid] == WHITE:
+                cycle = _dfs_cycle(sid, [])
+                if cycle is not None:
+                    cycle_str = " -> ".join(cycle + [cycle[0]])
+                    logger.error("Pipeline %s has dependency cycle: %s", routine_name, cycle_str)
+                    return
 
         task = PipelineTask(
             name=routine_name,
@@ -1191,6 +1250,13 @@ class PipelineExecutor:
 
     def execute(self) -> bool:
         """Run the full pipeline. Returns True if all steps completed successfully."""
+        # P2-01: Validate that the vault/workspace path exists before running
+        vault = Path(CLAUDE_WORKSPACE)
+        if not vault.is_dir():
+            logger.error("Pipeline %s aborted: workspace path does not exist: %s", self.task.name, vault)
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed",
+                                           error=f"Workspace not found: {vault}")
+            return False
         logger.info("Pipeline %s starting (%d steps)", self.task.name, len(self.task.steps))
         self.workspace.mkdir(parents=True, exist_ok=True)
         data_dir = self.workspace / "data"
@@ -1524,7 +1590,7 @@ class ClaudeTelegramBot:
 
         # Thread contexts: keyed by (chat_id, thread_id)
         self._contexts: Dict[tuple, ThreadContext] = {}
-        self._contexts_lock = threading.Lock()
+        self._contexts_lock = threading.RLock()
         self._load_contexts()
 
         # Active context (set per-message in the polling loop)
@@ -1532,6 +1598,7 @@ class ClaudeTelegramBot:
 
         # Routine scheduler
         self.routine_state = RoutineStateManager()
+        _cleanup_stale_pipeline_workspaces()
         self.scheduler = RoutineScheduler(self.routine_state, self._enqueue_routine, self._enqueue_pipeline)
         self.scheduler.start()
 
@@ -1739,11 +1806,15 @@ class ClaudeTelegramBot:
         return ClaudeRunner()
 
     def send_message(self, text: str, parse_mode: str = "Markdown",
-                     reply_markup: Optional[Dict] = None) -> Optional[int]:
+                     reply_markup: Optional[Dict] = None,
+                     chat_id: Optional[str] = None,
+                     thread_id: Optional[str] = None) -> Optional[int]:
         chunks = self._split_message(text)
         last_msg_id = None
-        chat_id = self._chat_id
-        thread_id = self._ctx.thread_id if self._ctx else None
+        if chat_id is None:
+            chat_id = self._chat_id
+        if thread_id is None:
+            thread_id = self._ctx.thread_id if self._ctx else None
         for chunk in chunks:
             data: Dict[str, Any] = {"chat_id": chat_id, "text": chunk}
             if thread_id:
@@ -2016,9 +2087,13 @@ class ClaudeTelegramBot:
             self.send_message("❌ Valores aceitos: `low`, `medium`, `high`")
 
     def cmd_btw(self, text: str) -> None:
-        if self.runner.running:
-            with self._pending_lock:
-                self.pending_messages.append(text)
+        ctx = self._ctx
+        if ctx and ctx.runner and ctx.runner.running:
+            with ctx.pending_lock:
+                if len(ctx.pending) >= 10:
+                    self.send_message("⚠️ Fila cheia — aguarde o Claude terminar.")
+                    return
+                ctx.pending.append(text)
             self.send_message("📝 Mensagem enfileirada — será enviada quando o Claude terminar.")
         else:
             self._run_claude_prompt(text)
@@ -2337,7 +2412,8 @@ class ClaudeTelegramBot:
             filename = f"{int(time.time())}_{Path(file_path).stem}{ext}"
             save_path = save_dir / filename
 
-            urllib.request.urlretrieve(url, str(save_path))
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                save_path.write_bytes(resp.read())
             logger.info("Downloaded file to %s (%s)", save_path, file_path)
             return save_path
         except Exception as exc:
@@ -2485,7 +2561,10 @@ class ClaudeTelegramBot:
 
         finally:
             # Cleanup temp files
-            for p in [saved, saved.with_suffix(".wav")]:
+            cleanup_paths = [saved]
+            if saved:
+                cleanup_paths.append(saved.with_suffix(".wav"))
+            for p in cleanup_paths:
                 try:
                     if p and p.exists():
                         p.unlink()
@@ -2510,7 +2589,13 @@ class ClaudeTelegramBot:
             # Create session for this context
             s = self.sessions.create(ctx.session_name)
             return s
-        return self._get_session()
+        # No context or no session_name — ensure at least one session exists
+        self.sessions.ensure_active()
+        active = self.sessions.active_name
+        if active and active in self.sessions.sessions:
+            return self.sessions.sessions[active]
+        # Last resort: create a default session
+        return self.sessions.create()
 
     def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
                           no_output_timeout: int = 90,
@@ -3073,8 +3158,27 @@ class ClaudeTelegramBot:
     def _start_control_server(self) -> None:
         bot = self
 
+        # Generate and persist a bearer token for this session
+        control_token = secrets.token_hex(32)
+        try:
+            CONTROL_TOKEN_FILE.write_text(control_token, encoding="utf-8")
+            CONTROL_TOKEN_FILE.chmod(0o600)
+            logger.info("Control server token written to %s", CONTROL_TOKEN_FILE)
+        except Exception as exc:
+            logger.error("Failed to write control token: %s", exc)
+
         class _Handler(http.server.BaseHTTPRequestHandler):
+            def _check_auth(self) -> bool:
+                """Validate X-Bot-Token header. Returns True if authorized."""
+                token = self.headers.get("X-Bot-Token", "")
+                if token != control_token:
+                    self._respond(401, {"error": "unauthorized"})
+                    return False
+                return True
+
             def do_POST(self):
+                if not self._check_auth():
+                    return
                 try:
                     length = int(self.headers.get("Content-Length", 0))
                     body = json.loads(self.rfile.read(length)) if length else {}
@@ -3154,9 +3258,11 @@ class ClaudeTelegramBot:
 
         try:
             server = http.server.HTTPServer(("127.0.0.1", CONTROL_PORT), _Handler)
+            self._control_server = server
             threading.Thread(target=server.serve_forever, daemon=True, name="control-server").start()
             logger.info("Control server listening on 127.0.0.1:%d", CONTROL_PORT)
         except Exception as exc:
+            self._control_server = None
             logger.error("Failed to start control server: %s", exc)
 
     def _notify_startup(self) -> None:
@@ -3233,15 +3339,28 @@ class ClaudeTelegramBot:
                 logger.error("Polling error: %s", exc, exc_info=True)
                 time.sleep(5)
 
-        logger.info("Bot stopped.")
+        logger.info("Polling loop exited.")
 
     def stop(self) -> None:
+        logger.info("Stopping bot...")
         self._stop_event.set()
+        # Stop the routine scheduler
+        self.scheduler.stop()
+        if self.scheduler._thread.is_alive():
+            self.scheduler._thread.join(timeout=5)
         # Cancel all running contexts
         with self._contexts_lock:
             for ctx in self._contexts.values():
                 if ctx.runner and ctx.runner.running:
                     ctx.runner.cancel()
+        # Cancel active pipelines
+        with self._active_pipelines_lock:
+            for executor in self._active_pipelines.values():
+                executor.cancel()
+        # Shutdown control server
+        if getattr(self, "_control_server", None):
+            self._control_server.shutdown()
+        logger.info("Bot stopped.")
 
 
 # ---------------------------------------------------------------------------
@@ -3251,6 +3370,13 @@ class ClaudeTelegramBot:
 if __name__ == "__main__":
     if "--run" in sys.argv or len(sys.argv) == 1:
         bot = ClaudeTelegramBot()
+
+        def _sigterm_handler(signum, frame):
+            logger.info("Received SIGTERM, initiating graceful shutdown.")
+            bot.stop()
+
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+
         try:
             bot.run()
         except KeyboardInterrupt:

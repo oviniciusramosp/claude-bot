@@ -14,6 +14,7 @@ final class AppState: ObservableObject {
         source: nil, sourceId: nil, instructions: "", created: "", updated: "")
     @Published var agents: [Agent] = []
     @Published var routines: [Routine] = []
+    @Published var skills: [Skill] = []
     @Published var sessions: SessionsFile = SessionsFile(sessions: [:], activeSession: nil, cumulativeTurns: 0)
     @Published var contexts: [ContextService.TopicContext] = []
     @Published var recentLogs: [LogEntry] = []
@@ -81,7 +82,8 @@ final class AppState: ObservableObject {
             "\(dataDir)/sessions.json",
             "\(dataDir)/contexts.json",
             "\(vaultPath)/Agents",
-            "\(vaultPath)/Routines"
+            "\(vaultPath)/Routines",
+            "\(vaultPath)/Skills"
         ] {
             fileWatcher.watch(path: path, onChange: refresh)
         }
@@ -95,6 +97,7 @@ final class AppState: ObservableObject {
         await loadMainAgent()
         await loadAgents()
         await loadRoutines()
+        await loadSkills()
         await loadSessions()
         await loadContexts()
         await refreshBotStatus()
@@ -199,7 +202,10 @@ final class AppState: ObservableObject {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: ["name": routine.id, "time_slot": "dry-run"])
-        let (_, response) = try await URLSession.shared.data(for: req)
+        let sessionConfig = URLSessionConfiguration.default
+        sessionConfig.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: sessionConfig)
+        let (_, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -212,6 +218,18 @@ final class AppState: ObservableObject {
     func deleteRoutine(id: String) async throws {
         try await vaultService?.deleteRoutine(id: id)
         await loadRoutines()
+    }
+
+    func loadSkills() async {
+        guard let vs = vaultService else { return }
+        do {
+            skills = try await vs.loadSkills()
+        } catch {}
+    }
+
+    func deleteSkill(id: String) async throws {
+        try await vaultService?.deleteSkill(id: id)
+        await loadSkills()
     }
 
     func routineHistory(id: String) async -> [RoutineExecution] {
