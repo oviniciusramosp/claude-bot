@@ -220,6 +220,22 @@ final class AppState: ObservableObject {
         await loadRoutines()
     }
 
+    func stopRoutine(_ routine: Routine) async throws {
+        let url = URL(string: "http://127.0.0.1:27182/routine/stop")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["name": routine.id])
+        let sessionConfig = URLSessionConfiguration.default
+        sessionConfig.timeoutIntervalForRequest = 10
+        let session = URLSession(configuration: sessionConfig)
+        let (_, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        await loadRoutines()
+    }
+
     func loadSkills() async {
         guard let vs = vaultService else { return }
         do {
