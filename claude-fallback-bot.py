@@ -5,6 +5,8 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
+BOT_VERSION = "2.0.0"  # Multi-agent pipeline orchestration
+
 import http.server
 import json
 import logging
@@ -336,7 +338,8 @@ class PipelineStep:
     prompt: str  # resolved prompt text
     depends_on: list = field(default_factory=list)
     agent: Optional[str] = None
-    timeout: int = 300
+    timeout: int = 1200           # max wall-clock seconds (hard limit)
+    inactivity_timeout: int = 300  # max seconds without any output (kills idle steps)
     retry: int = 0
     output_to_telegram: bool = False
     engine: str = "claude"
@@ -590,7 +593,8 @@ class RoutineScheduler:
                 prompt=prompt_text,
                 depends_on=depends,
                 agent=s.get("agent") or default_agent,
-                timeout=int(s.get("timeout", 300)),
+                timeout=int(s.get("timeout", 1200)),
+                inactivity_timeout=int(s.get("inactivity_timeout", 300)),
                 retry=int(s.get("retry", 0)),
                 output_to_telegram=(str(s.get("output", "")).lower() == "telegram"),
                 engine=str(s.get("engine", "claude")),
@@ -1331,16 +1335,25 @@ class PipelineExecutor:
 
         try:
             runner.run(prompt, model=step.model, workspace=ws)
-            # Wait for completion with timeout
-            deadline = time.time() + step.timeout
-            while runner.running and time.time() < deadline:
+            # Wait for completion with dual timeout:
+            #   - inactivity_timeout: max seconds without any output from Claude
+            #   - timeout: max wall-clock seconds (hard limit)
+            hard_deadline = time.time() + step.timeout
+            while runner.running and time.time() < hard_deadline:
                 if self._cancelled.is_set():
                     runner.cancel()
                     break
+                # Check inactivity
+                idle = time.time() - runner.last_activity
+                if idle > step.inactivity_timeout and runner.last_activity > runner.start_time:
+                    runner.cancel()
+                    raise TimeoutError(
+                        f"Step {step.id} idle for {int(idle)}s (inactivity limit: {step.inactivity_timeout}s)")
                 time.sleep(1)
             if runner.running:
+                elapsed = int(time.time() - runner.start_time)
                 runner.cancel()
-                raise TimeoutError(f"Step {step.id} timed out after {step.timeout}s")
+                raise TimeoutError(f"Step {step.id} exceeded {step.timeout}s hard limit (ran {elapsed}s)")
 
             # Capture output
             output = runner.result_text or runner.accumulated_text or ""

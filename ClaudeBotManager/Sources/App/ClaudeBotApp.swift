@@ -1,0 +1,48 @@
+import SwiftUI
+import AppKit
+
+@main
+struct ClaudeBotApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var appState = AppState()
+
+    var body: some Scene {
+        Window("Claude Bot Manager", id: "main") {
+            ContentView()
+                .environmentObject(appState)
+                .frame(minWidth: 900, minHeight: 600)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1100, height: 700)
+        .commands {
+            CommandGroup(replacing: .appInfo) {}
+        }
+
+        MenuBarExtra {
+            MenuBarView()
+                .environmentObject(appState)
+        } label: {
+            MenuBarLabel()
+                .environmentObject(appState)
+        }
+        .menuBarExtraStyle(.window)
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hide from Dock — LSUIElement handles this via Info.plist
+        // but we ensure it programmatically too
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            for window in NSApp.windows {
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+        return true
+    }
+}
