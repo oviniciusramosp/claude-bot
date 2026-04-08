@@ -6,20 +6,13 @@ struct DashboardView: View {
 
     var body: some View {
         ScrollView {
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
-                // Bot Status Card
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: Spacing.lg), GridItem(.flexible(), spacing: Spacing.lg)], spacing: Spacing.lg) {
                 BotStatusCard()
-
-                // Claude Usage Card
                 ClaudeUsageCard()
-
-                // Today's Routines Card
                 TodayRoutinesCard()
-
-                // Active Sessions Card
                 SessionsSummaryCard()
             }
-            .padding(20)
+            .padding(Spacing.xl)
         }
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Dashboard")
@@ -34,32 +27,32 @@ struct BotStatusCard: View {
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Spacing.lg) {
                 HStack {
                     SectionHeader(title: "Bot Status", symbol: "cpu")
                     Spacer()
                     StatusDot(isRunning: appState.isRunning, size: 10)
                 }
 
-                Text(appState.botStatusLabel)
-                    .font(.title3.bold())
-                    .foregroundStyle(appState.isRunning ? .primary : .secondary)
+                VStack(alignment: .leading, spacing: Spacing.xs) {
+                    Text(appState.botStatusLabel)
+                        .font(.title2.bold())
+                        .foregroundStyle(appState.isRunning ? .primary : .secondary)
 
-                if case .running(let pid, _) = appState.botStatus {
-                    Text("PID \(pid)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.tertiary)
+                    if case .running(let pid, _) = appState.botStatus {
+                        Text("PID \(pid)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
                 }
 
-                Divider()
-
-                HStack(spacing: 8) {
+                HStack(spacing: Spacing.sm) {
                     if appState.isRunning {
                         Button(role: .destructive) {
                             Task { await appState.stopBot() }
                         } label: {
                             Label("Stop", systemImage: "stop.fill")
-                                .font(.caption)
+                                .font(.callout)
                         }
                         .buttonStyle(.bordered)
                     } else {
@@ -67,7 +60,7 @@ struct BotStatusCard: View {
                             Task { await appState.startBot() }
                         } label: {
                             Label("Start", systemImage: "play.fill")
-                                .font(.caption)
+                                .font(.callout)
                         }
                         .buttonStyle(.borderedProminent)
                     }
@@ -81,10 +74,10 @@ struct BotStatusCard: View {
                     } label: {
                         if isRestarting {
                             Label("Restarting…", systemImage: "arrow.trianglehead.2.clockwise")
-                                .font(.caption)
+                                .font(.callout)
                         } else {
                             Label("Restart", systemImage: "arrow.trianglehead.2.clockwise")
-                                .font(.caption)
+                                .font(.callout)
                         }
                     }
                     .buttonStyle(.bordered)
@@ -92,6 +85,7 @@ struct BotStatusCard: View {
                 }
             }
         }
+        .frame(minHeight: 180)
     }
 }
 
@@ -104,11 +98,11 @@ struct ClaudeUsageCard: View {
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Spacing.lg) {
                 SectionHeader(title: "Claude Usage", symbol: "bolt.circle")
 
                 if usage.isAvailable {
-                    VStack(spacing: 10) {
+                    VStack(spacing: Spacing.md) {
                         UsageBar(
                             percent: usage.sessionPercent,
                             label: "5-Hour Session",
@@ -122,10 +116,9 @@ struct ClaudeUsageCard: View {
                     }
 
                     if let reset = usage.weeklyResetsAt {
-                        Divider()
                         HStack {
                             Image(systemName: "clock")
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.tertiary)
                             Text("Week resets \(reset, style: .relative)")
                                 .font(.caption)
@@ -133,22 +126,23 @@ struct ClaudeUsageCard: View {
                         }
                     }
                 } else {
-                    VStack(spacing: 8) {
+                    VStack(spacing: Spacing.sm) {
                         Image(systemName: "bolt.slash")
                             .font(.title2)
                             .foregroundStyle(.tertiary)
                         Text("Usage data unavailable")
-                            .font(.caption)
+                            .font(.callout)
                             .foregroundStyle(.tertiary)
                         Text("Requires Claude Code credentials")
-                            .font(.caption2)
+                            .font(.caption)
                             .foregroundStyle(.quaternary)
                     }
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, Spacing.sm)
                 }
             }
         }
+        .frame(minHeight: 180)
     }
 }
 
@@ -168,7 +162,7 @@ struct TodayRoutinesCard: View {
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Spacing.lg) {
                 SectionHeader(title: "Today's Routines", symbol: "clock.arrow.2.circlepath")
 
                 if todayExecutions.isEmpty {
@@ -176,13 +170,13 @@ struct TodayRoutinesCard: View {
                         Image(systemName: "moon.zzz")
                             .foregroundStyle(.tertiary)
                         Text("No executions today")
-                            .font(.caption)
+                            .font(.callout)
                             .foregroundStyle(.tertiary)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 8)
+                    .padding(.vertical, Spacing.sm)
                 } else {
-                    HStack(spacing: 16) {
+                    HStack(spacing: Spacing.xl) {
                         StatPill(value: completed, label: "Done", color: .statusGreen)
                         StatPill(value: failed, label: "Failed", color: .statusRed)
                         if running > 0 {
@@ -190,9 +184,7 @@ struct TodayRoutinesCard: View {
                         }
                     }
 
-                    Divider()
-
-                    VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
                         ForEach(appState.routines.prefix(4)) { routine in
                             if let last = routine.lastExecution {
                                 RoutineStatusRow(name: routine.title, execution: last)
@@ -202,6 +194,7 @@ struct TodayRoutinesCard: View {
                 }
             }
         }
+        .frame(minHeight: 180)
     }
 }
 
@@ -211,12 +204,12 @@ struct StatPill: View {
     var color: Color
 
     var body: some View {
-        VStack(spacing: 2) {
+        VStack(spacing: Spacing.xs) {
             Text("\(value)")
-                .font(.title3.bold())
+                .font(.title2.bold())
                 .foregroundStyle(color)
             Text(label)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
@@ -236,16 +229,16 @@ struct RoutineStatusRow: View {
     }
 
     var body: some View {
-        HStack {
+        HStack(spacing: Spacing.sm) {
             Image(systemName: execution.status.symbol)
                 .foregroundStyle(statusColor)
-                .font(.caption)
+                .font(.callout)
             Text(name)
-                .font(.caption)
+                .font(.callout)
                 .lineLimit(1)
             Spacer()
             Text(execution.timeSlot)
-                .font(.caption.monospacedDigit())
+                .font(.callout.monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
     }
@@ -258,55 +251,41 @@ struct SessionsSummaryCard: View {
 
     var body: some View {
         GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: Spacing.lg) {
                 SectionHeader(title: "Sessions", symbol: "list.bullet.rectangle")
 
-                HStack(spacing: 16) {
+                HStack(spacing: Spacing.xl) {
                     StatPill(value: appState.sessions.sessions.count, label: "Total", color: .statusBlue)
                     if let active = appState.sessions.active {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: Spacing.xs) {
                             Text("Active")
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                             Text(active.name)
-                                .font(.caption.bold())
+                                .font(.callout.bold())
                                 .lineLimit(1)
                         }
                     }
                 }
 
                 if let active = appState.sessions.active {
-                    Divider()
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("Model")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
-                            ModelBadge(model: active.model)
-                        }
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        SettingRow("Model") { ModelBadge(model: active.model) }
                         if let agentId = active.agentId {
-                            HStack {
-                                Text("Agent")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                Spacer()
+                            SettingRow("Agent") {
                                 Text(appState.agents.first { $0.id == agentId }?.name ?? agentId)
-                                    .font(.caption)
+                                    .font(.callout)
                                     .lineLimit(1)
                             }
                         }
-                        HStack {
-                            Text("Messages")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Spacer()
+                        SettingRow("Messages") {
                             Text("\(active.messageCount)")
-                                .font(.caption.monospacedDigit())
+                                .font(.callout.monospacedDigit())
                         }
                     }
                 }
             }
         }
+        .frame(minHeight: 180)
     }
 }

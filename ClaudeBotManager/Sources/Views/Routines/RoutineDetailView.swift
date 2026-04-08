@@ -122,82 +122,53 @@ struct RoutineConfigTab: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                titleCard
+            VStack(spacing: Spacing.lg) {
+                identityCard
                 scheduleCard
+                executionCard
                 if routine.isPipeline {
                     PipelineStepEditorCard(steps: $routine.pipelineStepDefs, defaultModel: routine.model)
                 } else {
                     promptCard
                 }
             }
-            .padding(20)
+            .padding(Spacing.xl)
         }
     }
 
-    private var titleCard: some View {
+    // MARK: - Identity Card
+
+    private var identityCard: some View {
         GlassCard {
-            VStack(spacing: 12) {
+            VStack(spacing: Spacing.md) {
                 TextField("Title", text: $routine.title)
                     .font(.title3.bold())
                     .textFieldStyle(.plain)
                 TextField("Description", text: $routine.description)
-                    .font(.subheadline)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .textFieldStyle(.plain)
             }
         }
     }
 
+    // MARK: - Schedule Card
+
     private var scheduleCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                scheduleHeader
-                dayPicker
-                timePicker
-                Divider()
-                modelPicker
-                agentPicker
-                contextToggle
-            }
-        }
-    }
-
-    private var contextToggle: some View {
-        HStack {
-            Text("Minimal Context").font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Toggle("", isOn: $routine.minimalContext)
-                .labelsHidden()
-                .toggleStyle(.switch)
-        }
-        .help("When enabled, the routine runs with only CLAUDE.md — skips vault instructions (Journal, Tooling, etc.)")
-    }
-
-    private var scheduleHeader: some View {
-        HStack {
-            Text("Schedule").font(.headline)
-            Spacer()
-            Toggle("Pipeline", isOn: Binding(
-                get: { routine.isPipeline },
-                set: { newVal in routine.routineType = newVal ? "pipeline" : "routine" }
-            ))
-            .toggleStyle(.switch)
-            .font(.caption)
-            Toggle("Enabled", isOn: $routine.enabled)
-                .labelsHidden()
-                .toggleStyle(.switch)
+        SectionCard(title: "Schedule", symbol: "calendar") {
+            dayPicker
+            timePicker
         }
     }
 
     private var dayPicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
             Text("Days").font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 6) {
+            HStack(spacing: Spacing.sm) {
                 let isAll = routine.schedule.days.contains("*")
                 Button("All") { routine.schedule.days = ["*"] }
-                    .font(.caption2.bold())
-                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .font(.caption.bold())
+                    .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(isAll ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
                     .foregroundStyle(isAll ? Color.statusBlue : Color.secondary)
                     .clipShape(Capsule())
@@ -206,8 +177,8 @@ struct RoutineConfigTab: View {
                     let isSelected = routine.schedule.days.contains(day)
                     let isAll2 = routine.schedule.days.contains("*")
                     Button(label) { toggleDay(day) }
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(isSelected && !isAll2 ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
                         .foregroundStyle(isSelected && !isAll2 ? Color.statusBlue : Color.secondary)
                         .clipShape(Capsule())
@@ -218,9 +189,9 @@ struct RoutineConfigTab: View {
     }
 
     private var timePicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: Spacing.sm) {
             Text("Times (24h)").font(.caption).foregroundStyle(.secondary)
-            FlowLayout(spacing: 6) {
+            FlowLayout(spacing: Spacing.sm) {
                 ForEach(routine.schedule.times, id: \.self) { time in
                     TimeChip(time: time) {
                         routine.schedule.times.removeAll { $0 == time }
@@ -236,44 +207,63 @@ struct RoutineConfigTab: View {
         }
     }
 
-    private var modelPicker: some View {
-        HStack {
-            Text("Model").font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Picker("", selection: $routine.model) {
-                ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                    Text(m.capitalized).tag(m)
+    // MARK: - Execution Settings Card
+
+    private var executionCard: some View {
+        SectionCard(title: "Execution", symbol: "gearshape") {
+            SettingRow("Model") {
+                Picker("", selection: $routine.model) {
+                    ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
+                        Text(m.capitalized).tag(m)
+                    }
                 }
+                .pickerStyle(.segmented).frame(width: 200)
             }
-            .pickerStyle(.segmented).frame(width: 200)
+
+            SettingRow("Agent") {
+                Picker("", selection: $routine.agentId) {
+                    Text("Main (default)").tag(String?.none)
+                    ForEach(appState.agents) { a in
+                        Text("\(a.icon) \(a.name)").tag(Optional(a.id))
+                    }
+                }
+                .frame(maxWidth: 200)
+            }
+
+            SettingRow("Pipeline") {
+                Toggle("", isOn: Binding(
+                    get: { routine.isPipeline },
+                    set: { newVal in routine.routineType = newVal ? "pipeline" : "routine" }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+            }
+
+            SettingRow("Minimal Context") {
+                Toggle("", isOn: $routine.minimalContext)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+            .help("Runs with only CLAUDE.md — skips vault instructions")
+
+            SettingRow("Enabled") {
+                Toggle("", isOn: $routine.enabled)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
         }
     }
 
-    private var agentPicker: some View {
-        HStack {
-            Text("Agent").font(.caption).foregroundStyle(.secondary)
-            Spacer()
-            Picker("", selection: $routine.agentId) {
-                Text("Main (default)").tag(String?.none)
-                ForEach(appState.agents) { a in
-                    Text("\(a.icon) \(a.name)").tag(Optional(a.id))
-                }
-            }
-            .frame(maxWidth: 200)
-        }
-    }
+    // MARK: - Prompt Card
 
     private var promptCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Prompt").font(.caption).foregroundStyle(.secondary)
-                TextEditor(text: $routine.promptBody)
-                    .font(.system(.callout, design: .default))
-                    .frame(minHeight: 150)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.primary.opacity(0.03))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
+        SectionCard(title: "Prompt", symbol: "text.alignleft") {
+            TextEditor(text: $routine.promptBody)
+                .font(.system(.callout, design: .default))
+                .frame(minHeight: 150)
+                .scrollContentBackground(.hidden)
+                .background(Color.primary.opacity(0.03))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
         }
     }
 
@@ -296,14 +286,14 @@ struct TimeChip: View {
     var onRemove: () -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: Spacing.xs) {
             Text(time).font(.caption.monospacedDigit())
             Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill").font(.caption2)
+                Image(systemName: "xmark.circle.fill").font(.caption)
             }
             .buttonStyle(.plain).foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 8).padding(.vertical, 4)
+        .padding(.horizontal, 10).padding(.vertical, 5)
         .background(Color.primary.opacity(0.06))
         .clipShape(Capsule())
     }
@@ -349,29 +339,30 @@ struct RoutineHistoryRow: View {
     }
 
     var body: some View {
-        GlassCard(padding: 10) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
+        GlassCard(padding: Spacing.md) {
+            VStack(alignment: .leading, spacing: Spacing.sm) {
+                HStack(spacing: Spacing.sm) {
                     Image(systemName: execution.status.symbol)
+                        .font(.callout)
                         .foregroundStyle(statusColor)
                     Text("\(execution.date) at \(execution.timeSlot)")
-                        .font(.caption.monospacedDigit())
+                        .font(.callout.monospacedDigit())
                     Spacer()
                     if let duration = execution.duration {
                         Text(duration)
-                            .font(.caption2.monospacedDigit())
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }
                     Text(execution.status.label)
-                        .font(.caption2.bold())
+                        .font(.caption.bold())
                         .foregroundStyle(statusColor)
                 }
                 if let error = execution.error {
                     Text(error)
-                        .font(.caption.monospacedDigit())
+                        .font(.caption)
                         .foregroundStyle(Color.statusRed)
                         .lineLimit(3)
-                        .padding(6)
+                        .padding(Spacing.sm)
                         .background(Color.statusRed.opacity(0.08))
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                 }

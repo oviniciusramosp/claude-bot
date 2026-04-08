@@ -11,91 +11,75 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: Spacing.lg) {
                 // Telegram Config
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionHeader(title: "Telegram", symbol: "paperplane.fill")
-
-                        LabeledContent("Bot Token") {
-                            HStack {
-                                if showToken {
-                                    TextField("", text: $config.telegramBotToken)
-                                        .font(.system(.caption, design: .monospaced))
-                                        .textFieldStyle(.roundedBorder)
-                                } else {
-                                    SecureField("", text: $config.telegramBotToken)
-                                        .font(.system(.caption, design: .monospaced))
-                                        .textFieldStyle(.roundedBorder)
-                                }
-                                Button {
-                                    showToken.toggle()
-                                } label: {
-                                    Image(systemName: showToken ? "eye.slash" : "eye")
-                                        .font(.caption)
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.secondary)
+                SectionCard(title: "Telegram", symbol: "paperplane.fill") {
+                    SettingRow("Bot Token") {
+                        HStack {
+                            if showToken {
+                                TextField("", text: $config.telegramBotToken)
+                                    .font(.system(.callout, design: .monospaced))
+                                    .textFieldStyle(.roundedBorder)
+                            } else {
+                                SecureField("", text: $config.telegramBotToken)
+                                    .font(.system(.callout, design: .monospaced))
+                                    .textFieldStyle(.roundedBorder)
                             }
+                            Button {
+                                showToken.toggle()
+                            } label: {
+                                Image(systemName: showToken ? "eye.slash" : "eye")
+                                    .font(.callout)
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
-                        .font(.caption)
+                    }
 
-                        LabeledContent("Chat ID(s)") {
-                            TextField("e.g. 123456,789012", text: $config.telegramChatId)
-                                .font(.system(.caption, design: .monospaced))
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        .font(.caption)
+                    SettingRow("Chat ID(s)") {
+                        TextField("e.g. 123456,789012", text: $config.telegramChatId)
+                            .font(.system(.callout, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
                     }
                 }
 
                 // Claude Config
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        SectionHeader(title: "Claude", symbol: "cpu")
+                SectionCard(title: "Claude", symbol: "cpu") {
+                    SettingRow("CLI Path") {
+                        TextField("/opt/homebrew/bin/claude", text: $config.claudePath)
+                            .font(.system(.callout, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                    }
 
-                        LabeledContent("CLI Path") {
-                            TextField("/opt/homebrew/bin/claude", text: $config.claudePath)
-                                .font(.system(.caption, design: .monospaced))
+                    SettingRow("Workspace") {
+                        HStack {
+                            TextField("~/", text: $config.claudeWorkspace)
+                                .font(.system(.callout, design: .monospaced))
                                 .textFieldStyle(.roundedBorder)
-                        }
-                        .font(.caption)
-
-                        LabeledContent("Workspace") {
-                            HStack {
-                                TextField("~/", text: $config.claudeWorkspace)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .textFieldStyle(.roundedBorder)
-                                Button {
-                                    let panel = NSOpenPanel()
-                                    panel.canChooseFiles = false
-                                    panel.canChooseDirectories = true
-                                    panel.begin { response in
-                                        if response == .OK, let url = panel.url {
-                                            config.claudeWorkspace = url.path
-                                        }
+                            Button {
+                                let panel = NSOpenPanel()
+                                panel.canChooseFiles = false
+                                panel.canChooseDirectories = true
+                                panel.begin { response in
+                                    if response == .OK, let url = panel.url {
+                                        config.claudeWorkspace = url.path
                                     }
-                                } label: {
-                                    Image(systemName: "folder.badge.plus")
-                                        .font(.caption)
                                 }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.secondary)
+                            } label: {
+                                Image(systemName: "folder.badge.plus")
+                                    .font(.callout)
                             }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
                         }
-                        .font(.caption)
                     }
                 }
 
                 // Paths Info
-                GlassCard {
-                    VStack(alignment: .leading, spacing: 10) {
-                        SectionHeader(title: "Data Paths", symbol: "folder")
-
-                        PathRow(label: "Vault", path: appState.vaultPath)
-                        PathRow(label: "Data Dir", path: appState.dataDir)
-                        PathRow(label: "Log", path: "\(appState.dataDir)/bot.log")
-                    }
+                SectionCard(title: "Data Paths", symbol: "folder") {
+                    PathRow(label: "Vault", path: appState.vaultPath)
+                    PathRow(label: "Data Dir", path: appState.dataDir)
+                    PathRow(label: "Log", path: "\(appState.dataDir)/bot.log")
                 }
 
                 // Save
@@ -103,11 +87,10 @@ struct SettingsView: View {
                     if !savedMessage.isEmpty {
                         Label(savedMessage, systemImage: "checkmark.circle.fill")
                             .foregroundStyle(Color.statusGreen)
-                            .font(.caption)
+                            .font(.callout)
                     }
                     Spacer()
                     Button("Save") {
-                        // Validate paths before saving
                         let fm = FileManager.default
                         let expandedClaude = NSString(string: config.claudePath).expandingTildeInPath
                         let expandedWorkspace = NSString(string: config.claudeWorkspace).expandingTildeInPath
@@ -138,9 +121,9 @@ struct SettingsView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(isSaving)
                 }
-                .padding(.horizontal, 4)
+                .padding(.horizontal, Spacing.xs)
             }
-            .padding(20)
+            .padding(Spacing.xl)
         }
         .navigationTitle("Settings")
         .onAppear {
@@ -161,11 +144,11 @@ struct PathRow: View {
     var body: some View {
         HStack {
             Text(label)
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.secondary)
-                .frame(width: 70, alignment: .leading)
+                .frame(width: 80, alignment: .leading)
             Text(path)
-                .font(.system(.caption, design: .monospaced))
+                .font(.system(.callout, design: .monospaced))
                 .foregroundStyle(.primary)
                 .lineLimit(1)
                 .truncationMode(.middle)
@@ -174,7 +157,7 @@ struct PathRow: View {
                 NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: path)
             } label: {
                 Image(systemName: "arrow.up.forward.square")
-                    .font(.caption)
+                    .font(.callout)
             }
             .buttonStyle(.plain)
             .foregroundStyle(.secondary)

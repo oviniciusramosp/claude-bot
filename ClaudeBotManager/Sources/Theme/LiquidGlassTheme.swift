@@ -1,5 +1,16 @@
 import SwiftUI
 
+// MARK: - Spacing Scale
+
+enum Spacing {
+    static let xs: CGFloat = 4
+    static let sm: CGFloat = 8
+    static let md: CGFloat = 12
+    static let lg: CGFloat = 16
+    static let xl: CGFloat = 20
+    static let xxl: CGFloat = 24
+}
+
 // MARK: - Colors
 
 extension Color {
@@ -37,17 +48,70 @@ struct GlassCard<Content: View>: View {
     }
 }
 
+// MARK: - Section Card
+
+struct SectionCard<Content: View>: View {
+    var title: String
+    var symbol: String
+    var content: Content
+
+    init(title: String, symbol: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.symbol = symbol
+        self.content = content()
+    }
+
+    var body: some View {
+        GlassCard {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                Label(title, systemImage: symbol)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                content
+            }
+        }
+    }
+}
+
+// MARK: - Setting Row
+
+struct SettingRow<Control: View>: View {
+    var label: String
+    var control: Control
+
+    init(_ label: String, @ViewBuilder control: () -> Control) {
+        self.label = label
+        self.control = control()
+    }
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            Spacer()
+            control
+        }
+    }
+}
+
 // MARK: - Status Dot
 
 struct StatusDot: View {
     var isRunning: Bool
     var size: CGFloat = 8
 
+    @State private var isPulsing = false
+
     var body: some View {
         Circle()
             .fill(isRunning ? Color.statusGreen : Color.statusRed)
             .frame(width: size, height: size)
-            .shadow(color: (isRunning ? Color.statusGreen : Color.statusRed).opacity(0.6), radius: 3)
+            .shadow(color: (isRunning ? Color.statusGreen : Color.statusRed).opacity(0.6), radius: isPulsing ? 5 : 3)
+            .scaleEffect(isPulsing ? 1.15 : 1.0)
+            .animation(isRunning ? .easeInOut(duration: 1.2).repeatForever(autoreverses: true) : .default, value: isPulsing)
+            .onChange(of: isRunning) { _, running in isPulsing = running }
+            .onAppear { isPulsing = isRunning }
     }
 }
 
@@ -118,9 +182,9 @@ struct ModelBadge: View {
 
     var body: some View {
         Text(model.capitalized)
-            .font(.caption2.bold())
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
+            .font(.caption.bold())
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
             .background(color.opacity(0.15))
             .foregroundStyle(color)
             .clipShape(Capsule())
@@ -151,9 +215,9 @@ struct EmptyStateView: View {
     var subtitle: String
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: Spacing.lg) {
             Image(systemName: symbol)
-                .font(.system(size: 40))
+                .font(.system(size: 48))
                 .foregroundStyle(.tertiary)
             Text(title)
                 .font(.headline)

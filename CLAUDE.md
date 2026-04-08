@@ -98,6 +98,7 @@ Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sess
 | `/sessions` | List all sessions |
 | `/switch <name>` | Switch session |
 | `/delete <name>` | Delete session |
+| `/run [name]` | Manually trigger a routine/pipeline |
 | `/compact` | Auto-compact context |
 | `/stop` | Cancel running task |
 | `/timeout <sec>` | Change timeout |
@@ -215,18 +216,55 @@ Se o output de uma rotina (nao pipeline) for exatamente `NO_REPLY`, o bot nao en
 
 App macOS nativa (SwiftUI) em `ClaudeBotManager/`. Menu bar app para gerenciar o bot:
 - Dashboard com status do bot e sessoes
-- Gerenciamento de agentes, rotinas e skills
+- Gerenciamento de agentes, rotinas e skills (UI redesenhada v2.3)
+- Criacao e edicao de pipelines com step editor expandivel
 - Delete via Lixeira do macOS (restauravel pelo Finder)
 - Toggle de contexto minimal para rotinas
 - Edicao de settings (.env)
-- Visualizacao de logs
+- Visualizacao de logs com filtros e busca
 
-Build com Xcode toolchain (requer macOS 26 SDK):
+### Build e deploy
+
+O app eh distribuido como `.app` bundle (necessario para preservar permissoes macOS entre builds):
+
 ```bash
-DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
-  /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swift build \
-  --package-path ClaudeBotManager
+# Build + monta .app + reinicia — uso normal
+cd ClaudeBotManager && bash build-app.sh
 ```
+
+O script `build-app.sh`:
+1. Compila com `swift build -c release` usando Xcode 26 toolchain
+2. Monta `ClaudeBotManager.app/Contents/` com o binario e `Info.plist`
+3. Assina com ad-hoc identity (`codesign --sign -`)
+4. Mata o processo anterior e abre o novo bundle
+
+**Por que .app bundle?** Sem bundle, o macOS nao tem identidade estavel (`Info.plist=not bound`) e pede permissoes (TCC) a cada novo build. Com o bundle, as permissoes ficam vinculadas ao `CFBundleIdentifier=com.vr.claude-bot-manager`.
+
+O `.app` e gerado em `ClaudeBotManager/ClaudeBotManager.app` (gitignored — artefato de build).
+
+### Design System (LiquidGlassTheme.swift)
+
+Componentes compartilhados:
+
+| Componente | Descricao |
+|------------|-----------|
+| `GlassCard` | Container principal com `.regularMaterial` + borda 0.5pt |
+| `SectionCard` | GlassCard com cabecalho (titulo + SF Symbol) |
+| `SettingRow` | Label `.callout` + controle alinhado a direita |
+| `ModelBadge` | Badge colorido por modelo (opus=purple, haiku=green, outros=blue) |
+| `StatusDot` | Circulo com pulse animation quando `isRunning` |
+| `UsageBar` | Barra de progresso colorida por percentual |
+| `EmptyStateView` | Estado vazio centrado com icone 48pt |
+| `FlowLayout` | Layout wrapping para chips e dependencias de pipeline |
+
+Escala de spacing: `Spacing.xs(4) sm(8) md(12) lg(16) xl(20) xxl(24)`
+
+### Sidebar
+
+Agrupada em 3 sections:
+- **Overview** — Dashboard
+- **Manage** — Agents, Routines, Skills, Sessions
+- **System** — Logs, Settings
 
 ## Vault
 

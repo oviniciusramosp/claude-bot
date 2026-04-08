@@ -28,10 +28,10 @@ struct RoutineFormSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: 16) {
+                VStack(spacing: Spacing.lg) {
                     // Title card
                     GlassCard {
-                        VStack(spacing: 12) {
+                        VStack(spacing: Spacing.md) {
                             TextField("Routine Title", text: $title)
                                 .font(.title3.bold())
                                 .textFieldStyle(.roundedBorder)
@@ -41,94 +41,79 @@ struct RoutineFormSheet: View {
                                         .filter { $0.isLetter || $0.isNumber || $0 == "-" }
                                 }
                             TextField("Description", text: $description, prompt: Text("What does this routine do?"))
+                                .font(.callout)
                                 .textFieldStyle(.roundedBorder)
                             if !name.isEmpty {
                                 Text("File: \(name).md")
-                                    .font(.caption2.monospacedDigit())
+                                    .font(.caption.monospacedDigit())
                                     .foregroundStyle(.tertiary)
                             }
                         }
                     }
 
                     // Schedule card
-                    GlassCard {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Text("Schedule").font(.headline)
-                                Spacer()
-                                Toggle("Pipeline", isOn: $isPipeline)
-                                    .toggleStyle(.switch)
-                                    .font(.caption)
-                            }
+                    SectionCard(title: "Schedule", symbol: "calendar") {
+                        VStack(alignment: .leading, spacing: Spacing.sm) {
+                            Text("Days").font(.caption).foregroundStyle(.secondary)
+                            HStack(spacing: Spacing.sm) {
+                                let isAll = days.contains("*")
+                                Button("All") { days = ["*"] }
+                                    .font(.caption.bold())
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(isAll ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
+                                    .foregroundStyle(isAll ? Color.statusBlue : Color.secondary)
+                                    .clipShape(Capsule())
 
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Days").font(.caption).foregroundStyle(.secondary)
-                                HStack(spacing: 6) {
-                                    let isAll = days.contains("*")
-                                    Button("All") { days = ["*"] }
-                                        .font(.caption2.bold())
-                                        .padding(.horizontal, 8).padding(.vertical, 4)
-                                        .background(isAll ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
-                                        .foregroundStyle(isAll ? Color.statusBlue : Color.secondary)
+                                ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                                    let selected = days.contains(day)
+                                    Button(label) { toggleDay(day) }
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 10).padding(.vertical, 6)
+                                        .background(selected ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
+                                        .foregroundStyle(selected ? Color.statusBlue : Color.secondary)
                                         .clipShape(Capsule())
-
-                                    ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
-                                        let selected = days.contains(day)
-                                        Button(label) { toggleDay(day) }
-                                            .font(.caption2.bold())
-                                            .padding(.horizontal, 8).padding(.vertical, 4)
-                                            .background(selected ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
-                                            .foregroundStyle(selected ? Color.statusBlue : Color.secondary)
-                                            .clipShape(Capsule())
-                                    }
                                 }
                             }
+                        }
 
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Times").font(.caption).foregroundStyle(.secondary)
-                                FlowLayout(spacing: 6) {
-                                    ForEach(times, id: \.self) { time in
-                                        HStack(spacing: 4) {
-                                            Text(time).font(.caption.monospacedDigit())
-                                            Button { times.removeAll { $0 == time } } label: {
-                                                Image(systemName: "xmark.circle.fill").font(.caption2)
-                                            }
-                                            .buttonStyle(.plain).foregroundStyle(.secondary)
-                                        }
-                                        .padding(.horizontal, 8).padding(.vertical, 4)
-                                        .background(Color.primary.opacity(0.06))
-                                        .clipShape(Capsule())
-                                    }
-                                    AddTimeButton { t in
-                                        if !times.contains(t) { times.append(t); times.sort() }
-                                    }
+                        VStack(alignment: .leading, spacing: Spacing.sm) {
+                            Text("Times (24h)").font(.caption).foregroundStyle(.secondary)
+                            FlowLayout(spacing: Spacing.sm) {
+                                ForEach(times, id: \.self) { time in
+                                    TimeChip(time: time) { times.removeAll { $0 == time } }
+                                }
+                                AddTimeButton { t in
+                                    if !times.contains(t) { times.append(t); times.sort() }
                                 }
                             }
+                        }
+                    }
 
-                            Divider()
-
-                            HStack {
-                                Text("Default Model").font(.caption).foregroundStyle(.secondary)
-                                Spacer()
-                                Picker("", selection: $model) {
-                                    ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                                        Text(m.capitalized).tag(m)
-                                    }
+                    // Execution settings
+                    SectionCard(title: "Execution", symbol: "gearshape") {
+                        SettingRow("Model") {
+                            Picker("", selection: $model) {
+                                ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
+                                    Text(m.capitalized).tag(m)
                                 }
-                                .pickerStyle(.segmented).frame(width: 200)
                             }
+                            .pickerStyle(.segmented).frame(width: 200)
+                        }
 
-                            HStack {
-                                Text("Agent").font(.caption).foregroundStyle(.secondary)
-                                Spacer()
-                                Picker("", selection: $agentId) {
-                                    Text("None").tag(String?.none)
-                                    ForEach(appState.agents) { a in
-                                        Text("\(a.icon) \(a.name)").tag(Optional(a.id))
-                                    }
+                        SettingRow("Agent") {
+                            Picker("", selection: $agentId) {
+                                Text("None").tag(String?.none)
+                                ForEach(appState.agents) { a in
+                                    Text("\(a.icon) \(a.name)").tag(Optional(a.id))
                                 }
-                                .frame(maxWidth: 200)
                             }
+                            .frame(maxWidth: 200)
+                        }
+
+                        SettingRow("Pipeline") {
+                            Toggle("", isOn: $isPipeline)
+                                .labelsHidden()
+                                .toggleStyle(.switch)
                         }
                     }
 
@@ -136,20 +121,17 @@ struct RoutineFormSheet: View {
                     if isPipeline {
                         PipelineStepEditorCard(steps: $pipelineSteps, defaultModel: model)
                     } else {
-                        GlassCard {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text("Prompt").font(.caption).foregroundStyle(.secondary)
-                                TextEditor(text: $promptBody)
-                                    .font(.callout)
-                                    .frame(minHeight: 120)
-                                    .scrollContentBackground(.hidden)
-                                    .background(Color.primary.opacity(0.03))
-                                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                            }
+                        SectionCard(title: "Prompt", symbol: "text.alignleft") {
+                            TextEditor(text: $promptBody)
+                                .font(.callout)
+                                .frame(minHeight: 120)
+                                .scrollContentBackground(.hidden)
+                                .background(Color.primary.opacity(0.03))
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
                         }
                     }
                 }
-                .padding(20)
+                .padding(Spacing.xl)
             }
             .navigationTitle(isPipeline ? "New Pipeline" : "New Routine")
             .toolbar {
@@ -160,7 +142,6 @@ struct RoutineFormSheet: View {
                     Button("Create") {
                         isSaving = true
                         let todayStr = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
-                        // Auto-generate step ids
                         for i in pipelineSteps.indices { pipelineSteps[i].autoId() }
                         let routine = Routine(
                             id: name,
@@ -188,7 +169,7 @@ struct RoutineFormSheet: View {
                 }
             }
         }
-        .frame(minWidth: 600, minHeight: 520)
+        .frame(minWidth: 640, minHeight: 520)
     }
 
     private func toggleDay(_ day: String) {
@@ -209,39 +190,28 @@ struct PipelineStepEditorCard: View {
     var defaultModel: String
 
     var body: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Label("Pipeline Steps", systemImage: "arrow.triangle.branch")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(steps.count) step\(steps.count == 1 ? "" : "s")")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+        SectionCard(title: "Pipeline Steps", symbol: "arrow.triangle.branch") {
+            Text("Steps share a workspace. Each reads previous outputs from data/{id}.md.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
 
-                Text("Steps share a workspace automatically. Each step can read outputs from previous steps (data/{id}.md) and writes its own output. No need to mention file sharing in your prompts.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-
-                ForEach(Array(steps.enumerated()), id: \.element.id) { idx, _ in
-                    PipelineStepRow(
-                        step: $steps[idx],
-                        index: idx + 1,
-                        allStepIds: steps.enumerated().compactMap { i, s in i != idx && !s.name.isEmpty ? stepSlug(s.name) : nil },
-                        onDelete: { steps.remove(at: idx) }
-                    )
-                }
-
-                Button {
-                    steps.append(PipelineStepDef(model: defaultModel))
-                } label: {
-                    Label("Add Step", systemImage: "plus.circle")
-                        .font(.caption)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(Color.statusBlue)
+            ForEach(Array(steps.enumerated()), id: \.element.id) { idx, _ in
+                PipelineStepRow(
+                    step: $steps[idx],
+                    index: idx + 1,
+                    allStepIds: steps.enumerated().compactMap { i, s in i != idx && !s.name.isEmpty ? stepSlug(s.name) : nil },
+                    onDelete: { steps.remove(at: idx) }
+                )
             }
+
+            Button {
+                steps.append(PipelineStepDef(model: defaultModel))
+            } label: {
+                Label("Add Step", systemImage: "plus.circle")
+                    .font(.callout)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(Color.statusBlue)
         }
     }
 
@@ -261,107 +231,155 @@ struct PipelineStepRow: View {
     @State private var isExpanded = true
 
     var body: some View {
-        DisclosureGroup(isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                TextField("Step Name", text: $step.name)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.callout)
-
-                HStack {
-                    Text("Model").font(.caption2).foregroundStyle(.secondary)
-                    Spacer()
-                    Picker("", selection: $step.model) {
-                        ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                            Text(m.capitalized).tag(m)
-                        }
+        VStack(alignment: .leading, spacing: 0) {
+            // Header — always visible
+            Button { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } } label: {
+                HStack(spacing: Spacing.sm) {
+                    Text("Step \(index)")
+                        .font(.callout.bold())
+                        .foregroundStyle(Color.statusBlue)
+                    if !step.name.isEmpty {
+                        Text("— \(step.name)")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
-                    .pickerStyle(.segmented).frame(width: 180)
+                    Spacer()
+                    ModelBadge(model: step.model)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(Spacing.lg)
 
-                if !allStepIds.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Depends on").font(.caption2).foregroundStyle(.secondary)
-                        FlowLayout(spacing: 4) {
-                            ForEach(allStepIds, id: \.self) { sid in
-                                let selected = step.dependsOn.contains(sid)
-                                Button(sid) {
-                                    if selected { step.dependsOn.removeAll { $0 == sid } }
-                                    else { step.dependsOn.append(sid) }
+            // Expanded content
+            if isExpanded {
+                Divider().padding(.horizontal, Spacing.lg)
+
+                VStack(alignment: .leading, spacing: Spacing.lg) {
+                    // Step name
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("Step Name").font(.caption).foregroundStyle(.secondary)
+                        TextField("e.g. Analyze Data", text: $step.name)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.callout)
+                    }
+
+                    // Model
+                    SettingRow("Model") {
+                        Picker("", selection: $step.model) {
+                            ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
+                                Text(m.capitalized).tag(m)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 200)
+                    }
+
+                    // Dependencies
+                    if !allStepIds.isEmpty {
+                        VStack(alignment: .leading, spacing: Spacing.sm) {
+                            Text("Depends on").font(.caption).foregroundStyle(.secondary)
+                            FlowLayout(spacing: 6) {
+                                ForEach(allStepIds, id: \.self) { sid in
+                                    let selected = step.dependsOn.contains(sid)
+                                    Button(sid) {
+                                        if selected { step.dependsOn.removeAll { $0 == sid } }
+                                        else { step.dependsOn.append(sid) }
+                                    }
+                                    .font(.caption)
+                                    .padding(.horizontal, 10).padding(.vertical, 5)
+                                    .background(selected ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
+                                    .foregroundStyle(selected ? Color.statusBlue : .secondary)
+                                    .clipShape(Capsule())
                                 }
-                                .font(.caption2)
-                                .padding(.horizontal, 8).padding(.vertical, 3)
-                                .background(selected ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
-                                .foregroundStyle(selected ? Color.statusBlue : .secondary)
-                                .clipShape(Capsule())
                             }
                         }
                     }
-                }
 
-                HStack(spacing: 12) {
-                    HStack(spacing: 4) {
-                        Text("Idle").font(.caption2).foregroundStyle(.secondary)
-                        TextField("", value: $step.inactivityTimeout, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 50)
-                            .font(.caption2)
-                        Text("s").font(.caption2).foregroundStyle(.tertiary)
-                    }
-                    .help("Kill step after this many seconds without output")
-                    HStack(spacing: 4) {
-                        Text("Max").font(.caption2).foregroundStyle(.secondary)
-                        TextField("", value: $step.timeout, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 50)
-                            .font(.caption2)
-                        Text("s").font(.caption2).foregroundStyle(.tertiary)
-                    }
-                    .help("Hard time limit — kill step after this total elapsed time")
-                    HStack(spacing: 4) {
-                        Text("Retry").font(.caption2).foregroundStyle(.secondary)
-                        TextField("", value: $step.retry, format: .number)
-                            .textFieldStyle(.roundedBorder).frame(width: 35)
-                            .font(.caption2)
-                    }
-                    .help("Number of retry attempts if this step fails")
-                    Spacer()
-                    Toggle("Output to Telegram", isOn: $step.outputToTelegram)
-                        .font(.caption2)
-                        .toggleStyle(.checkbox)
-                        .help("Send this step's output as the pipeline's Telegram message")
-                }
+                    // Timeouts — vertical layout
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        Text("Timeouts").font(.caption).foregroundStyle(.secondary)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Prompt").font(.caption2).foregroundStyle(.secondary)
-                    TextEditor(text: $step.prompt)
-                        .font(.system(.caption, design: .monospaced))
-                        .frame(minHeight: 80)
-                        .scrollContentBackground(.hidden)
-                        .background(Color.primary.opacity(0.03))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        HStack(spacing: Spacing.xl) {
+                            HStack(spacing: Spacing.xs) {
+                                Text("Idle")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 40, alignment: .trailing)
+                                TextField("", value: $step.inactivityTimeout, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 70)
+                                    .font(.body.monospacedDigit())
+                                Text("s").font(.callout).foregroundStyle(.tertiary)
+                            }
+                            .help("Kill step after this many seconds without output")
+
+                            HStack(spacing: Spacing.xs) {
+                                Text("Max")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 40, alignment: .trailing)
+                                TextField("", value: $step.timeout, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 70)
+                                    .font(.body.monospacedDigit())
+                                Text("s").font(.callout).foregroundStyle(.tertiary)
+                            }
+                            .help("Hard time limit for this step")
+
+                            HStack(spacing: Spacing.xs) {
+                                Text("Retries")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                TextField("", value: $step.retry, format: .number)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 50)
+                                    .font(.body.monospacedDigit())
+                            }
+                            .help("Number of retry attempts if this step fails")
+                        }
+                    }
+
+                    // Telegram toggle
+                    SettingRow("Send output to Telegram") {
+                        Toggle("", isOn: $step.outputToTelegram)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+
+                    // Prompt
+                    VStack(alignment: .leading, spacing: Spacing.sm) {
+                        Text("Prompt").font(.caption).foregroundStyle(.secondary)
+                        TextEditor(text: $step.prompt)
+                            .font(.system(.callout, design: .monospaced))
+                            .frame(minHeight: 120)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.primary.opacity(0.03))
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+
+                    // Delete at bottom
+                    HStack {
+                        Spacer()
+                        Button(role: .destructive, action: onDelete) {
+                            Label("Delete Step", systemImage: "trash")
+                                .font(.callout)
+                        }
+                        .buttonStyle(.borderless)
+                    }
                 }
-            }
-            .padding(.top, 6)
-        } label: {
-            HStack {
-                Text("Step \(index)")
-                    .font(.caption.bold())
-                    .foregroundStyle(Color.statusBlue)
-                if !step.name.isEmpty {
-                    Text("— \(step.name)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                ModelBadge(model: step.model)
-                Button(role: .destructive) { onDelete() } label: {
-                    Image(systemName: "trash")
-                        .font(.caption2)
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(Color.statusRed)
+                .padding(Spacing.lg)
             }
         }
-        .padding(10)
         .background(Color.primary.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(Color.glassBorder, lineWidth: 0.5)
+        )
     }
 }

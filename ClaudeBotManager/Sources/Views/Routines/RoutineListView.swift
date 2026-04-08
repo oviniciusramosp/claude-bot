@@ -105,74 +105,87 @@ struct RoutineRow: View {
     }
 
     var body: some View {
-        GlassCard(padding: 12) {
-            HStack(spacing: 12) {
+        GlassCard(padding: Spacing.lg) {
+            HStack(alignment: .top, spacing: Spacing.md) {
+                // Pipeline accent bar
+                if routine.isPipeline {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.statusBlue)
+                        .frame(width: 3)
+                }
+
                 // Status indicator
                 statusView
-                    .frame(width: 16, height: 16)
+                    .frame(width: 20, height: 20)
                     .help(statusTooltip)
+                    .padding(.top, 2)
 
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(routine.title)
-                        .font(.callout.bold())
-                        .lineLimit(1)
+                // Content
+                VStack(alignment: .leading, spacing: Spacing.sm) {
+                    // Line 1: Title + Model + Toggle
+                    HStack(spacing: Spacing.sm) {
+                        Text(routine.title)
+                            .font(.body.bold())
+                            .lineLimit(1)
+                        Spacer()
+                        ModelBadge(model: routine.model)
+                        Toggle("", isOn: $isEnabled)
+                            .labelsHidden()
+                            .onChange(of: isEnabled) { _, newValue in
+                                var updated = routine
+                                updated.enabled = newValue
+                                Task { try? await appState.saveRoutine(updated) }
+                            }
+                    }
 
-                    HStack(spacing: 8) {
-                        Label(routine.schedule.times.joined(separator: ", "), systemImage: "clock")
-                            .font(.caption2)
+                    // Line 2: Schedule metadata
+                    HStack(spacing: Spacing.sm) {
+                        Text(routine.schedule.times.joined(separator: ", "))
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
 
-                        if !routine.schedule.days.contains("*") {
-                            Text(routine.schedule.days.joined(separator: " "))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
+                        Text("·").foregroundStyle(.quaternary)
+
+                        Text(humanReadableDays(routine.schedule.days))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
 
                         if let agent = agentName {
+                            Text("·").foregroundStyle(.quaternary)
                             Label(agent, systemImage: "person.fill")
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
+                    }
 
+                    // Line 3: Pipeline info + Next execution + Dry-run
+                    HStack(spacing: Spacing.sm) {
                         if routine.isPipeline {
                             pipelineBadge
                         }
-                    }
-                }
 
-                Spacer()
-
-                // Dry-run button — only when last execution failed
-                if !isDryRunning && routine.lastExecution?.status == .failed {
-                    Button {
-                        isDryRunning = true
-                        Task {
-                            try? await appState.dryRunRoutine(routine)
-                            isDryRunning = false
+                        if !isDryRunning && routine.lastExecution?.status == .failed {
+                            Button {
+                                isDryRunning = true
+                                Task {
+                                    try? await appState.dryRunRoutine(routine)
+                                    isDryRunning = false
+                                }
+                            } label: {
+                                Label("Retry", systemImage: "play.circle")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(Color.statusBlue)
                         }
-                    } label: {
-                        Label("Run", systemImage: "play.circle")
-                            .font(.caption2)
-                    }
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(Color.statusBlue)
-                    .help("Run now")
-                }
 
-                VStack(alignment: .trailing, spacing: 4) {
-                    ModelBadge(model: routine.model)
-                    Text(routine.nextExecutionDescription)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+                        Spacer()
 
-                Toggle("", isOn: $isEnabled)
-                    .labelsHidden()
-                    .onChange(of: isEnabled) { _, newValue in
-                        var updated = routine
-                        updated.enabled = newValue
-                        Task { try? await appState.saveRoutine(updated) }
+                        Text(routine.nextExecutionDescription)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
                     }
+                }
             }
         }
         .contentShape(Rectangle())
@@ -182,10 +195,10 @@ struct RoutineRow: View {
     private var statusView: some View {
         if effectiveStatus == .running {
             ProgressView()
-                .scaleEffect(0.55)
+                .scaleEffect(0.6)
         } else {
             Image(systemName: statusSymbol)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(statusColor)
         }
     }
@@ -194,18 +207,29 @@ struct RoutineRow: View {
     private var pipelineBadge: some View {
         let total = routine.pipelineStepsTotal
         let done = routine.pipelineStepsCompleted
-        HStack(spacing: 3) {
+        HStack(spacing: 4) {
             Image(systemName: "arrow.triangle.branch")
-                .font(.caption2)
+                .font(.caption)
             if total > 0 {
-                Text("\(done)/\(total)")
-                    .font(.caption2.monospacedDigit())
+                Text("\(done)/\(total) steps")
+                    .font(.caption.monospacedDigit())
             } else {
                 Text("\(routine.stepCount) steps")
-                    .font(.caption2)
+                    .font(.caption)
             }
         }
         .foregroundStyle(Color.statusBlue)
         .help("Pipeline: \(done)/\(total) steps completed")
+    }
+
+    private func humanReadableDays(_ days: [String]) -> String {
+        if days.contains("*") { return "Daily" }
+        let weekdays = Set(["mon", "tue", "wed", "thu", "fri"])
+        let weekends = Set(["sat", "sun"])
+        let daySet = Set(days)
+        if daySet == weekdays { return "Weekdays" }
+        if daySet == weekends { return "Weekends" }
+        if daySet == weekdays.union(weekends) { return "Daily" }
+        return days.map { $0.prefix(1).uppercased() + $0.dropFirst().prefix(2) }.joined(separator: ", ")
     }
 }

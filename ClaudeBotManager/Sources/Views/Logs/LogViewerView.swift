@@ -48,7 +48,7 @@ struct LogViewerView: View {
                 .padding(.vertical, 5)
                 .background(Color.primary.opacity(0.06))
                 .clipShape(Capsule())
-                .frame(width: 200)
+                .frame(width: 240)
 
                 Toggle("Auto-scroll", isOn: $autoScroll)
                     .font(.caption)
@@ -65,8 +65,8 @@ struct LogViewerView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(filtered) { entry in
-                            LogEntryRow(entry: entry)
+                        ForEach(Array(filtered.enumerated()), id: \.element.id) { idx, entry in
+                            LogEntryRow(entry: entry, isEven: idx.isMultiple(of: 2))
                                 .id(entry.id)
                         }
                     }
@@ -126,6 +126,7 @@ struct LogViewerView: View {
 
 struct LogEntryRow: View {
     var entry: LogEntry
+    var isEven: Bool = false
 
     private var levelColor: Color {
         switch entry.level {
@@ -137,16 +138,16 @@ struct LogEntryRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: Spacing.sm) {
             Text(entry.timestamp, format: .dateTime.hour().minute().second())
-                .font(.system(.caption2, design: .monospaced))
+                .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.tertiary)
-                .frame(width: 70, alignment: .leading)
+                .frame(width: 75, alignment: .leading)
 
             Text(entry.level.rawValue)
-                .font(.system(.caption2, design: .monospaced).bold())
+                .font(.system(.caption, design: .monospaced).bold())
                 .foregroundStyle(levelColor)
-                .frame(width: 52, alignment: .leading)
+                .frame(width: 60, alignment: .leading)
 
             Text(entry.message)
                 .font(.system(.caption, design: .monospaced))
@@ -154,10 +155,13 @@ struct LogEntryRow: View {
                 .textSelection(.enabled)
                 .lineLimit(entry.level == .error ? nil : 2)
         }
-        .padding(.vertical, 2)
-        .padding(.horizontal, 6)
-        .background(entry.level == .error ? Color.statusRed.opacity(0.06) :
-                    entry.level == .warning ? Color.statusYellow.opacity(0.04) : Color.clear)
+        .padding(.vertical, 3)
+        .padding(.horizontal, Spacing.sm)
+        .background(
+            entry.level == .error ? Color.statusRed.opacity(0.06) :
+            entry.level == .warning ? Color.statusYellow.opacity(0.04) :
+            isEven ? Color.primary.opacity(0.02) : Color.clear
+        )
         .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
@@ -171,9 +175,9 @@ struct FilterChip: View {
     var body: some View {
         Button(action: action) {
             Text(label)
-                .font(.caption2.bold())
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .font(.caption.bold())
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
                 .background(isSelected ? color.opacity(0.15) : Color.primary.opacity(0.06))
                 .foregroundStyle(isSelected ? color : .secondary)
                 .clipShape(Capsule())

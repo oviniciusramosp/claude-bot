@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.2.0"  # Skills UI, trash delete, minimal context, pipeline notify fix
+BOT_VERSION = "2.3.0"  # UI redesign (CleanMyMac style), /run command, .app bundle
 
 import http.server
 import json
@@ -137,6 +137,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 🔁 *Rotinas*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
+• `/run [nome]` — Executar rotina/pipeline manualmente
 
 🤖 *Agentes*
 • `/agent` — Gerenciar agentes (trocar, criar, editar, importar)
@@ -2232,6 +2233,88 @@ class ClaudeTelegramBot:
             prompt += f"\n\nO usuario quer editar: {name}"
         self._run_claude_prompt(prompt)
 
+    # -- Run command (manual trigger) --
+
+    def cmd_run(self, arg: str) -> None:
+        """Manually trigger a routine or pipeline by name."""
+        arg = arg.strip()
+        if not arg:
+            self._run_list_keyboard()
+            return
+
+        name = arg.replace(".md", "").strip()
+        md_file = ROUTINES_DIR / f"{name}.md"
+
+        if not md_file.exists():
+            self.send_message(f"❌ Rotina `{name}` não encontrada.")
+            return
+
+        # Check if already running
+        with self._active_pipelines_lock:
+            if name in self._active_pipelines:
+                self.send_message(f"⚠️ Pipeline `{name}` já está em execução.")
+                return
+        with self._routine_contexts_lock:
+            if name in self._routine_contexts:
+                self.send_message(f"⚠️ Rotina `{name}` já está em execução.")
+                return
+
+        fm, body = get_frontmatter_and_body(md_file)
+        if not fm or not body:
+            self.send_message(f"❌ Arquivo de rotina `{name}` inválido.")
+            return
+
+        model = str(fm.get("model", "sonnet"))
+        time_slot = f"manual-{time.strftime('%H:%M:%S')}"
+        routine_type = str(fm.get("type", "routine"))
+
+        if routine_type == "pipeline":
+            self.scheduler._enqueue_pipeline_from_file(
+                md_file, fm, body, name, model, time_slot)
+            self.send_message(f"🚀 Pipeline `{name}` disparada manualmente.")
+        else:
+            self.routine_state.set_status(name, time_slot, "running")
+            task = RoutineTask(
+                name=name,
+                prompt=body,
+                model=model,
+                time_slot=time_slot,
+                agent=fm.get("agent"),
+                minimal_context=bool(fm.get("context") == "minimal"),
+            )
+            self._enqueue_routine(task)
+            self.send_message(f"🚀 Rotina `{name}` disparada manualmente.")
+
+    def _run_list_keyboard(self) -> None:
+        """Show inline keyboard with all available routines/pipelines."""
+        if not ROUTINES_DIR.is_dir():
+            self.send_message("❌ Nenhuma rotina disponível.")
+            return
+
+        buttons = []
+        for md_file in sorted(ROUTINES_DIR.glob("*.md")):
+            if md_file.stem == "Routines":
+                continue
+            fm, body = get_frontmatter_and_body(md_file)
+            if not fm or not body:
+                continue
+            title = fm.get("title", md_file.stem)
+            rtype = str(fm.get("type", "routine"))
+            enabled = fm.get("enabled", False)
+            icon = "🔗" if rtype == "pipeline" else "🔁"
+            status = "" if enabled else " (off)"
+            buttons.append([{
+                "text": f"{icon} {title}{status}",
+                "callback_data": f"run:{md_file.stem}"
+            }])
+
+        if not buttons:
+            self.send_message("❌ Nenhuma rotina disponível.")
+            return
+
+        markup = {"inline_keyboard": buttons}
+        self.send_message("🚀 *Executar rotina/pipeline manualmente:*", reply_markup=markup)
+
     # -- Skill commands --
 
     def cmd_skill(self, arg: str) -> None:
@@ -2943,6 +3026,7 @@ class ClaudeTelegramBot:
                 "/clear": lambda: self.cmd_clear(),
                 "/important": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
+                "/run": lambda: self.cmd_run(arg),
                 "/agent": lambda: self.cmd_agent(arg),
                 "/skill": lambda: self.cmd_skill(arg),
                 "/audio": lambda: self.cmd_audio(),
@@ -3016,6 +3100,10 @@ class ClaudeTelegramBot:
                 self._routine_create("")
             elif action == "edit":
                 self._routine_edit("")
+        elif data.startswith("run:"):
+            name = data.split(":", 1)[1]
+            self.answer_callback(cb_id, f"Executando {name}...")
+            self.cmd_run(name)
         elif data.startswith("skill:"):
             action = data.split(":", 1)[1]
             self.answer_callback(cb_id)
@@ -3152,6 +3240,7 @@ class ClaudeTelegramBot:
             {"command": "agent", "description": "Gerenciar agentes"},
             {"command": "skill", "description": "Gerenciar skills"},
             {"command": "routine", "description": "Criar ou listar rotinas"},
+            {"command": "run", "description": "Executar rotina/pipeline manualmente"},
             {"command": "important", "description": "Registrar pontos importantes no diario"},
             {"command": "compact", "description": "Compactar contexto"},
             {"command": "stop", "description": "Cancelar execucao"},
