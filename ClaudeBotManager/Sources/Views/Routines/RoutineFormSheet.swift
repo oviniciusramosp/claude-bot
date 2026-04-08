@@ -184,6 +184,7 @@ struct RoutineFormSheet: View {
 }
 
 // MARK: - Pipeline Step Editor Card
+// (TimeChip, AddTimeButton, FlowLayout are defined in RoutineDetailView.swift)
 
 struct PipelineStepEditorCard: View {
     @Binding var steps: [PipelineStepDef]
