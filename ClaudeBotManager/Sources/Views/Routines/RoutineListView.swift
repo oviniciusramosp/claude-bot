@@ -23,8 +23,7 @@ struct RoutineListView: View {
                     )
                 } else {
                     ForEach(sortedRoutines) { routine in
-                        RoutineRow(routine: routine)
-                            .onTapGesture { selectedRoutine = routine }
+                        RoutineRow(routine: routine, onTap: { selectedRoutine = routine })
                     }
                 }
             }
@@ -54,14 +53,16 @@ struct RoutineListView: View {
 
 struct RoutineRow: View {
     var routine: Routine
+    var onTap: () -> Void = {}
     @EnvironmentObject var appState: AppState
     @State private var isEnabled: Bool
     @State private var isDryRunning = false
     @State private var isStopping = false
     @State private var isExpanded = false
 
-    init(routine: Routine) {
+    init(routine: Routine, onTap: @escaping () -> Void = {}) {
         self.routine = routine
+        self.onTap = onTap
         _isEnabled = State(initialValue: routine.enabled)
     }
 
@@ -103,6 +104,7 @@ struct RoutineRow: View {
     }
 
     var body: some View {
+        VStack(spacing: 0) {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 // Row 1: Status + Title + Model/Pipeline badge + Switch
@@ -224,25 +226,33 @@ struct RoutineRow: View {
                     } else {
                         pipelineTimeline
                     }
-
-                    // Expand/collapse chevron
-                    HStack {
-                        Spacer()
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
-                        } label: {
-                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                        Spacer()
-                    }
                 }
             }
-        }
-        .contentShape(Rectangle())
+            // Tap on card body opens detail sheet
+            .contentShape(Rectangle())
+            .onTapGesture { onTap() }
+
+            // Expand/collapse chevron — outside the tap target above
+            if routine.isPipeline {
+                HStack {
+                    Spacer()
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+                    } label: {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 40, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    Spacer()
+                }
+                .padding(.top, -Spacing.sm)
+            }
+        } // GlassCard + chevron
         .contextMenu { contextMenuItems }
+        } // VStack(spacing: 0)
     }
 
     // MARK: - Context Menu
