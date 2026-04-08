@@ -340,6 +340,7 @@ struct TodayRoutinesCard: View {
     }
 
     private var completedCount: Int { autoExecutions.filter { $0.status == .completed }.count }
+    private var runningCount: Int { autoExecutions.filter { $0.status == .running }.count }
     private var scheduledCount: Int {
         timeline.filter { $0.execution == nil || $0.execution?.status == .pending }.count
     }
@@ -362,6 +363,13 @@ struct TodayRoutinesCard: View {
                     HStack(alignment: .top, spacing: Spacing.xl) {
                         // Left: Summary stats — always show all 3
                         VStack(spacing: 5) {
+                            if runningCount > 0 {
+                                RoutineStatCard(
+                                    label: "Running", count: runningCount,
+                                    iconColor: Color(red: 0.25, green: 0.56, blue: 0.98),
+                                    symbol: "arrow.trianglehead.2.clockwise"
+                                )
+                            }
                             RoutineStatCard(
                                 label: "Done", count: completedCount,
                                 iconColor: Color(red: 0.204, green: 0.780, blue: 0.349),

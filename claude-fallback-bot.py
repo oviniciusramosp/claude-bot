@@ -1948,15 +1948,42 @@ class ClaudeTelegramBot:
         data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
             data["parse_mode"] = parse_mode
-        resp = self.tg_request("editMessageText", data)
-        if resp and resp.get("ok"):
+        resp = self._tg_edit(data)
+        if resp:
             return True
+        # Retry without parse_mode (markdown may be invalid)
         if parse_mode:
             data.pop("parse_mode", None)
-            resp = self.tg_request("editMessageText", data)
-            if resp and resp.get("ok"):
+            resp = self._tg_edit(data)
+            if resp:
                 return True
         return False
+
+    def _tg_edit(self, data: Dict) -> Optional[Dict]:
+        """editMessageText with graceful handling of Telegram-specific errors."""
+        url = f"{self.base_url}/editMessageText"
+        payload = json.dumps(data).encode("utf-8")
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                err_body = json.loads(exc.read().decode("utf-8"))
+                description = err_body.get("description", "")
+            except Exception:
+                description = str(exc)
+            # "message is not modified" — normal during streaming, skip silently
+            if "message is not modified" in description:
+                return None
+            # "message to edit not found" — stale message_id, skip silently
+            if "message to edit not found" in description:
+                return None
+            logger.warning("editMessageText failed (%d): %s", exc.code, description)
+            return None
+        except Exception as exc:
+            logger.warning("editMessageText error: %s", exc)
+            return None
 
     def delete_message(self, message_id: int) -> bool:
         chat_id = self._chat_id
@@ -2711,7 +2738,7 @@ class ClaudeTelegramBot:
             self.send_message(
                 "⚠️ Transcrição de áudio indisponível.\n"
                 f"Ferramentas faltando: {', '.join(missing)}\n"
-                "Execute `./claude-bot.sh install-deps` e reinicie o bot."
+                "Execute `./claude-bot.sh install` e reinicie o bot."
             )
             return
 
