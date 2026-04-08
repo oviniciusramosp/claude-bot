@@ -45,6 +45,10 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("CLAUDE_PATH", _v)
             elif _k == "CLAUDE_WORKSPACE":
                 os.environ.setdefault("CLAUDE_WORKSPACE", _v)
+            elif _k == "FFMPEG_PATH":
+                os.environ.setdefault("FFMPEG_PATH", _v)
+            elif _k == "HEAR_PATH":
+                os.environ.setdefault("HEAR_PATH", _v)
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "/opt/homebrew/bin/claude")
 CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent))
 
@@ -58,6 +62,11 @@ ROUTINES_DIR = VAULT_DIR / "Routines"
 AGENTS_DIR = VAULT_DIR / "Agents"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
+TEMP_AUDIO_DIR = Path("/tmp/claude-bot-audio")
+HEAR_BIN_DIR = DATA_DIR / "bin"
+
+FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "/opt/homebrew/bin/ffmpeg")
+HEAR_PATH = os.environ.get("HEAR_PATH", "")
 
 DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
@@ -126,7 +135,8 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/skill` — Gerenciar skills (listar, editar)
 
 💬 Qualquer outra mensagem é enviada como prompt ao Claude.
-📷 Envie fotos diretamente — o Claude irá analisá-las."""
+📷 Envie fotos diretamente — o Claude irá analisá-las.
+🎤 Envie áudios — serão transcritos e enviados ao Claude."""
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -135,6 +145,8 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+HEAR_BIN_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("claude-bot")
 logger.setLevel(logging.DEBUG)
@@ -248,6 +260,59 @@ def get_frontmatter_and_body(filepath: Path) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Pipeline body parser
+# ---------------------------------------------------------------------------
+
+
+def parse_pipeline_body(body: str) -> list:
+    """Extract step definitions from a ```pipeline fenced block in the markdown body.
+
+    Returns a list of dicts, each with keys like id, name, model, depends_on, prompt_file, etc.
+    """
+    # Find the fenced block
+    in_block = False
+    block_lines: list = []
+    for line in body.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("```pipeline"):
+            in_block = True
+            continue
+        if in_block and stripped == "```":
+            break
+        if in_block:
+            block_lines.append(line)
+
+    if not block_lines:
+        return []
+
+    steps: list = []
+    current: Optional[dict] = None
+    for line in block_lines:
+        stripped = line.strip()
+        if not stripped or stripped == "steps:":
+            continue
+        # New step item: "  - id: value"
+        if stripped.startswith("- "):
+            if current is not None:
+                steps.append(current)
+            current = {}
+            stripped = stripped[2:].strip()  # Remove "- " prefix
+        if current is None:
+            continue
+        # Parse "key: value" pair
+        if ":" in stripped:
+            colon = stripped.index(":")
+            key = stripped[:colon].strip()
+            val = stripped[colon + 1:].strip()
+            if val:
+                parsed = _parse_yaml_value(val)
+                current[key] = parsed
+    if current:
+        steps.append(current)
+    return steps
+
+
+# ---------------------------------------------------------------------------
 # Routine data structures
 # ---------------------------------------------------------------------------
 
@@ -263,11 +328,64 @@ class RoutineTask:
     agent: Optional[str] = None
 
 
+@dataclass
+class PipelineStep:
+    id: str
+    name: str
+    model: str
+    prompt: str  # resolved prompt text
+    depends_on: list = field(default_factory=list)
+    agent: Optional[str] = None
+    timeout: int = 300
+    retry: int = 0
+    output_to_telegram: bool = False
+    engine: str = "claude"
+
+
+@dataclass
+class PipelineTask:
+    name: str
+    title: str
+    steps: list  # List[PipelineStep]
+    model: str
+    time_slot: str
+    agent: Optional[str] = None
+    notify: str = "final"
+
+
 class RoutineStateManager:
     """Tracks daily routine execution state in ~/.claude-bot/routines-state/YYYY-MM-DD.json."""
 
     def __init__(self) -> None:
         ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
+        self._cleanup_stale_running()
+
+    def _cleanup_stale_running(self) -> None:
+        """On startup, mark any 'running' entries from today as failed (bot was killed mid-run)."""
+        sf = ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"
+        if not sf.exists():
+            return
+        try:
+            data = json.loads(sf.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        changed = False
+        for routine_name, slots in data.items():
+            for slot, entry in slots.items():
+                if entry.get("status") == "running":
+                    entry["status"] = "failed"
+                    entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                    entry["error"] = "Bot restarted — process killed before completion"
+                    changed = True
+                    logger.warning("Startup cleanup: marked %s@%s as failed (was running)", routine_name, slot)
+                    # Also cleanup pipeline steps
+                    if entry.get("type") == "pipeline" and isinstance(entry.get("steps"), dict):
+                        for step_id, step_entry in entry["steps"].items():
+                            if step_entry.get("status") == "running":
+                                step_entry["status"] = "failed"
+                                step_entry["error"] = "Bot restarted"
+        if changed:
+            sf.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
     def _state_file(self) -> Path:
         return ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"
@@ -308,13 +426,62 @@ class RoutineStateManager:
     def get_today_state(self) -> Dict:
         return self._load()
 
+    # --- Pipeline-specific state methods ---
+
+    def set_pipeline_status(self, name: str, time_slot: str, status: str,
+                            steps_init: Optional[list] = None, error: Optional[str] = None) -> None:
+        """Set pipeline-level status. Optionally initialize step statuses from step id list."""
+        data = self._load()
+        if name not in data:
+            data[name] = {}
+        entry = data[name].get(time_slot, {})
+        entry["status"] = status
+        entry["type"] = "pipeline"
+        if status == "running" and "started_at" not in entry:
+            entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        elif status in ("completed", "failed"):
+            entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if error:
+            entry["error"] = error
+        if steps_init is not None and "steps" not in entry:
+            entry["steps"] = {sid: {"status": "pending", "attempt": 0} for sid in steps_init}
+        data[name][time_slot] = entry
+        self._save(data)
+
+    def set_step_status(self, pipeline_name: str, time_slot: str, step_id: str,
+                        status: str, error: Optional[str] = None, attempt: Optional[int] = None) -> None:
+        """Update a single step within a pipeline run."""
+        data = self._load()
+        entry = data.get(pipeline_name, {}).get(time_slot, {})
+        steps = entry.get("steps", {})
+        step = steps.get(step_id, {})
+        step["status"] = status
+        if status == "running":
+            step["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        elif status in ("completed", "failed", "skipped"):
+            step["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        if error:
+            step["error"] = error
+        if attempt is not None:
+            step["attempt"] = attempt
+        steps[step_id] = step
+        entry["steps"] = steps
+        data.setdefault(pipeline_name, {})[time_slot] = entry
+        self._save(data)
+
+    def get_pipeline_steps(self, pipeline_name: str, time_slot: str) -> Dict:
+        """Read step-level status for a pipeline run."""
+        data = self._load()
+        return data.get(pipeline_name, {}).get(time_slot, {}).get("steps", {})
+
 
 class RoutineScheduler:
     """Background thread that checks vault/Routines/ every 60s and enqueues matching routines."""
 
-    def __init__(self, state: RoutineStateManager, enqueue_fn) -> None:
+    def __init__(self, state: RoutineStateManager, enqueue_fn, enqueue_pipeline_fn=None) -> None:
         self.state = state
         self._enqueue = enqueue_fn
+        self._enqueue_pipeline = enqueue_pipeline_fn
         self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True, name="routine-scheduler")
 
@@ -365,21 +532,85 @@ class RoutineScheduler:
                     continue
                 routine_name = md_file.stem
                 model = str(fm.get("model", "sonnet"))
+                routine_type = str(fm.get("type", "routine"))
                 for t in times:
                     t_str = str(t).strip()
                     if t_str == now_time and not self.state.is_executed(routine_name, t_str):
-                        logger.info("Routine matched: %s at %s", routine_name, t_str)
-                        self.state.set_status(routine_name, t_str, "running")
-                        task = RoutineTask(
-                            name=routine_name,
-                            prompt=body,
-                            model=model,
-                            time_slot=t_str,
-                            agent=fm.get("agent"),
-                        )
-                        self._enqueue(task)
+                        logger.info("Routine matched: %s at %s (type=%s)", routine_name, t_str, routine_type)
+                        if routine_type == "pipeline" and self._enqueue_pipeline:
+                            self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
+                        else:
+                            self.state.set_status(routine_name, t_str, "running")
+                            task = RoutineTask(
+                                name=routine_name,
+                                prompt=body,
+                                model=model,
+                                time_slot=t_str,
+                                agent=fm.get("agent"),
+                            )
+                            self._enqueue(task)
             except Exception as exc:
                 logger.error("Error checking routine %s: %s", md_file.name, exc)
+
+    def _enqueue_pipeline_from_file(self, md_file: Path, fm: Dict, body: str,
+                                     routine_name: str, model: str, t_str: str) -> None:
+        """Parse pipeline steps and enqueue as PipelineTask."""
+        steps_raw = parse_pipeline_body(body)
+        if not steps_raw:
+            logger.error("Pipeline %s has no valid steps in ```pipeline block", routine_name)
+            return
+        # Resolve step prompts
+        pipeline_dir = md_file.parent / md_file.stem
+        default_agent = fm.get("agent")
+        steps = []
+        for s in steps_raw:
+            step_id = str(s.get("id", ""))
+            if not step_id:
+                continue
+            # Load prompt from file or inline
+            prompt_text = ""
+            pf = s.get("prompt_file")
+            if pf:
+                prompt_path = pipeline_dir / str(pf)
+                if prompt_path.exists():
+                    prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+                else:
+                    logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)
+            if not prompt_text:
+                prompt_text = str(s.get("prompt", ""))
+
+            depends = s.get("depends_on", [])
+            if isinstance(depends, str):
+                depends = [depends]
+
+            steps.append(PipelineStep(
+                id=step_id,
+                name=str(s.get("name", step_id)),
+                model=str(s.get("model", model)),
+                prompt=prompt_text,
+                depends_on=depends,
+                agent=s.get("agent") or default_agent,
+                timeout=int(s.get("timeout", 300)),
+                retry=int(s.get("retry", 0)),
+                output_to_telegram=(str(s.get("output", "")).lower() == "telegram"),
+                engine=str(s.get("engine", "claude")),
+            ))
+
+        if not steps:
+            logger.error("Pipeline %s: no valid steps after parsing", routine_name)
+            return
+
+        task = PipelineTask(
+            name=routine_name,
+            title=str(fm.get("title", routine_name)),
+            steps=steps,
+            model=model,
+            time_slot=t_str,
+            agent=default_agent,
+            notify=str(fm.get("notify", "final")),
+        )
+        self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=[s.id for s in steps])
+        self._enqueue_pipeline(task)
 
     def list_today_routines(self) -> List[Dict]:
         """List all routines scheduled for today with their status."""
@@ -411,14 +642,19 @@ class RoutineScheduler:
                     t_str = str(t).strip()
                     entry = state.get(routine_name, {}).get(t_str, {})
                     status = entry.get("status", "pending")
-                    routines.append({
+                    r_entry = {
                         "name": routine_name,
                         "title": fm.get("title", routine_name),
                         "time": t_str,
                         "model": fm.get("model", "sonnet"),
                         "status": status,
                         "error": entry.get("error"),
-                    })
+                        "type": str(fm.get("type", "routine")),
+                    }
+                    if entry.get("type") == "pipeline":
+                        r_entry["type"] = "pipeline"
+                        r_entry["steps"] = entry.get("steps", {})
+                    routines.append(r_entry)
             except Exception:
                 continue
 
@@ -917,6 +1153,337 @@ class ThreadContext:
         return self.runner
 
 
+# ---------------------------------------------------------------------------
+# Pipeline Executor — DAG-based multi-step orchestration
+# ---------------------------------------------------------------------------
+
+
+class PipelineExecutor:
+    """Executes a pipeline of steps as a DAG with shared workspace and parallel waves."""
+
+    def __init__(self, task: PipelineTask, bot: "ClaudeTelegramBot",
+                 ctx: "ThreadContext", state_mgr: RoutineStateManager) -> None:
+        self.task = task
+        self.bot = bot
+        self.ctx = ctx
+        self.state = state_mgr
+        self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{int(time.time())}")
+        self._step_status: Dict[str, str] = {s.id: "pending" for s in task.steps}
+        self._step_outputs: Dict[str, str] = {}
+        self._step_errors: Dict[str, str] = {}
+        self._step_attempts: Dict[str, int] = {s.id: 0 for s in task.steps}
+        self._active_runners: Dict[str, ClaudeRunner] = {}
+        self._lock = threading.Lock()
+        self._cancelled = threading.Event()
+        self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
+
+    def execute(self) -> bool:
+        """Run the full pipeline. Returns True if all steps completed successfully."""
+        logger.info("Pipeline %s starting (%d steps)", self.task.name, len(self.task.steps))
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        data_dir = self.workspace / "data"
+        data_dir.mkdir(exist_ok=True)
+
+        # Initialize pipeline state with all step ids
+        step_ids = [s.id for s in self.task.steps]
+        self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running", steps_init=step_ids)
+
+        start_time = time.time()
+        try:
+            self._run_dag_loop(data_dir)
+        except Exception as exc:
+            logger.error("Pipeline %s error: %s", self.task.name, exc)
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=str(exc)[:200])
+            self._notify_failure(str(exc))
+            return False
+
+        # Determine final status
+        all_completed = all(s == "completed" for s in self._step_status.values())
+        elapsed = int(time.time() - start_time)
+
+        if all_completed:
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "completed")
+            self._notify_success(elapsed)
+            logger.info("Pipeline %s completed in %ds", self.task.name, elapsed)
+        else:
+            failed_steps = [sid for sid, st in self._step_status.items() if st == "failed"]
+            err = f"Steps failed: {', '.join(failed_steps)}"
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=err)
+            self._notify_failure(err)
+            logger.warning("Pipeline %s failed: %s", self.task.name, err)
+
+        # Cleanup workspace (keep on failure for debugging)
+        if all_completed:
+            try:
+                import shutil
+                shutil.rmtree(self.workspace, ignore_errors=True)
+            except Exception:
+                pass
+        return all_completed
+
+    def cancel(self) -> None:
+        """Cancel the pipeline — kill active runners and skip remaining steps."""
+        self._cancelled.set()
+        with self._lock:
+            for runner in self._active_runners.values():
+                if runner.running:
+                    runner.cancel()
+
+    def _run_dag_loop(self, data_dir: Path) -> None:
+        """Execute steps in topological waves until all are terminal."""
+        terminal = {"completed", "failed", "skipped"}
+
+        while True:
+            if self._cancelled.is_set():
+                with self._lock:
+                    for sid, st in self._step_status.items():
+                        if st not in terminal:
+                            self._step_status[sid] = "skipped"
+                            self.state.set_step_status(self.task.name, self.task.time_slot, sid, "skipped",
+                                                       error="Cancelled")
+                break
+
+            # Check if all steps are terminal
+            with self._lock:
+                non_terminal = [sid for sid, st in self._step_status.items() if st not in terminal]
+                if not non_terminal:
+                    break
+
+            # Find ready steps (pending + all deps completed)
+            ready = []
+            with self._lock:
+                for sid, st in self._step_status.items():
+                    if st != "pending":
+                        continue
+                    step = self._steps_by_id[sid]
+                    deps_met = all(self._step_status.get(d) == "completed" for d in step.depends_on)
+                    if deps_met:
+                        ready.append(step)
+
+            if not ready:
+                # Check if anything is still running
+                with self._lock:
+                    running = any(st == "running" for st in self._step_status.values())
+                if running:
+                    time.sleep(1)
+                    continue
+                else:
+                    break  # Deadlock or all resolved
+
+            # Launch ready steps in parallel
+            threads = []
+            for step in ready:
+                with self._lock:
+                    self._step_status[step.id] = "running"
+                t = threading.Thread(target=self._execute_step, args=(step, data_dir),
+                                     daemon=True, name=f"pipeline-step-{step.id}")
+                threads.append(t)
+                t.start()
+
+            # Wait for this wave
+            for t in threads:
+                t.join()
+
+            # Post-wave: handle retries and cascade skips
+            with self._lock:
+                for step in self.task.steps:
+                    if self._step_status[step.id] == "failed":
+                        if self._step_attempts[step.id] <= step.retry:
+                            logger.info("Pipeline %s: retrying step %s (attempt %d/%d)",
+                                        self.task.name, step.id,
+                                        self._step_attempts[step.id], step.retry)
+                            self._step_status[step.id] = "pending"
+                        else:
+                            self._cascade_skip(step.id)
+
+            # Notify progress if mode is "all"
+            if self.task.notify == "all":
+                self._notify_progress()
+
+    def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute a single pipeline step using ClaudeRunner."""
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+        self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "running", attempt=attempt)
+
+        logger.info("Pipeline %s: step %s starting (model=%s, attempt=%d)",
+                     self.task.name, step.id, step.model, attempt)
+
+        # Build prompt with workspace context
+        prompt = self._build_step_prompt(step, data_dir)
+
+        # Create a fresh ClaudeRunner for this step
+        runner = ClaudeRunner()
+        with self._lock:
+            self._active_runners[step.id] = runner
+
+        # Determine workspace for Claude CLI
+        ws = str(self.workspace)
+        if step.agent:
+            agent_dir = AGENTS_DIR / step.agent
+            if agent_dir.is_dir():
+                ws = str(agent_dir)
+        elif self.task.agent:
+            agent_dir = AGENTS_DIR / self.task.agent
+            if agent_dir.is_dir():
+                ws = str(agent_dir)
+
+        try:
+            runner.run(prompt, model=step.model, workspace=ws)
+            # Wait for completion with timeout
+            deadline = time.time() + step.timeout
+            while runner.running and time.time() < deadline:
+                if self._cancelled.is_set():
+                    runner.cancel()
+                    break
+                time.sleep(1)
+            if runner.running:
+                runner.cancel()
+                raise TimeoutError(f"Step {step.id} timed out after {step.timeout}s")
+
+            # Capture output
+            output = runner.result_text or runner.accumulated_text or ""
+            if runner.error_text and not output:
+                raise RuntimeError(runner.error_text)
+
+            # Write output to shared data directory
+            output_file = data_dir / f"{step.id}.md"
+            output_file.write_text(output, encoding="utf-8")
+
+            with self._lock:
+                self._step_outputs[step.id] = output
+                self._step_status[step.id] = "completed"
+            self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "completed", attempt=attempt)
+            logger.info("Pipeline %s: step %s completed", self.task.name, step.id)
+
+        except Exception as exc:
+            err_msg = str(exc)[:200]
+            with self._lock:
+                self._step_errors[step.id] = err_msg
+                self._step_status[step.id] = "failed"
+            self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                       error=err_msg, attempt=attempt)
+            logger.error("Pipeline %s: step %s failed: %s", self.task.name, step.id, err_msg)
+        finally:
+            with self._lock:
+                self._active_runners.pop(step.id, None)
+
+    def _build_step_prompt(self, step: PipelineStep, data_dir: Path) -> str:
+        """Build the full prompt for a step, including workspace context and upstream data."""
+        # List available data from completed dependencies
+        available = []
+        for dep_id in step.depends_on:
+            dep_file = data_dir / f"{dep_id}.md"
+            dep_step = self._steps_by_id.get(dep_id)
+            dep_name = dep_step.name if dep_step else dep_id
+            if dep_file.exists():
+                available.append(f"- data/{dep_id}.md ({dep_name} — completed)")
+
+        # Also list any other completed step outputs
+        with self._lock:
+            for sid, st in self._step_status.items():
+                if st == "completed" and sid not in step.depends_on:
+                    sfile = data_dir / f"{sid}.md"
+                    if sfile.exists():
+                        sname = self._steps_by_id.get(sid, PipelineStep(sid, sid, "", "")).name
+                        available.append(f"- data/{sid}.md ({sname} — completed, not a dependency)")
+
+        prefix_lines = [
+            f"[PIPELINE: {self.task.name} | Step: {step.name} ({step.id})]",
+            "",
+            "Seu workspace compartilhado está em data/.",
+        ]
+        if available:
+            prefix_lines.append("Dados disponíveis de etapas anteriores:")
+            prefix_lines.extend(available)
+        prefix_lines.extend([
+            "",
+            f"Escreva seu output em: data/{step.id}.md",
+            "",
+            "Importante: execute a tarefa e escreva apenas o output. "
+            "Não adicione cabeçalho nem confirmação de execução.",
+            "",
+            "---",
+            "",
+        ])
+
+        return "\n".join(prefix_lines) + step.prompt
+
+    def _cascade_skip(self, failed_id: str) -> None:
+        """Recursively mark all transitive dependents of a failed step as skipped."""
+        for step in self.task.steps:
+            if failed_id in step.depends_on and self._step_status[step.id] == "pending":
+                self._step_status[step.id] = "skipped"
+                self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "skipped",
+                                           error=f"Dependency {failed_id} failed")
+                self._cascade_skip(step.id)  # Recurse
+
+    def _notify_progress(self) -> None:
+        """Send progress notification (for notify=all mode)."""
+        total = len(self.task.steps)
+        done = sum(1 for st in self._step_status.values() if st in ("completed", "failed", "skipped"))
+        last_completed = None
+        for step in self.task.steps:
+            if self._step_status[step.id] == "completed":
+                last_completed = step.name
+        if last_completed:
+            msg = f"Pipeline {self.task.title}: step {done}/{total} done ({last_completed})"
+            try:
+                self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+            except Exception:
+                pass
+
+    def _notify_success(self, elapsed: int) -> None:
+        """Send final success notification based on notify mode."""
+        if self.task.notify == "none":
+            return
+
+        # Find the step marked output: telegram
+        output_text = None
+        for step in self.task.steps:
+            if step.output_to_telegram and step.id in self._step_outputs:
+                output_text = self._step_outputs[step.id]
+                break
+        # Fallback: last completed step's output
+        if output_text is None:
+            for step in reversed(self.task.steps):
+                if step.id in self._step_outputs:
+                    output_text = self._step_outputs[step.id]
+                    break
+
+        if self.task.notify == "summary" or output_text is None:
+            mins = elapsed // 60
+            secs = elapsed % 60
+            msg = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
+            try:
+                self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+            except Exception:
+                pass
+        elif output_text:
+            try:
+                self.bot.send_message(output_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+            except Exception:
+                pass
+
+    def _notify_failure(self, error: str) -> None:
+        """Always notify on failure, regardless of notify mode."""
+        icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏰"}
+        step_lines = []
+        for step in self.task.steps:
+            st = self._step_status.get(step.id, "pending")
+            icon = icons.get(st, "⏰")
+            step_lines.append(f"{icon} {step.name}")
+        steps_summary = ", ".join(step_lines)
+        msg = (f"Pipeline *{self.task.title}* FAILED\n"
+               f"Error: `{error[:100]}`\n"
+               f"Steps: {steps_summary}")
+        try:
+            self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+        except Exception:
+            pass
+
+
 class ClaudeTelegramBot:
     def __init__(self) -> None:
         self.token = TELEGRAM_BOT_TOKEN
@@ -944,14 +1511,27 @@ class ClaudeTelegramBot:
 
         # Routine scheduler
         self.routine_state = RoutineStateManager()
-        self.scheduler = RoutineScheduler(self.routine_state, self._enqueue_routine)
+        self.scheduler = RoutineScheduler(self.routine_state, self._enqueue_routine, self._enqueue_pipeline)
         self.scheduler.start()
 
-        # Tracks active routine contexts for HTTP stop requests
+        # Tracks active routine/pipeline contexts for HTTP stop requests
         self._routine_contexts: Dict[str, "ThreadContext"] = {}
         self._routine_contexts_lock = threading.Lock()
+        self._active_pipelines: Dict[str, PipelineExecutor] = {}
+        self._active_pipelines_lock = threading.Lock()
 
         self._start_control_server()
+
+        # Voice transcription tools
+        self._voice_tools = self._check_voice_tools()
+        if self._voice_tools["can_transcribe"]:
+            logger.info("Voice transcription: enabled (ffmpeg=%s, hear=%s)",
+                        self._voice_tools["ffmpeg"], self._voice_tools["hear"])
+        else:
+            logger.warning("Voice transcription: disabled (ffmpeg=%s, hear=%s)",
+                           self._voice_tools.get("ffmpeg", "not found"),
+                           self._voice_tools.get("hear", "not found"))
+
         logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
 
     def _load_contexts(self) -> None:
@@ -1035,16 +1615,31 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.error("Failed to persist authorized chat: %s", exc)
 
+    def _find_context_for_routine(self, task: "RoutineTask") -> "ThreadContext":
+        """Find the correct Telegram context for a routine based on its agent assignment."""
+        with self._contexts_lock:
+            if task.agent:
+                # Find a context whose session is bound to this agent
+                for ctx in self._contexts.values():
+                    if ctx.session_name:
+                        session = self.sessions.sessions.get(ctx.session_name)
+                        if session and session.agent == task.agent:
+                            return ctx
+            # No agent (or no matching context): prefer private chat (positive chat_id, no thread)
+            for ctx in self._contexts.values():
+                if ctx.thread_id is None and ctx.chat_id and not ctx.chat_id.startswith("-"):
+                    return ctx
+            # Fall back to any context without a thread (e.g. group main chat)
+            for ctx in self._contexts.values():
+                if ctx.thread_id is None:
+                    return ctx
+        # Last resort: create/get the default chat from env
+        default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else "0"
+        return self._get_context(default_chat, None)
+
     def _enqueue_routine(self, task: RoutineTask) -> None:
         """Called by the scheduler thread to enqueue a routine for execution."""
-        # Routines go to the default context (private chat or first context)
-        with self._contexts_lock:
-            if self._contexts:
-                ctx = next(iter(self._contexts.values()))
-            else:
-                # Create a default context
-                default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else "0"
-                ctx = self._get_context(default_chat, None)
+        ctx = self._find_context_for_routine(task)
 
         def _run_routine() -> None:
             # Wait for any active runner to finish before executing (up to 10 min)
@@ -1064,6 +1659,34 @@ class ClaudeTelegramBot:
                     self._routine_contexts.pop(task.name, None)
 
         threading.Thread(target=_run_routine, daemon=True, name=f"routine-{task.name}").start()
+
+    def _enqueue_pipeline(self, task: PipelineTask) -> None:
+        """Called by the scheduler thread to enqueue a pipeline for execution."""
+        # Use a dummy RoutineTask to find context (reuses same routing logic)
+        dummy = RoutineTask(name=task.name, prompt="", model=task.model,
+                            time_slot=task.time_slot, agent=task.agent)
+        ctx = self._find_context_for_routine(dummy)
+
+        def _run_pipeline() -> None:
+            # Wait for any active runner to finish before executing (up to 10 min)
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                runner = ctx.runner
+                if runner is None or not runner.running:
+                    break
+                time.sleep(5)
+
+            executor = PipelineExecutor(task, self, ctx, self.routine_state)
+            with self._active_pipelines_lock:
+                self._active_pipelines[task.name] = executor
+            try:
+                self._ctx = ctx
+                executor.execute()
+            finally:
+                with self._active_pipelines_lock:
+                    self._active_pipelines.pop(task.name, None)
+
+        threading.Thread(target=_run_pipeline, daemon=True, name=f"pipeline-{task.name}").start()
 
     # -- Telegram helpers --
 
@@ -1136,6 +1759,11 @@ class ClaudeTelegramBot:
             if resp and resp.get("ok"):
                 return True
         return False
+
+    def delete_message(self, message_id: int) -> bool:
+        chat_id = self._chat_id
+        resp = self.tg_request("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
+        return bool(resp and resp.get("ok"))
 
     def send_typing(self) -> None:
         chat_id = self._chat_id
@@ -1407,11 +2035,18 @@ class ClaudeTelegramBot:
         if not routines:
             self.send_message("📋 Nenhuma rotina agendada para hoje.")
             return
-        _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌"}
+        _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌", "skipped": "⏭"}
         lines = ["📋 *Rotinas de hoje*\n"]
         for r in routines:
             icon = _icons.get(r["status"], "⏰")
-            lines.append(f"- {icon} `{r['time']}` *{r['title']}* — {r['model']}")
+            rtype = r.get("type", "routine")
+            if rtype == "pipeline":
+                steps_info = r.get("steps", {})
+                total = len(steps_info) if steps_info else 0
+                done = sum(1 for s in steps_info.values() if s.get("status") in ("completed", "failed", "skipped")) if steps_info else 0
+                lines.append(f"- {icon} `{r['time']}` *{r['title']}* — pipeline {done}/{total} steps — {r['model']}")
+            else:
+                lines.append(f"- {icon} `{r['time']}` *{r['title']}* — {r['model']}")
         self.send_message("\n".join(lines))
 
     def _routine_status(self) -> None:
@@ -1419,14 +2054,23 @@ class ClaudeTelegramBot:
         if not routines:
             self.send_message("📊 Nenhuma rotina agendada para hoje.")
             return
-        _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌"}
+        _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌", "skipped": "⏭"}
         lines = [f"📊 *Rotinas — {time.strftime('%Y-%m-%d')}*\n"]
         for r in routines:
             icon = _icons.get(r["status"], "⏰")
             extra = ""
             if r["status"] == "failed" and r.get("error"):
                 extra = f" — `{r['error'][:60]}`"
-            lines.append(f"- {icon} `{r['time']}` *{r['title']}*{extra}")
+            rtype = r.get("type", "routine")
+            if rtype == "pipeline":
+                steps_info = r.get("steps", {})
+                lines.append(f"- {icon} `{r['time']}` *{r['title']}* (pipeline){extra}")
+                if steps_info:
+                    for sid, sdata in steps_info.items():
+                        si = _icons.get(sdata.get("status", "pending"), "⏰")
+                        lines.append(f"    {si} {sid}")
+            else:
+                lines.append(f"- {icon} `{r['time']}` *{r['title']}*{extra}")
         self.send_message("\n".join(lines))
 
     def _routine_create(self, extra: str) -> None:
@@ -1624,8 +2268,8 @@ class ClaudeTelegramBot:
 
     # -- Telegram file download --
 
-    def _download_telegram_file(self, file_id: str) -> Optional[Path]:
-        """Download a file from Telegram and save to temp directory."""
+    def _download_telegram_file(self, file_id: str, save_dir: Path = TEMP_IMAGES_DIR) -> Optional[Path]:
+        """Download a file from Telegram and save to a directory."""
         try:
             resp = self.tg_request("getFile", {"file_id": file_id})
             if not resp or not resp.get("ok"):
@@ -1634,16 +2278,229 @@ class ClaudeTelegramBot:
             file_path = resp["result"]["file_path"]
 
             url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
-            ext = Path(file_path).suffix or ".jpg"
+            ext = Path(file_path).suffix or ".bin"
             filename = f"{int(time.time())}_{Path(file_path).stem}{ext}"
-            save_path = TEMP_IMAGES_DIR / filename
+            save_path = save_dir / filename
 
             urllib.request.urlretrieve(url, str(save_path))
-            logger.info("Downloaded image to %s (%s)", save_path, file_path)
+            logger.info("Downloaded file to %s (%s)", save_path, file_path)
             return save_path
         except Exception as exc:
             logger.error("Failed to download file %s: %s", file_id, exc)
             return None
+
+    # -- Voice transcription --
+
+    def _check_voice_tools(self) -> Dict[str, Any]:
+        """Check availability of voice transcription tools, auto-download hear if missing."""
+        import shutil as _shutil
+        result: Dict[str, Any] = {"ffmpeg": None, "hear": None, "can_transcribe": False}
+
+        # Check ffmpeg
+        if Path(FFMPEG_PATH).is_file():
+            result["ffmpeg"] = FFMPEG_PATH
+        else:
+            found = _shutil.which("ffmpeg")
+            if found:
+                result["ffmpeg"] = found
+
+        # Check hear — configured path, then system PATH, then bundled location
+        hear_candidates = []
+        if HEAR_PATH:
+            hear_candidates.append(HEAR_PATH)
+        hear_candidates.append(str(HEAR_BIN_DIR / "hear"))
+        for candidate in hear_candidates:
+            if Path(candidate).is_file():
+                result["hear"] = candidate
+                break
+        if not result["hear"]:
+            found = _shutil.which("hear")
+            if found:
+                result["hear"] = found
+
+        # Auto-download hear if not found
+        if not result["hear"]:
+            downloaded = self._auto_download_hear()
+            if downloaded:
+                result["hear"] = downloaded
+
+        result["can_transcribe"] = bool(result["ffmpeg"] and result["hear"])
+        return result
+
+    def _auto_download_hear(self) -> Optional[str]:
+        """Download the 'hear' CLI binary from GitHub releases."""
+        try:
+            logger.info("hear not found — attempting auto-download from GitHub...")
+            api_url = "https://api.github.com/repos/sveinbjornt/hear/releases/latest"
+            req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github.v3+json"})
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                release = json.loads(resp.read().decode())
+
+            # Find the binary asset (look for 'hear' without extension, or a zip/tar)
+            download_url = None
+            for asset in release.get("assets", []):
+                name = asset.get("name", "")
+                if name == "hear" or name == "hear.zip" or name.endswith(".tar.gz"):
+                    download_url = asset["browser_download_url"]
+                    break
+
+            if not download_url:
+                logger.warning("No suitable hear binary found in latest release assets")
+                return None
+
+            dest = HEAR_BIN_DIR / "hear"
+            asset_name = download_url.rsplit("/", 1)[-1]
+
+            if asset_name == "hear":
+                # Direct binary download
+                urllib.request.urlretrieve(download_url, str(dest))
+            elif asset_name.endswith(".zip"):
+                import zipfile
+                import tempfile
+                tmp = Path(tempfile.mkdtemp())
+                zip_path = tmp / asset_name
+                urllib.request.urlretrieve(download_url, str(zip_path))
+                with zipfile.ZipFile(zip_path) as zf:
+                    # Extract 'hear' binary from zip
+                    for member in zf.namelist():
+                        if Path(member).name == "hear" and not member.endswith("/"):
+                            with zf.open(member) as src, open(dest, "wb") as dst:
+                                dst.write(src.read())
+                            break
+            else:
+                logger.warning("Unsupported asset format: %s", asset_name)
+                return None
+
+            if dest.exists():
+                os.chmod(str(dest), 0o755)
+                logger.info("hear downloaded successfully to %s", dest)
+                return str(dest)
+            return None
+        except Exception as exc:
+            logger.warning("Failed to auto-download hear: %s", exc)
+            return None
+
+    def _convert_ogg_to_wav(self, ogg_path: Path) -> Optional[Path]:
+        """Convert OGG/Opus audio to WAV (16kHz mono) using ffmpeg."""
+        wav_path = ogg_path.with_suffix(".wav")
+        try:
+            proc = subprocess.run(
+                [self._voice_tools["ffmpeg"], "-y", "-i", str(ogg_path),
+                 "-ar", "16000", "-ac", "1", "-f", "wav", str(wav_path)],
+                capture_output=True, text=True, timeout=30,
+            )
+            if proc.returncode != 0:
+                logger.error("ffmpeg conversion failed: %s", proc.stderr[:500])
+                return None
+            return wav_path
+        except subprocess.TimeoutExpired:
+            logger.error("ffmpeg conversion timed out for %s", ogg_path)
+            return None
+        except Exception as exc:
+            logger.error("ffmpeg conversion error: %s", exc)
+            return None
+
+    def _transcribe_audio(self, wav_path: Path) -> Optional[str]:
+        """Transcribe WAV audio to text using the 'hear' CLI (Apple SFSpeechRecognizer)."""
+        try:
+            proc = subprocess.run(
+                [self._voice_tools["hear"], str(wav_path)],
+                capture_output=True, text=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                logger.error("hear transcription failed (rc=%d): %s", proc.returncode, proc.stderr[:500])
+                return None
+            text = proc.stdout.strip()
+            if not text:
+                logger.warning("hear returned empty transcription for %s", wav_path)
+                return None
+            return text
+        except subprocess.TimeoutExpired:
+            logger.error("hear transcription timed out for %s", wav_path)
+            return None
+        except Exception as exc:
+            logger.error("hear transcription error: %s", exc)
+            return None
+
+    def _handle_voice(self, msg: Dict, user_msg_id: Optional[int] = None) -> None:
+        """Handle a voice/audio message: download, convert, transcribe, send to Claude."""
+        voice_data = msg.get("voice") or msg.get("audio")
+        if not voice_data:
+            return
+        file_id = voice_data["file_id"]
+        duration = voice_data.get("duration", 0)
+        reply_ctx = self._extract_reply_context(msg)
+
+        # Check tools
+        if not self._voice_tools.get("can_transcribe"):
+            missing = []
+            if not self._voice_tools.get("ffmpeg"):
+                missing.append("ffmpeg (`brew install ffmpeg`)")
+            if not self._voice_tools.get("hear"):
+                missing.append("hear (https://github.com/sveinbjornt/hear)")
+            self.send_message(
+                "⚠️ Transcrição de áudio indisponível.\n"
+                f"Ferramentas faltando: {', '.join(missing)}\n"
+                "Reinicie o bot após instalar."
+            )
+            return
+
+        # Status message
+        self.send_typing()
+        status_msg = self.send_message(f"🎤 Áudio recebido ({duration}s). Transcrevendo...")
+
+        # Download
+        saved = self._download_telegram_file(file_id, save_dir=TEMP_AUDIO_DIR)
+        if not saved:
+            self._voice_status(status_msg, "❌ Não consegui baixar o áudio.")
+            return
+
+        try:
+            # Convert OGG → WAV
+            wav_path = self._convert_ogg_to_wav(saved)
+            if not wav_path:
+                self._voice_status(status_msg, "❌ Falha na conversão do áudio (ffmpeg).")
+                return
+
+            # Transcribe
+            transcription = self._transcribe_audio(wav_path)
+            if not transcription:
+                self._voice_status(
+                    status_msg,
+                    "❌ Falha na transcrição.\n"
+                    "Verifique se Dictation está habilitado: System Settings → Keyboard → Dictation"
+                )
+                return
+
+            # Show transcription preview
+            preview = transcription[:500] + ("..." if len(transcription) > 500 else "")
+            self._voice_status(status_msg, f"🎤 _{preview}_")
+
+            # Build prompt and send to Claude
+            caption = msg.get("caption", "")
+            prefix = "[Mensagem de voz transcrita]"
+            if caption:
+                prompt = f"{prefix}\n\n{reply_ctx}{transcription}\n\n[Legenda]: {caption}"
+            else:
+                prompt = f"{prefix}\n\n{reply_ctx}{transcription}"
+
+            self._handle_text(prompt, user_msg_id=user_msg_id)
+
+        finally:
+            # Cleanup temp files
+            for p in [saved, saved.with_suffix(".wav")]:
+                try:
+                    if p and p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
+
+    def _voice_status(self, msg_id: Optional[int], text: str) -> None:
+        """Update or send a voice status message."""
+        if msg_id:
+            self.edit_message(msg_id, text)
+        else:
+            self.send_message(text)
 
     # -- Claude execution --
 
@@ -1660,7 +2517,8 @@ class ClaudeTelegramBot:
 
     def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
                           no_output_timeout: int = 90,
-                          max_total_timeout: int = 600) -> None:
+                          max_total_timeout: int = 600,
+                          routine_mode: bool = False) -> None:
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -1679,11 +2537,9 @@ class ClaudeTelegramBot:
             self.sessions.cumulative_turns += 1
             self.sessions.save()
 
-        if not _retry:
+        if not _retry and not routine_mode:
             if ctx:
                 ctx.stream_msg_id = self.send_message("⏳ _Processando..._")
-            else:
-                pass  # no ctx = silent (routine)
         if ctx:
             ctx.last_edit_time = time.time()
             ctx.last_typing_time = time.time()
@@ -1709,10 +2565,11 @@ class ClaudeTelegramBot:
         watchdog_thread.start()
 
         # Stream updates while runner is active
-        self._stream_updates(runner_thread, runner)
+        self._stream_updates(runner_thread, runner, routine_mode=routine_mode)
 
         # Finalize
-        self._finalize_response(session, runner, prompt=prompt if not _retry else None)
+        self._finalize_response(session, runner, prompt=prompt if not _retry else None,
+                                routine_mode=routine_mode)
 
         # Process queued messages for this context
         self._process_pending()
@@ -1765,7 +2622,8 @@ class ClaudeTelegramBot:
             self.set_reaction(ctx.user_msg_id, emoji)
             ctx.last_reaction = emoji
 
-    def _stream_updates(self, runner_thread: threading.Thread, runner: ClaudeRunner) -> None:
+    def _stream_updates(self, runner_thread: threading.Thread, runner: ClaudeRunner,
+                        routine_mode: bool = False) -> None:
         ctx = self._ctx
         _first_output_notified = False
         _checkin_interval = 15.0
@@ -1776,14 +2634,14 @@ class ClaudeTelegramBot:
             runner_thread.join(timeout=1.0)
             now = time.time()
 
-            if ctx and now - ctx.last_typing_time >= TYPING_INTERVAL:
-                self.send_typing()
-                ctx.last_typing_time = now
-
-            self._update_reaction(runner)
+            if not routine_mode:
+                if ctx and now - ctx.last_typing_time >= TYPING_INTERVAL:
+                    self.send_typing()
+                    ctx.last_typing_time = now
+                self._update_reaction(runner)
 
             stream_msg = ctx.stream_msg_id if ctx else None
-            if stream_msg:
+            if stream_msg and not routine_mode:
                 snapshot = runner.get_snapshot()
                 last_len = ctx.last_snapshot_len if ctx else 0
                 has_new = len(snapshot) > last_len
@@ -1817,7 +2675,8 @@ class ClaudeTelegramBot:
                         display = f"⏳ _Aguardando resposta do Claude... {elapsed}s_"
                     self.edit_message(stream_msg, display)
 
-    def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None) -> None:
+    def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None,
+                           routine_mode: bool = False) -> None:
         ctx = self._ctx
 
         if runner.captured_session_id:
@@ -1865,14 +2724,24 @@ class ClaudeTelegramBot:
             _track_cost(runner.cost_usd)
 
         # Send final
-        sent = False
         stream_msg = ctx.stream_msg_id if ctx else None
-        if stream_msg and len(final_text) <= MAX_MESSAGE_LENGTH:
-            sent = self.edit_message(stream_msg, final_text)
-        if not sent:
+        if routine_mode:
+            # NO_REPLY means Claude completed via tools with no text to send — silent success
+            if final_text.strip() == "NO_REPLY":
+                return
             if stream_msg:
-                self.edit_message(stream_msg, "✅")
+                self.delete_message(stream_msg)
+                if ctx:
+                    ctx.stream_msg_id = None
             self.send_message(final_text)
+        else:
+            sent = False
+            if stream_msg and len(final_text) <= MAX_MESSAGE_LENGTH:
+                sent = self.edit_message(stream_msg, final_text)
+            if not sent:
+                if stream_msg:
+                    self.edit_message(stream_msg, "✅")
+                self.send_message(final_text)
 
         if ctx:
             ctx.stream_msg_id = None
@@ -1920,13 +2789,16 @@ class ClaudeTelegramBot:
         if changed:
             self.sessions.save()
 
-        prompt = f"[ROTINA: {task.name} | {task.time_slot}]\n\n{task.prompt}"
+        prompt = (f"[ROTINA: {task.name} | {task.time_slot}]\n"
+                  f"Importante: execute a tarefa abaixo e envie apenas o output. "
+                  f"Não adicione cabeçalho, confirmação de execução, nem frase dizendo que a rotina rodou.\n\n"
+                  f"{task.prompt}")
 
-        self.send_message(f"🔄 Executando rotina: *{task.name}* ({task.time_slot})")
         saved_timeout = self.timeout_seconds
         self.timeout_seconds = 300  # 5 min inactivity for routines
         try:
-            self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200)
+            self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200,
+                                    routine_mode=True)
             # Check if there was an error
             if self.runner.error_text:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", self.runner.error_text[:200])
@@ -1935,6 +2807,7 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.error("Routine %s failed: %s", task.name, exc)
             self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
+            self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
         finally:
             self.timeout_seconds = saved_timeout
 
@@ -2056,6 +2929,25 @@ class ClaudeTelegramBot:
         else:
             self.answer_callback(cb_id)
 
+    def _extract_reply_context(self, msg: Dict) -> str:
+        """If msg is a reply, return a context prefix with the original message content."""
+        reply_to = msg.get("reply_to_message")
+        if not reply_to:
+            return ""
+
+        sender = reply_to.get("from", {})
+        is_bot = sender.get("is_bot", False)
+        sender_name = "Bot" if is_bot else (sender.get("first_name") or sender.get("username") or "Usuário")
+
+        content = reply_to.get("text") or reply_to.get("caption", "")
+        if not content:
+            return ""
+
+        if len(content) > 500:
+            content = content[:500] + "…"
+
+        return f"[Contexto — reply à mensagem de {sender_name}]\n\"{content}\"\n---\n"
+
     def _process_update(self, update: Dict) -> None:
         # Callback queries (inline keyboards)
         if "callback_query" in update:
@@ -2082,10 +2974,11 @@ class ClaudeTelegramBot:
         # Context and onboarding already handled in polling loop
 
         user_msg_id = msg.get("message_id")
+        reply_ctx = self._extract_reply_context(msg)
 
         text = msg.get("text", "")
         if text:
-            self._handle_text(text, user_msg_id=user_msg_id)
+            self._handle_text(reply_ctx + text, user_msg_id=user_msg_id)
             return
 
         # Handle photos sent from Telegram
@@ -2097,7 +2990,7 @@ class ClaudeTelegramBot:
             saved = self._download_telegram_file(file_id)
             if saved:
                 caption = msg.get("caption", "Analise esta imagem.")
-                prompt = f"[Imagem recebida e salva em: {saved}]\n\n{caption}"
+                prompt = f"[Imagem recebida e salva em: {saved}]\n\n{reply_ctx}{caption}"
                 self._handle_text(prompt, user_msg_id=user_msg_id)
             else:
                 self.send_message("❌ Não consegui baixar a imagem.")
@@ -2112,11 +3005,23 @@ class ClaudeTelegramBot:
                 saved = self._download_telegram_file(file_id)
                 if saved:
                     caption = msg.get("caption", "Analise esta imagem.")
-                    prompt = f"[Imagem recebida e salva em: {saved}]\n\n{caption}"
+                    prompt = f"[Imagem recebida e salva em: {saved}]\n\n{reply_ctx}{caption}"
                     self._handle_text(prompt, user_msg_id=user_msg_id)
                 else:
                     self.send_message("❌ Não consegui baixar a imagem.")
                 return
+
+        # Handle voice messages
+        voice = msg.get("voice")
+        if voice:
+            self._handle_voice(msg, user_msg_id=user_msg_id)
+            return
+
+        # Handle audio files (forwarded audio, music, etc.)
+        audio = msg.get("audio")
+        if audio:
+            self._handle_voice(msg, user_msg_id=user_msg_id)
+            return
 
     # -- Polling loop --
 
@@ -2179,6 +3084,13 @@ class ClaudeTelegramBot:
                         if not fm or not routine_body:
                             self._respond(400, {"error": "invalid routine file"})
                             return
+                        # Check if this is a pipeline
+                        if str(fm.get("type", "routine")) == "pipeline":
+                            bot.scheduler._enqueue_pipeline_from_file(
+                                md_file, fm, routine_body, name,
+                                str(fm.get("model", "sonnet")), time_slot)
+                            self._respond(200, {"ok": True, "type": "pipeline"})
+                            return
                         task = RoutineTask(
                             name=name,
                             prompt=routine_body,
@@ -2191,6 +3103,13 @@ class ClaudeTelegramBot:
                         self._respond(200, {"ok": True})
                     elif self.path == "/routine/stop":
                         name = body.get("name", "")
+                        # Check pipelines first
+                        with bot._active_pipelines_lock:
+                            executor = bot._active_pipelines.get(name)
+                        if executor:
+                            executor.cancel()
+                            self._respond(200, {"ok": True, "type": "pipeline"})
+                            return
                         with bot._routine_contexts_lock:
                             ctx = bot._routine_contexts.get(name)
                         if ctx and ctx.runner and ctx.runner.running:
@@ -2198,6 +3117,19 @@ class ClaudeTelegramBot:
                             self._respond(200, {"ok": True})
                         else:
                             self._respond(404, {"error": "routine not running"})
+                    elif self.path == "/pipeline/status":
+                        name = body.get("name", "")
+                        time_slot = body.get("time_slot", "")
+                        if not time_slot:
+                            # Find latest time_slot for today
+                            state = bot.routine_state.get_today_state()
+                            slots = state.get(name, {})
+                            time_slot = max(slots.keys()) if slots else ""
+                        if time_slot:
+                            steps = bot.routine_state.get_pipeline_steps(name, time_slot)
+                            self._respond(200, {"ok": True, "steps": steps})
+                        else:
+                            self._respond(404, {"error": "pipeline not found"})
                     else:
                         self._respond(404, {"error": "unknown endpoint"})
                 except Exception as exc:
@@ -2224,7 +3156,8 @@ class ClaudeTelegramBot:
 
     def _notify_startup(self) -> None:
         for cid in self.authorized_ids:
-            self.tg_request("sendMessage", {"chat_id": cid, "text": "🟢 Bot online"})
+            if not cid.startswith("-"):  # private chats only, not groups
+                self.tg_request("sendMessage", {"chat_id": cid, "text": "🟢 Bot online"})
 
     def run(self) -> None:
         logger.info("Starting bot polling loop...")
