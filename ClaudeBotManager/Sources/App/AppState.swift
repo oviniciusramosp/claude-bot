@@ -6,6 +6,7 @@ final class AppState: ObservableObject {
     // Bot
     @Published var botStatus: BotProcessService.BotStatus = .unknown
     @Published var claudeUsage: ClaudeUsage = .unavailable
+    @Published var activeRunners: Int = 0
 
     // Data
     @Published var mainAgent: Agent = Agent(id: "main", name: "Main", icon: "🤖",
@@ -151,6 +152,23 @@ final class AppState: ObservableObject {
     func refreshBotStatus() async {
         guard let bs = botProcessService else { return }
         botStatus = await bs.status()
+        // Fetch active runners from health endpoint
+        await fetchHealthStatus()
+    }
+
+    private func fetchHealthStatus() async {
+        guard isRunning else { activeRunners = 0; return }
+        let url = URL(string: "http://127.0.0.1:27182/health")!
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 3
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                activeRunners = json["active_runners"] as? Int ?? 0
+            }
+        } catch {
+            activeRunners = 0
+        }
     }
 
     func refreshUsage() async {

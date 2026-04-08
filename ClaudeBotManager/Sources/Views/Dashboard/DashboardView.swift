@@ -7,6 +7,9 @@ struct DashboardView: View {
         ScrollView {
             VStack(spacing: Spacing.xl) {
                 BotStatusCard()
+                if appState.activeRunners > 0 {
+                    ActiveRunnersCard(count: appState.activeRunners)
+                }
                 HStack(alignment: .top, spacing: Spacing.xl) {
                     ClaudeUsageCard().frame(maxHeight: .infinity)
                     ZAIUsageCard().frame(maxHeight: .infinity)
@@ -523,6 +526,33 @@ struct TimelineRow: View {
                 .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                 .lineLimit(1)
+        }
+    }
+}
+
+// MARK: - Active Runners Card
+
+struct ActiveRunnersCard: View {
+    var count: Int
+
+    var body: some View {
+        GlassCard(padding: Spacing.lg) {
+            HStack(spacing: Spacing.md) {
+                ProgressView()
+                    .scaleEffect(0.8)
+                    .frame(width: 20, height: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Claude is working")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("\(count) active \(count == 1 ? "session" : "sessions") processing")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+                }
+                Spacer()
+                Image(systemName: "bolt.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color(red: 0.25, green: 0.56, blue: 0.98))
+            }
         }
     }
 }

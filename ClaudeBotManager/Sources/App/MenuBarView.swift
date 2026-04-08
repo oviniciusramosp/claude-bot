@@ -112,6 +112,22 @@ struct MenuBarView: View {
 
             Divider()
 
+            // Active runners indicator
+            if appState.activeRunners > 0 {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 14, height: 14)
+                    Text("Claude is working (\(appState.activeRunners) active)")
+                        .font(.caption)
+                        .foregroundStyle(Color(red: 0.25, green: 0.56, blue: 0.98))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 6)
+
+                Divider()
+            }
+
             // Today's routines summary
             if !appState.routines.isEmpty {
                 let todayExecs = appState.routines.flatMap { $0.todayExecutions }
