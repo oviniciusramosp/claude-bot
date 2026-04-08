@@ -376,14 +376,16 @@ struct RoutineDetailView: View {
             .buttonStyle(.bordered)
             .disabled(dryRunState == .running)
 
-            // Delete
-            Button(role: .destructive) {
-                showDeleteConfirm = true
-            } label: {
-                Label("Delete", systemImage: "trash")
+            // Delete (hidden for built-in routines like update-check)
+            if !routine.isBuiltIn {
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.statusRed)
             }
-            .buttonStyle(.bordered)
-            .tint(Color.statusRed)
 
             Spacer()
 

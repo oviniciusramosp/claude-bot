@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.6.0"  # routine detail redesign, real usage API; native /btw injection, /cost, /doctor
+BOT_VERSION = "2.7.0"  # dashboard redesign from Figma, segmented usage bar, bot avatar, timeline
 
 import http.server
 import json
@@ -593,6 +593,9 @@ class RoutineScheduler:
                 fm, body = get_frontmatter_and_body(md_file)
                 if not fm or not body:
                     continue
+                # Skip index files (e.g. Routines.md) — they are Obsidian hubs, not routines
+                if str(fm.get("type", "")).lower() == "index":
+                    continue
                 # P2-05: Validate required frontmatter fields
                 _missing = [f for f in ("title", "type", "schedule", "model", "enabled")
                             if f not in fm]
@@ -760,6 +763,8 @@ class RoutineScheduler:
             try:
                 fm, _ = get_frontmatter_and_body(md_file)
                 if not fm or not fm.get("enabled", False):
+                    continue
+                if str(fm.get("type", "")).lower() == "index":
                     continue
                 schedule = fm.get("schedule", {})
                 if not isinstance(schedule, dict):
@@ -2397,10 +2402,10 @@ class ClaudeTelegramBot:
 
         buttons = []
         for md_file in sorted(ROUTINES_DIR.glob("*.md")):
-            if md_file.stem == "Routines":
-                continue
             fm, body = get_frontmatter_and_body(md_file)
             if not fm or not body:
+                continue
+            if str(fm.get("type", "")).lower() == "index":
                 continue
             title = fm.get("title", md_file.stem)
             rtype = str(fm.get("type", "routine"))
