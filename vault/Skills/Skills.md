@@ -14,6 +14,7 @@ Tarefas recorrentes e estruturadas, executaveis pelo Claude Code.
 ## Skills disponiveis
 
 - [[create-routine]] — Criar novas rotinas agendadas
+- [[create-pipeline]] — Criar pipelines multi-agente com multiplos steps
 - [[create-agent]] — Criar novos agentes especializados
 - [[import-agent]] — Importar agentes existentes do OpenClaw
 

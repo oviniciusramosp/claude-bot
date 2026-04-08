@@ -86,3 +86,4 @@ A primeira linha do body DEVE ser `[[Routines]]` (link para o index pai).
 - Rotinas podem ser desabilitadas mudando `enabled: false` no frontmatter
 - O scheduler do bot verifica rotinas a cada 60 segundos
 - Rotinas que falham aparecem com icone vermelho no menu bar
+- **Se o usuario quiser uma rotina com multiplos passos/agentes/steps, usar a skill [[create-pipeline]] em vez desta.** Pipelines tem `type: pipeline` e permitem orquestrar multiplos sub-agentes com dependencias, paralelismo e modelos diferentes por step.

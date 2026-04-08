@@ -366,6 +366,55 @@ Prompt que sera enviado ao Claude Code...
 - Rotinas nao bloqueiam mensagens do usuario — entram na fila
 - Rotinas podem ser direcionadas a agentes com o campo `agent: {id}` no frontmatter
 
+#### Pipelines (rotinas multi-agente)
+
+Pipelines sao rotinas com `type: pipeline` que orquestram multiplos steps (sub-agentes) em uma DAG. O scheduler detecta automaticamente e usa o `PipelineExecutor`.
+
+Para criar uma pipeline, usar a skill [[create-pipeline]] ou via app macOS (Routines → New → toggle Pipeline).
+
+Estrutura:
+```
+vault/Routines/{nome}.md              ← frontmatter type:pipeline + bloco ```pipeline
+vault/Routines/{nome}/steps/{id}.md   ← prompt de cada step
+```
+
+Exemplo de bloco no body:
+```
+```pipeline
+steps:
+  - id: coletar
+    name: "Coletar dados"
+    model: haiku
+    prompt_file: steps/coletar.md
+
+  - id: analisar
+    name: "Analisar"
+    model: opus
+    depends_on: [coletar]
+    prompt_file: steps/analisar.md
+    output: telegram
+```
+```
+
+**Campos de step:**
+- `id` — slug unico em kebab-case
+- `name` — nome legivel
+- `model` — override do modelo por step
+- `depends_on` — lista de step ids que devem completar antes
+- `prompt_file` — caminho relativo ao prompt do step
+- `timeout` — limite total em segundos (default: 1200)
+- `inactivity_timeout` — limite de inatividade (default: 300)
+- `retry` — tentativas em caso de falha (default: 0)
+- `output: telegram` — marcar no step final que envia resultado
+
+**Comportamento:**
+- Steps sem `depends_on` rodam em paralelo
+- Workspace compartilhado em `/tmp/claude-pipeline-{nome}-{ts}/data/` — cada step le outputs anteriores automaticamente
+- Prompts dos steps NAO precisam mencionar arquivos — o orquestrador injeta contexto de workspace
+- Dual timeout: `inactivity_timeout` mata steps inativos, `timeout` eh limite hard
+- Falha sem retry cascata SKIPPED para dependentes
+- `notify: final|all|summary|none` controla notificacoes (falhas sempre notificam)
+
 ### Agents (`vault/Agents/`)
 
 Agentes especializados com workspace proprio. Cada agente eh um diretorio com 3 arquivos + Journal.
