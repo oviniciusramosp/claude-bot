@@ -24,31 +24,30 @@ struct BotStatusCard: View {
     @State private var isRestarting = false
 
     var body: some View {
-        GlassCard {
+        GlassCard(padding: Spacing.xl) {
             HStack(spacing: Spacing.xl) {
-                // Robot illustration
+                // Robot illustration — 50% width
                 if let img = Bundle.module.image(forResource: "bot-avatar") {
                     Image(nsImage: img)
                         .resizable()
                         .interpolation(.high)
                         .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: 160, maxHeight: 164)
+                        .frame(maxWidth: .infinity)
                 }
 
-                // Status info
+                // Status info — 50% width
                 VStack(alignment: .leading, spacing: Spacing.md) {
-                    cardHeader("Bot Status", symbol: "desktopcomputer")
+                    cardHeader("Bot Status", symbol: "laptopcomputer")
 
                     HStack(spacing: Spacing.sm) {
                         Text(statusText)
-                            .font(.title2.bold())
-                            .foregroundStyle(appState.isRunning ? .primary : .secondary)
+                            .font(.system(size: 17, weight: .bold))
                         StatusDot(isRunning: appState.isRunning, size: 10)
                     }
 
                     if case .running(let pid, let uptime) = appState.botStatus {
                         Text("\(formatUptime(uptime)) - PID \(pid)")
-                            .font(.caption)
+                            .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                     }
 
@@ -57,14 +56,14 @@ struct BotStatusCard: View {
                             Button(role: .destructive) {
                                 Task { await appState.stopBot() }
                             } label: {
-                                Label("Stop", systemImage: "stop.fill").font(.callout)
+                                Label("Stop", systemImage: "stop.fill")
                             }
                             .buttonStyle(.bordered)
                         } else {
                             Button {
                                 Task { await appState.startBot() }
                             } label: {
-                                Label("Start", systemImage: "play.fill").font(.callout)
+                                Label("Start", systemImage: "play.fill")
                             }
                             .buttonStyle(.borderedProminent)
                         }
@@ -80,14 +79,12 @@ struct BotStatusCard: View {
                                 isRestarting ? "Restarting…" : "Restart",
                                 systemImage: "arrow.trianglehead.2.clockwise"
                             )
-                            .font(.callout)
                         }
                         .buttonStyle(.bordered)
                         .disabled(isRestarting)
                     }
                 }
-
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -116,7 +113,6 @@ struct ClaudeUsageCard: View {
 
     private var usage: ClaudeUsage { appState.claudeUsage }
 
-    // Elapsed fraction of the 7-day window
     private var weekReferencePercent: Double {
         let now = Date()
         if let resetsAt = usage.weeklyResetsAt {
@@ -138,28 +134,21 @@ struct ClaudeUsageCard: View {
     }
 
     var body: some View {
-        GlassCard {
+        GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Claude Usage", symbol: "bolt.circle")
+                cardHeader("Claude Usage", symbol: "chart.bar")
 
                 if usage.isAvailable || usage.hasTokenData {
-                    // Large percentage
                     Text("\(Int(effectiveWeeklyPercent * 100))%")
-                        .font(.title2.bold())
+                        .font(.system(size: 17, weight: .bold))
 
-                    // Segmented bar
                     WeeklySegmentBar(
                         percent: effectiveWeeklyPercent,
                         referencePercent: weekReferencePercent
                     )
 
-                    // Pace info
                     paceRow
-
-                    // Renew info
                     renewRow
-
-                    // Stat chips
                     statChips
                 } else if usage.hasPlanInfo {
                     planInfoView
@@ -170,7 +159,6 @@ struct ClaudeUsageCard: View {
         }
     }
 
-    // "On pace: -2% (expected 58%)" or "Above pace: +30% (expected 58%)"
     private var paceRow: some View {
         let expected = Int(weekReferencePercent * 100)
         let actual   = Int(effectiveWeeklyPercent * 100)
@@ -186,11 +174,10 @@ struct ClaudeUsageCard: View {
             Image(systemName: "timer")
             Text(label)
         }
-        .font(.caption)
+        .font(.system(size: 10))
         .foregroundStyle(.secondary)
     }
 
-    // "Renew Friday 20:00 (3 day 22h)"
     @ViewBuilder
     private var renewRow: some View {
         if let reset = usage.weeklyResetsAt {
@@ -216,12 +203,11 @@ struct ClaudeUsageCard: View {
                 Image(systemName: "clock")
                 Text("Renew \(dayName) \(timeStr) (\(remaining))")
             }
-            .font(.caption)
+            .font(.system(size: 10))
             .foregroundStyle(.secondary)
         }
     }
 
-    // 3 stat chips: agents, routines, skills
     private var statChips: some View {
         HStack(spacing: Spacing.sm) {
             DashboardChip(symbol: "person.2", value: appState.agents.count)
@@ -241,7 +227,7 @@ struct ClaudeUsageCard: View {
                         .font(.callout.bold())
                     if let tier = usage.rateTier {
                         Text("\(tier) rate limit")
-                            .font(.caption).foregroundStyle(.secondary)
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -254,12 +240,12 @@ struct ClaudeUsageCard: View {
             if let exp = usage.credentialsExpireAt {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: usage.credentialsAreValid ? "key.fill" : "key.slash")
-                        .font(.caption)
+                        .font(.system(size: 10))
                         .foregroundStyle(usage.credentialsAreValid ? Color.statusGreen : Color.statusRed)
                     Text(usage.credentialsAreValid
                          ? "Credentials valid · expires \(exp, style: .relative)"
                          : "Credentials expired")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }
         }
@@ -273,7 +259,7 @@ struct ClaudeUsageCard: View {
             Text("No credentials found")
                 .font(.callout).foregroundStyle(.tertiary)
             Text("Sign in to Claude Code CLI first")
-                .font(.caption).foregroundStyle(.quaternary)
+                .font(.system(size: 10)).foregroundStyle(.quaternary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, Spacing.sm)
@@ -285,11 +271,14 @@ struct ClaudeUsageCard: View {
 struct TodayRoutinesCard: View {
     @EnvironmentObject var appState: AppState
 
-    private var allExecutions: [RoutineExecution] {
-        appState.routines.flatMap { $0.todayExecutions }
+    /// Only automatic executions (excludes manual dry-runs)
+    private var autoExecutions: [RoutineExecution] {
+        appState.routines
+            .flatMap { $0.todayExecutions }
+            .filter { $0.timeSlot != "dry-run" }
     }
 
-    /// All scheduled time slots today (from routine definitions), paired with their execution if any
+    /// Scheduled timeline: each time slot paired with its execution (if any)
     private var timeline: [(routine: Routine, time: String, execution: RoutineExecution?)] {
         var entries: [(routine: Routine, time: String, execution: RoutineExecution?)] = []
 
@@ -302,18 +291,18 @@ struct TodayRoutinesCard: View {
         return entries.sorted { $0.time < $1.time }
     }
 
-    private var completedCount: Int { allExecutions.filter { $0.status == .completed }.count }
+    private var completedCount: Int { autoExecutions.filter { $0.status == .completed }.count }
     private var scheduledCount: Int {
         timeline.filter { entry in
             entry.execution == nil || entry.execution?.status == .pending
         }.count
     }
-    private var failedCount: Int { allExecutions.filter { $0.status == .failed }.count }
+    private var failedCount: Int { autoExecutions.filter { $0.status == .failed }.count }
 
     var body: some View {
-        GlassCard {
+        GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Today's Routines", symbol: "clock.arrow.2.circlepath")
+                cardHeader("Today's Routines", symbol: "clock.arrow.circlepath")
 
                 if timeline.isEmpty {
                     HStack {
@@ -325,13 +314,11 @@ struct TodayRoutinesCard: View {
                     .padding(.vertical, Spacing.sm)
                 } else {
                     HStack(alignment: .top, spacing: Spacing.xl) {
-                        // Left: Summary stats
+                        // Left: Summary stats (always show all 3)
                         VStack(spacing: Spacing.sm) {
                             RoutineStatCard(label: "Done", count: completedCount, color: .statusGreen, symbol: "checkmark")
                             RoutineStatCard(label: "Scheduled", count: scheduledCount, color: .secondary, symbol: "clock")
-                            if failedCount > 0 {
-                                RoutineStatCard(label: "Failed", count: failedCount, color: .statusRed, symbol: "exclamationmark.triangle")
-                            }
+                            RoutineStatCard(label: "Failed", count: failedCount, color: .statusRed, symbol: "exclamationmark.triangle")
                         }
                         .frame(width: 160)
 
@@ -350,7 +337,6 @@ struct TodayRoutinesCard: View {
                                 )
                                 .padding(.vertical, 5)
 
-                                // Progress line between past and future entries
                                 if isPast && nextIsFuture {
                                     HStack(spacing: 0) {
                                         Rectangle()
@@ -373,14 +359,14 @@ struct TodayRoutinesCard: View {
 
 // MARK: - Helper Components
 
-/// Section header matching Figma style — icon + title, 50% opacity
+/// Card section header — matches Figma: SF Pro Bold 15px, 50% opacity, with icon
 private func cardHeader(_ title: String, symbol: String) -> some View {
     HStack(spacing: 5) {
         Image(systemName: symbol)
-            .font(.body)
+            .font(.system(size: 17))
             .opacity(0.5)
         Text(title)
-            .font(.subheadline.bold())
+            .font(.system(size: 15, weight: .bold))
             .tracking(-0.6)
             .opacity(0.5)
     }
@@ -394,8 +380,8 @@ struct DashboardChip: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: symbol).font(.caption)
-            Text("\(value)").font(.caption)
+            Image(systemName: symbol).font(.system(size: 10))
+            Text("\(value)").font(.system(size: 10))
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 8)
@@ -417,14 +403,14 @@ struct RoutineStatCard: View {
         HStack {
             HStack(spacing: 6) {
                 Image(systemName: symbol)
-                    .font(.caption)
+                    .font(.system(size: 10))
                     .foregroundStyle(color)
                 Text(label)
-                    .font(.caption)
+                    .font(.system(size: 10))
             }
             Spacer()
             Text("\(count)")
-                .font(.title2.bold())
+                .font(.system(size: 17, weight: .bold))
         }
         .padding(.horizontal, Spacing.xl)
         .padding(.vertical, Spacing.lg)
@@ -451,14 +437,14 @@ struct TimelineRow: View {
     var body: some View {
         HStack(spacing: Spacing.sm) {
             Text(time)
-                .font(.caption.monospacedDigit())
+                .font(.system(size: 10, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .frame(width: 40, alignment: .trailing)
             Image(systemName: status.symbol)
-                .font(.caption)
+                .font(.system(size: 10))
                 .foregroundStyle(statusColor)
             Text(name)
-                .font(.caption.bold())
+                .font(.system(size: 10, weight: .bold))
                 .lineLimit(1)
         }
     }
