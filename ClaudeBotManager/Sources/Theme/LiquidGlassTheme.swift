@@ -39,7 +39,7 @@ struct GlassCard<Content: View>: View {
             .padding(padding)
             .background {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(.thinMaterial)
+                    .fill(.ultraThinMaterial)
                     .overlay {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .strokeBorder(Color.glassBorder, lineWidth: 0.5)

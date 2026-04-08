@@ -26,29 +26,40 @@ struct BotStatusCard: View {
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             HStack(spacing: Spacing.xl) {
-                // Robot illustration — 50% width
+                // Image container — 50% width, image stays at fixed natural size
                 if let img = Bundle.module.image(forResource: "bot-avatar") {
-                    Image(nsImage: img)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(maxWidth: .infinity)
+                    HStack {
+                        Spacer()
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .aspectRatio(contentMode: .fit)
+                            .frame(width: 176, height: 180)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
                 }
 
                 // Status info — 50% width
                 VStack(alignment: .leading, spacing: Spacing.md) {
-                    cardHeader("Bot Status", symbol: "laptopcomputer")
+                    cardHeader("Bot Status", symbol: "apple.terminal")
 
+                    // "Running 🟢" — status text + play.circle.fill indicator
                     HStack(spacing: Spacing.sm) {
                         Text(statusText)
                             .font(.system(size: 17, weight: .bold))
-                        StatusDot(isRunning: appState.isRunning, size: 10)
+                            .tracking(-0.51)
+                        if appState.isRunning {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 17))
+                                .foregroundStyle(Color(red: 0.204, green: 0.780, blue: 0.349)) // #34C759
+                        }
                     }
 
                     if case .running(let pid, let uptime) = appState.botStatus {
                         Text("\(formatUptime(uptime)) - PID \(pid)")
                             .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447)) // #727272
                     }
 
                     HStack(spacing: Spacing.md) {
@@ -77,7 +88,7 @@ struct BotStatusCard: View {
                         } label: {
                             Label(
                                 isRestarting ? "Restarting…" : "Restart",
-                                systemImage: "arrow.trianglehead.2.clockwise"
+                                systemImage: "arrow.clockwise"
                             )
                         }
                         .buttonStyle(.bordered)
@@ -91,9 +102,9 @@ struct BotStatusCard: View {
 
     private var statusText: String {
         switch appState.botStatus {
-        case .running: return "Running"
-        case .stopped: return "Stopped"
-        case .unknown: return "Unknown"
+        case .running: "Running"
+        case .stopped: "Stopped"
+        case .unknown: "Unknown"
         }
     }
 
@@ -136,12 +147,15 @@ struct ClaudeUsageCard: View {
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Claude Usage", symbol: "chart.bar")
+                cardHeader("Claude Usage", symbol: "archivebox")
 
                 if usage.isAvailable || usage.hasTokenData {
+                    // Large percentage — 17px bold
                     Text("\(Int(effectiveWeeklyPercent * 100))%")
                         .font(.system(size: 17, weight: .bold))
+                        .tracking(-0.51)
 
+                    // Segmented bar
                     WeeklySegmentBar(
                         percent: effectiveWeeklyPercent,
                         referencePercent: weekReferencePercent
@@ -159,6 +173,7 @@ struct ClaudeUsageCard: View {
         }
     }
 
+    // "⏱ On pace: -2% (expected 58%)"
     private var paceRow: some View {
         let expected = Int(weekReferencePercent * 100)
         let actual   = Int(effectiveWeeklyPercent * 100)
@@ -175,21 +190,18 @@ struct ClaudeUsageCard: View {
             Text(label)
         }
         .font(.system(size: 10))
-        .foregroundStyle(.secondary)
+        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
     }
 
+    // "🕐 Renew Friday 20:00 (3 day 22h)"
     @ViewBuilder
     private var renewRow: some View {
         if let reset = usage.weeklyResetsAt {
             let dayName = { () -> String in
-                let f = DateFormatter()
-                f.dateFormat = "EEEE"
-                return f.string(from: reset)
+                let f = DateFormatter(); f.dateFormat = "EEEE"; return f.string(from: reset)
             }()
             let timeStr = { () -> String in
-                let f = DateFormatter()
-                f.dateFormat = "HH:mm"
-                return f.string(from: reset)
+                let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: reset)
             }()
             let remaining = { () -> String in
                 let secs = Int(max(0, reset.timeIntervalSinceNow))
@@ -204,12 +216,13 @@ struct ClaudeUsageCard: View {
                 Text("Renew \(dayName) \(timeStr) (\(remaining))")
             }
             .font(.system(size: 10))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
         }
     }
 
+    // 3 stat chips — 5px gap, 24px height
     private var statChips: some View {
-        HStack(spacing: Spacing.sm) {
+        HStack(spacing: 5) {
             DashboardChip(symbol: "person.2", value: appState.agents.count)
             DashboardChip(symbol: "clock.arrow.circlepath", value: appState.routines.count)
             DashboardChip(symbol: "bolt", value: appState.skills.count)
@@ -220,14 +233,15 @@ struct ClaudeUsageCard: View {
         VStack(alignment: .leading, spacing: Spacing.md) {
             HStack(spacing: Spacing.sm) {
                 Image(systemName: "checkmark.seal.fill")
-                    .foregroundStyle(Color.statusGreen)
+                    .foregroundStyle(Color(red: 0.204, green: 0.780, blue: 0.349))
                     .font(.title3)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(usage.planName ?? "Claude")
                         .font(.callout.bold())
                     if let tier = usage.rateTier {
                         Text("\(tier) rate limit")
-                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                     }
                 }
             }
@@ -241,11 +255,14 @@ struct ClaudeUsageCard: View {
                 HStack(spacing: Spacing.xs) {
                     Image(systemName: usage.credentialsAreValid ? "key.fill" : "key.slash")
                         .font(.system(size: 10))
-                        .foregroundStyle(usage.credentialsAreValid ? Color.statusGreen : Color.statusRed)
+                        .foregroundStyle(usage.credentialsAreValid
+                            ? Color(red: 0.204, green: 0.780, blue: 0.349)
+                            : Color(red: 1.0, green: 0.220, blue: 0.235))
                     Text(usage.credentialsAreValid
                          ? "Credentials valid · expires \(exp, style: .relative)"
                          : "Credentials expired")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                 }
             }
         }
@@ -271,17 +288,16 @@ struct ClaudeUsageCard: View {
 struct TodayRoutinesCard: View {
     @EnvironmentObject var appState: AppState
 
-    /// Only automatic executions (excludes manual dry-runs)
+    /// Only automatic executions — excludes manual dry-runs
     private var autoExecutions: [RoutineExecution] {
         appState.routines
             .flatMap { $0.todayExecutions }
             .filter { $0.timeSlot != "dry-run" }
     }
 
-    /// Scheduled timeline: each time slot paired with its execution (if any)
+    /// Scheduled timeline slots paired with their execution (if any)
     private var timeline: [(routine: Routine, time: String, execution: RoutineExecution?)] {
         var entries: [(routine: Routine, time: String, execution: RoutineExecution?)] = []
-
         for routine in appState.routines where routine.enabled {
             for time in routine.schedule.times {
                 let exec = routine.todayExecutions.first { $0.timeSlot == time }
@@ -293,9 +309,7 @@ struct TodayRoutinesCard: View {
 
     private var completedCount: Int { autoExecutions.filter { $0.status == .completed }.count }
     private var scheduledCount: Int {
-        timeline.filter { entry in
-            entry.execution == nil || entry.execution?.status == .pending
-        }.count
+        timeline.filter { $0.execution == nil || $0.execution?.status == .pending }.count
     }
     private var failedCount: Int { autoExecutions.filter { $0.status == .failed }.count }
 
@@ -314,16 +328,28 @@ struct TodayRoutinesCard: View {
                     .padding(.vertical, Spacing.sm)
                 } else {
                     HStack(alignment: .top, spacing: Spacing.xl) {
-                        // Left: Summary stats (always show all 3)
-                        VStack(spacing: Spacing.sm) {
-                            RoutineStatCard(label: "Done", count: completedCount, color: .statusGreen, symbol: "checkmark")
-                            RoutineStatCard(label: "Scheduled", count: scheduledCount, color: .secondary, symbol: "clock")
-                            RoutineStatCard(label: "Failed", count: failedCount, color: .statusRed, symbol: "exclamationmark.triangle")
+                        // Left: Summary stats — always show all 3
+                        VStack(spacing: 5) {
+                            RoutineStatCard(
+                                label: "Done", count: completedCount,
+                                iconColor: Color(red: 0.204, green: 0.780, blue: 0.349),
+                                symbol: "checkmark.circle.fill"
+                            )
+                            RoutineStatCard(
+                                label: "Scheduled", count: scheduledCount,
+                                iconColor: Color(red: 0.447, green: 0.447, blue: 0.447),
+                                symbol: "clock"
+                            )
+                            RoutineStatCard(
+                                label: "Failed", count: failedCount,
+                                iconColor: Color(red: 1.0, green: 0.220, blue: 0.235),
+                                symbol: "xmark.circle.fill"
+                            )
                         }
-                        .frame(width: 160)
+                        .frame(maxWidth: .infinity)
 
                         // Right: Timeline
-                        VStack(alignment: .leading, spacing: 0) {
+                        VStack(alignment: .leading, spacing: Spacing.md) {
                             let nowTime = { let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: Date()) }()
 
                             ForEach(Array(timeline.enumerated()), id: \.offset) { idx, entry in
@@ -335,21 +361,21 @@ struct TodayRoutinesCard: View {
                                     name: entry.routine.title,
                                     status: entry.execution?.status ?? .pending
                                 )
-                                .padding(.vertical, 5)
 
+                                // Progress line between past and future
                                 if isPast && nextIsFuture {
                                     HStack(spacing: 0) {
                                         Rectangle()
-                                            .fill(Color.statusRed.opacity(0.5))
+                                            .fill(Color(red: 1.0, green: 0.220, blue: 0.235))
                                             .frame(height: 2)
                                         Circle()
-                                            .fill(Color.statusRed)
+                                            .fill(Color(red: 1.0, green: 0.220, blue: 0.235))
                                             .frame(width: 8, height: 8)
                                     }
-                                    .padding(.vertical, 4)
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity)
                     }
                 }
             }
@@ -357,13 +383,12 @@ struct TodayRoutinesCard: View {
     }
 }
 
-// MARK: - Helper Components
+// MARK: - Card Header (Figma spec: icon 17px regular + title 15px bold, opacity 50%)
 
-/// Card section header — matches Figma: SF Pro Bold 15px, 50% opacity, with icon
 private func cardHeader(_ title: String, symbol: String) -> some View {
     HStack(spacing: 5) {
         Image(systemName: symbol)
-            .font(.system(size: 17))
+            .font(.system(size: 17, weight: .regular))
             .opacity(0.5)
         Text(title)
             .font(.system(size: 15, weight: .bold))
@@ -373,7 +398,8 @@ private func cardHeader(_ title: String, symbol: String) -> some View {
     .foregroundStyle(.primary)
 }
 
-/// Stat chip at bottom of usage card
+// MARK: - Dashboard Chip (Figma: 24h, 10px, #727272, bg rgba(0,0,0,0.05), gap 5px)
+
 struct DashboardChip: View {
     var symbol: String
     var value: Int
@@ -383,43 +409,46 @@ struct DashboardChip: View {
             Image(systemName: symbol).font(.system(size: 10))
             Text("\(value)").font(.system(size: 10))
         }
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
+        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
         .frame(maxWidth: .infinity)
-        .background(Color.primary.opacity(0.05))
+        .frame(height: 24)
+        .background(Color.black.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }
 
-/// Summary stat card for Today's Routines left column
+// MARK: - Routine Stat Card (Figma: bg rgba(0,0,0,0.05), 8px radius, 20px h-pad, 15px v-pad)
+
 struct RoutineStatCard: View {
     var label: String
     var count: Int
-    var color: Color
+    var iconColor: Color
     var symbol: String
 
     var body: some View {
         HStack {
-            HStack(spacing: 6) {
+            HStack(spacing: 4) {
                 Image(systemName: symbol)
                     .font(.system(size: 10))
-                    .foregroundStyle(color)
+                    .foregroundStyle(iconColor)
                 Text(label)
                     .font(.system(size: 10))
+                    .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
             }
             Spacer()
             Text("\(count)")
                 .font(.system(size: 17, weight: .bold))
+                .tracking(-0.51)
         }
         .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
-        .background(Color.primary.opacity(0.05))
+        .padding(.vertical, 15)
+        .background(Color.black.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
-/// Single row in the routines timeline
+// MARK: - Timeline Row (Figma: 10px, icon colored, name bold, #727272)
+
 struct TimelineRow: View {
     var time: String
     var name: String
@@ -427,24 +456,33 @@ struct TimelineRow: View {
 
     private var statusColor: Color {
         switch status {
-        case .completed: .statusGreen
-        case .failed:    .statusRed
-        case .running:   .statusBlue
-        case .pending, .skipped: .secondary
+        case .completed: Color(red: 0.204, green: 0.780, blue: 0.349) // #34C759
+        case .failed:    Color(red: 1.0, green: 0.220, blue: 0.235)   // #FF383C
+        case .running:   Color(red: 0.25, green: 0.56, blue: 0.98)
+        case .pending, .skipped: Color(red: 0.447, green: 0.447, blue: 0.447) // #727272
+        }
+    }
+
+    private var statusSymbol: String {
+        switch status {
+        case .completed: "checkmark.circle.fill"
+        case .failed:    "xmark.circle.fill"
+        case .running:   "arrow.trianglehead.2.clockwise"
+        case .pending, .skipped: "clock"
         }
     }
 
     var body: some View {
-        HStack(spacing: Spacing.sm) {
-            Text(time)
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 40, alignment: .trailing)
-            Image(systemName: status.symbol)
+        HStack(spacing: 0) {
+            Image(systemName: statusSymbol)
                 .font(.system(size: 10))
                 .foregroundStyle(statusColor)
+            Text(" \(time) - ")
+                .font(.system(size: 10))
+                .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
             Text(name)
                 .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                 .lineLimit(1)
         }
     }
