@@ -1575,13 +1575,19 @@ class PipelineExecutor:
                 ws = str(agent_dir)
 
         try:
-            runner.run(prompt, model=step.model, workspace=ws,
-                       system_prompt=None if self.task.minimal_context else SYSTEM_PROMPT)
+            # Run Claude CLI in a separate thread so timeouts can actually fire
+            runner_thread = threading.Thread(
+                target=runner.run,
+                kwargs={"prompt": prompt, "model": step.model, "workspace": ws,
+                         "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT},
+                daemon=True, name=f"pipeline-runner-{step.id}")
+            runner_thread.start()
+
             # Wait for completion with dual timeout:
             #   - inactivity_timeout: max seconds without any output from Claude
             #   - timeout: max wall-clock seconds (hard limit)
             hard_deadline = time.time() + step.timeout
-            while runner.running and time.time() < hard_deadline:
+            while runner_thread.is_alive() and time.time() < hard_deadline:
                 if self._cancelled.is_set():
                     runner.cancel()
                     break
@@ -1592,10 +1598,13 @@ class PipelineExecutor:
                     raise TimeoutError(
                         f"Step {step.id} idle for {int(idle)}s (inactivity limit: {step.inactivity_timeout}s)")
                 time.sleep(1)
-            if runner.running:
+            if runner_thread.is_alive() or runner.running:
                 elapsed = int(time.time() - runner.start_time)
                 runner.cancel()
+                runner_thread.join(timeout=10)
                 raise TimeoutError(f"Step {step.id} exceeded {step.timeout}s hard limit (ran {elapsed}s)")
+            # Ensure thread is fully done
+            runner_thread.join(timeout=5)
 
             # Capture output
             output = runner.result_text or runner.accumulated_text or ""
