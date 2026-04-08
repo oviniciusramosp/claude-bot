@@ -211,8 +211,8 @@ struct RoutineRow: View {
                     pipelineTimeline
                 }
 
-                // Running pulse bar
-                if isRunning {
+                // Running pulse bar (only for non-pipeline routines; pipelines have step timeline)
+                if isRunning && !routine.isPipeline {
                     runningBar
                 }
             }
