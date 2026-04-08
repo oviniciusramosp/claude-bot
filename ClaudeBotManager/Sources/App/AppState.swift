@@ -89,9 +89,11 @@ final class AppState: ObservableObject {
             fileWatcher.watch(path: path, onChange: refresh)
         }
 
-        // Watch routines-state directory
+        // Watch routines-state directory AND today's state file
         let stateDir = "\(dataDir)/routines-state"
         fileWatcher.watch(path: stateDir, onChange: refresh)
+        let todayFile = "\(stateDir)/\(todayDateString()).json"
+        fileWatcher.watch(path: todayFile, onChange: refresh)
     }
 
     func loadAll() async {
@@ -305,8 +307,16 @@ final class AppState: ObservableObject {
     }
 
     private func startTimers() {
-        statusTimer = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshBotStatus() }
+        // Poll faster (5s) when Claude is active, slower (15s) when idle
+        statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                await self.refreshBotStatus()
+                // Reload routines when runners are active for real-time pipeline status
+                if self.activeRunners > 0 {
+                    await self.loadRoutines()
+                }
+            }
         }
         usageTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.refreshUsage() }
@@ -381,5 +391,11 @@ final class AppState: ObservableObject {
         if s < 3600 { return "\(s/60)m" }
         if s < 86400 { return "\(s/3600)h \((s%3600)/60)m" }
         return "\(s/86400)d \((s%86400)/3600)h"
+    }
+
+    private func todayDateString() -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: Date())
     }
 }
