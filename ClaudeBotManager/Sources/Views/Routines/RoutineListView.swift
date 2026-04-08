@@ -104,7 +104,6 @@ struct RoutineRow: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
                 // Row 1: Status + Title + Model/Pipeline badge + Switch
@@ -220,36 +219,38 @@ struct RoutineRow: View {
                 }
 
                 // Row 3: Pipeline timeline (expandable)
+                // Hide compact bar when failed (error box + icon are enough)
                 if routine.isPipeline {
                     if isExpanded {
                         pipelineExpandedSteps
-                    } else {
+                    } else if routine.lastExecution?.status != .failed {
                         pipelineTimeline
                     }
                 }
             }
-            // Tap on card body opens detail sheet
+            // Tap on card content opens detail sheet
             .contentShape(Rectangle())
             .onTapGesture { onTap() }
 
-            // Expand/collapse chevron — outside the tap target above
+            // Expand/collapse chevron — inside card but separate tap zone
             if routine.isPipeline {
                 Button {
                     withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
                 } label: {
-                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 12)
-                        .contentShape(Rectangle())
+                    HStack {
+                        Spacer()
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                    }
+                    .frame(height: 8)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .padding(.top, -Spacing.xs)
             }
-        } // GlassCard + chevron
+        } // GlassCard
         .contextMenu { contextMenuItems }
-        } // VStack(spacing: 0)
     }
 
     // MARK: - Context Menu
@@ -362,15 +363,22 @@ struct RoutineRow: View {
                                 : Color(red: 0.447, green: 0.447, blue: 0.447))
                     }
 
-                    // Model badge (from defs)
+                    // Model + timeout badges (from defs)
                     if i < defSteps.count {
-                        Text(defSteps[i].model)
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundStyle(.tertiary)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.primary.opacity(0.04))
-                            .clipShape(Capsule())
+                        let def = defSteps[i]
+                        HStack(spacing: 3) {
+                            Text(def.model)
+                                .font(.system(size: 8, weight: .medium))
+                            Text("·")
+                                .font(.system(size: 8))
+                            Text("\(def.timeout / 60)m")
+                                .font(.system(size: 8, design: .monospaced))
+                        }
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(Capsule())
                     }
                 }
                 .padding(.vertical, 4)
