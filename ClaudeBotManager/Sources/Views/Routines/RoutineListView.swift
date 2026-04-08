@@ -234,21 +234,18 @@ struct RoutineRow: View {
 
             // Expand/collapse chevron — outside the tap target above
             if routine.isPipeline {
-                HStack {
-                    Spacer()
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 40, height: 16)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    Spacer()
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+                } label: {
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 12)
+                        .contentShape(Rectangle())
                 }
-                .padding(.top, -Spacing.sm)
+                .buttonStyle(.plain)
+                .padding(.top, -Spacing.xs)
             }
         } // GlassCard + chevron
         .contextMenu { contextMenuItems }
