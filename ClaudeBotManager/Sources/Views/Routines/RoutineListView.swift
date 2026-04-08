@@ -5,6 +5,13 @@ struct RoutineListView: View {
     @State private var showCreateSheet = false
     @State private var selectedRoutine: Routine? = nil
 
+    /// Routines sorted chronologically by first scheduled time
+    private var sortedRoutines: [Routine] {
+        appState.routines.sorted {
+            ($0.schedule.times.first ?? "99:99") < ($1.schedule.times.first ?? "99:99")
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(spacing: Spacing.lg) {
@@ -15,7 +22,7 @@ struct RoutineListView: View {
                         subtitle: "Create a routine to schedule automated tasks."
                     )
                 } else {
-                    ForEach(appState.routines) { routine in
+                    ForEach(sortedRoutines) { routine in
                         RoutineRow(routine: routine)
                             .onTapGesture { selectedRoutine = routine }
                     }
@@ -85,16 +92,20 @@ struct RoutineRow: View {
         }
     }
 
-    private var agentName: String? {
-        routine.agentId.flatMap { id in appState.agents.first { $0.id == id }?.name }
+    /// Agent emoji + name — always shows something (Main if no specific agent)
+    private var agentDisplay: (icon: String, name: String) {
+        if let id = routine.agentId,
+           let agent = appState.agents.first(where: { $0.id == id }) {
+            return (agent.icon, agent.name)
+        }
+        return (appState.mainAgent.icon, appState.mainAgent.name)
     }
 
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                // Row 1: Status + Title + Model + Toggle
+                // Row 1: Status + Title + Model/Pipeline badge + Switch
                 HStack(spacing: Spacing.md) {
-                    // Status indicator
                     if isRunning {
                         ProgressView()
                             .scaleEffect(0.6)
@@ -113,10 +124,26 @@ struct RoutineRow: View {
 
                     Spacer()
 
-                    ModelBadge(model: routine.model)
+                    if routine.isPipeline {
+                        // Pipeline badge instead of model
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.triangle.branch")
+                                .font(.system(size: 10))
+                            Text("\(routine.stepCount) steps")
+                                .font(.system(size: 10))
+                        }
+                        .foregroundStyle(Color.statusBlue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.statusBlue.opacity(0.15))
+                        .clipShape(Capsule())
+                    } else {
+                        ModelBadge(model: routine.model)
+                    }
 
                     Toggle("", isOn: $isEnabled)
                         .labelsHidden()
+                        .toggleStyle(.switch)
                         .onChange(of: isEnabled) { _, newValue in
                             var updated = routine
                             updated.enabled = newValue
@@ -124,7 +151,7 @@ struct RoutineRow: View {
                         }
                 }
 
-                // Row 2: Schedule metadata
+                // Row 2: Schedule + Agent (always shown with emoji)
                 HStack(spacing: Spacing.sm) {
                     Text(routine.schedule.times.joined(separator: ", "))
                         .font(.system(size: 10, design: .monospaced))
@@ -136,12 +163,11 @@ struct RoutineRow: View {
                         .font(.system(size: 10))
                         .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
 
-                    if let agent = agentName {
-                        Text("·").foregroundStyle(.quaternary)
-                        Label(agent, systemImage: "person.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
-                    }
+                    Text("·").foregroundStyle(.quaternary)
+
+                    Text("\(agentDisplay.icon) \(agentDisplay.name)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
 
                     Spacer()
 
@@ -150,7 +176,7 @@ struct RoutineRow: View {
                         .foregroundStyle(.tertiary)
                 }
 
-                // Row 3: Pipeline horizontal timeline (if pipeline and has execution data)
+                // Row 3: Pipeline timeline
                 if routine.isPipeline {
                     pipelineTimeline
                 }
@@ -163,15 +189,6 @@ struct RoutineRow: View {
         }
         .contentShape(Rectangle())
         .contextMenu { contextMenuItems }
-        // Overlay: subtle left accent for pipelines
-        .overlay(alignment: .leading) {
-            if routine.isPipeline {
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(Color.statusBlue)
-                    .frame(width: 3)
-                    .padding(.vertical, 4)
-            }
-        }
     }
 
     // MARK: - Context Menu
