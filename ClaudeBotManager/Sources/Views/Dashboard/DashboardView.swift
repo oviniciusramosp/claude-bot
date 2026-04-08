@@ -96,10 +96,20 @@ struct ClaudeUsageCard: View {
 
     var usage: ClaudeUsage { appState.claudeUsage }
 
+    private var weekReferencePercent: Double {
+        let cal = Calendar.current
+        let now = Date()
+        let weekday = cal.component(.weekday, from: now)       // 1=Sun … 7=Sat
+        let dayIndex = (weekday - 2 + 7) % 7                  // Mon=0 … Sun=6
+        let hour   = cal.component(.hour,   from: now)
+        let minute = cal.component(.minute, from: now)
+        return (Double(dayIndex) + (Double(hour) * 60 + Double(minute)) / 1440.0) / 7.0
+    }
+
     var body: some View {
         GlassCard {
             VStack(alignment: .leading, spacing: Spacing.lg) {
-                SectionHeader(title: "Claude Usage", symbol: "bolt.circle")
+                SectionHeader(title: "Claude Plan", symbol: "bolt.circle")
 
                 if usage.isAvailable {
                     VStack(spacing: Spacing.md) {
@@ -108,11 +118,7 @@ struct ClaudeUsageCard: View {
                             label: "5-Hour Session",
                             sublabel: usage.sessionLabel
                         )
-                        UsageBar(
-                            percent: usage.weeklyPercent,
-                            label: "7-Day Week",
-                            sublabel: usage.weeklyLabel
-                        )
+                        weeklyBarSection
                     }
 
                     if let reset = usage.weeklyResetsAt {
@@ -125,24 +131,92 @@ struct ClaudeUsageCard: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
+                } else if usage.hasPlanInfo {
+                    planInfoView
                 } else {
-                    VStack(spacing: Spacing.sm) {
-                        Image(systemName: "bolt.slash")
-                            .font(.title2)
-                            .foregroundStyle(.tertiary)
-                        Text("Usage data unavailable")
-                            .font(.callout)
-                            .foregroundStyle(.tertiary)
-                        Text("Requires Claude Code credentials")
-                            .font(.caption)
-                            .foregroundStyle(.quaternary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, Spacing.sm)
+                    noCredentialsView
                 }
             }
         }
         .frame(minHeight: 180)
+    }
+
+    // 7-segment weekly bar, shared between isAvailable and plan-info views
+    private var weeklyBarSection: some View {
+        VStack(alignment: .leading, spacing: Spacing.xs) {
+            HStack {
+                Text("7-Day Window")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if usage.isAvailable {
+                    Text(usage.weeklyLabel)
+                        .font(.caption.monospacedDigit())
+                } else {
+                    Text("no data")
+                        .font(.caption2)
+                        .foregroundStyle(.quaternary)
+                }
+            }
+            WeeklySegmentBar(
+                percent: usage.weeklyPercent,
+                referencePercent: weekReferencePercent
+            )
+        }
+    }
+
+    private var planInfoView: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            // Plan name + tier pill
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(Color.statusGreen)
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(usage.planName ?? "Claude")
+                        .font(.callout.bold())
+                    if let tier = usage.rateTier {
+                        Text("\(tier) rate limit")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            // Weekly bar (reference line only — no fill without data)
+            weeklyBarSection
+
+            // Credentials status
+            if let exp = usage.credentialsExpireAt {
+                HStack(spacing: Spacing.xs) {
+                    Image(systemName: usage.credentialsAreValid ? "key.fill" : "key.slash")
+                        .font(.caption)
+                        .foregroundStyle(usage.credentialsAreValid ? Color.statusGreen : Color.statusRed)
+                    Text(usage.credentialsAreValid
+                         ? "Credentials valid · expires \(exp, style: .relative)"
+                         : "Credentials expired")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var noCredentialsView: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: "key.slash")
+                .font(.title2)
+                .foregroundStyle(.tertiary)
+            Text("No credentials found")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+            Text("Sign in to Claude Code CLI first")
+                .font(.caption)
+                .foregroundStyle(.quaternary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Spacing.sm)
     }
 }
 

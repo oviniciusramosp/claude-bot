@@ -207,6 +207,85 @@ struct TagChip: View {
     }
 }
 
+// MARK: - Weekly Segment Bar
+// 7-segment progress bar with a time-reference marker (no clip applied so arrow cap overflows naturally)
+
+struct WeeklySegmentBar: View {
+    var percent: Double           // actual fill 0–1 (0 = no data)
+    var referencePercent: Double  // elapsed fraction of the week (0–1)
+
+    private let days = ["M", "T", "W", "T", "F", "S", "S"]
+
+    private var barColor: Color {
+        if percent < 0.6 { return .statusGreen }
+        if percent < 0.85 { return .statusYellow }
+        return .statusRed
+    }
+
+    private var currentDayIndex: Int {
+        (Calendar.current.component(.weekday, from: Date()) - 2 + 7) % 7
+    }
+
+    var body: some View {
+        VStack(spacing: 3) {
+            // Bar + reference marker
+            GeometryReader { geo in
+                let w = geo.size.width
+                let refX = (w * min(max(referencePercent, 0), 1)).rounded()
+
+                // Bar background
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(width: w, height: 8)
+                    .offset(y: 7)
+
+                // Bar fill (animated)
+                if percent > 0 {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(barColor)
+                        .frame(width: (w * min(percent, 1.0)).rounded(), height: 8)
+                        .offset(y: 7)
+                        .animation(.easeInOut(duration: 0.5), value: percent)
+                }
+
+                // Segment dividers (6 hairlines)
+                ForEach(1..<7, id: \.self) { i in
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 1, height: 8)
+                        .offset(x: (w * CGFloat(i) / 7).rounded() - 0.5, y: 7)
+                }
+
+                // Reference: vertical line through bar
+                Rectangle()
+                    .fill(Color.primary.opacity(0.5))
+                    .frame(width: 1.5, height: 10)
+                    .offset(x: refX - 0.75, y: 5)
+
+                // Reference: downward-pointing cap above bar
+                Image(systemName: "arrowtriangle.down.fill")
+                    .font(.system(size: 5))
+                    .foregroundStyle(Color.primary.opacity(0.6))
+                    .frame(width: 8, height: 6, alignment: .center)
+                    .offset(x: refX - 4, y: 0)
+            }
+            .frame(height: 15)
+
+            // Day labels — current day is brighter
+            HStack(spacing: 0) {
+                ForEach(days.indices, id: \.self) { i in
+                    Text(days[i])
+                        .font(.system(size: 9, weight: .semibold, design: .rounded))
+                        .foregroundStyle(i == currentDayIndex
+                            ? Color.primary.opacity(0.7)
+                            : Color.primary.opacity(0.22))
+                        .frame(maxWidth: .infinity)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Empty State
 
 struct EmptyStateView: View {

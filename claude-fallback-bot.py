@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.3.0"  # UI redesign (CleanMyMac style), /run command, .app bundle
+BOT_VERSION = "2.4.0"  # weekly usage bar, sidebar version footer with git update
 
 import http.server
 import json

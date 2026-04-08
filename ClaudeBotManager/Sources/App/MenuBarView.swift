@@ -67,6 +67,20 @@ struct MenuBarView: View {
                             .font(.caption2.monospacedDigit())
                             .frame(width: 32, alignment: .trailing)
                     }
+                } else if let plan = appState.claudeUsage.planName {
+                    HStack {
+                        Text("Plan")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(plan)
+                            .font(.caption)
+                        if let tier = appState.claudeUsage.rateTier {
+                            Text("·  \(tier)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             .padding(.horizontal, 14)
