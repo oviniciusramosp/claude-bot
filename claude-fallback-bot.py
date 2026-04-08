@@ -1378,6 +1378,34 @@ class PipelineExecutor:
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
         self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
+        self._bot = None  # set by _enqueue_pipeline if available
+
+    def _wait_for_free_slot(self, max_wait: int = 300) -> bool:
+        """Wait up to max_wait seconds for active Claude CLI processes to finish.
+        Returns True if we had to wait, False if slot was already free."""
+        import subprocess as _sp
+        waited = False
+        deadline = time.time() + max_wait
+        while time.time() < deadline and not self._cancelled.is_set():
+            try:
+                result = _sp.run(
+                    ["pgrep", "-f", "claude.*--print.*--dangerously"],
+                    capture_output=True, text=True, timeout=5)
+                if result.returncode != 0:
+                    return waited  # no active Claude CLI processes
+            except Exception:
+                return waited
+            if not waited:
+                logger.info("Pipeline %s: waiting for active Claude session to finish", self.task.name)
+                if self._bot:
+                    try:
+                        self._bot.send_message(
+                            f"⏳ Pipeline `{self.task.name}` aguardando sessão ativa do Claude terminar...")
+                    except Exception:
+                        pass
+            waited = True
+            time.sleep(10)
+        return waited
 
     def execute(self) -> bool:
         """Run the full pipeline. Returns True if all steps completed successfully."""
@@ -1388,6 +1416,9 @@ class PipelineExecutor:
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed",
                                            error=f"Workspace not found: {vault}")
             return False
+        # Wait for any active Claude CLI sessions to finish before starting
+        if self._wait_for_free_slot():
+            logger.info("Pipeline %s: waited for active sessions to clear", self.task.name)
         logger.info("Pipeline %s starting (%d steps)", self.task.name, len(self.task.steps))
         self.workspace.mkdir(parents=True, exist_ok=True)
         data_dir = self.workspace / "data"
@@ -1564,7 +1595,25 @@ class PipelineExecutor:
             # Capture output
             output = runner.result_text or runner.accumulated_text or ""
             if runner.error_text and not output:
-                raise RuntimeError(runner.error_text)
+                # Detect nested session error — wait and retry once
+                if "cannot be launched inside another" in runner.error_text.lower() or \
+                   "nested sessions" in runner.error_text.lower():
+                    logger.warning("Pipeline %s: step %s hit nested session error, waiting...",
+                                   self.task.name, step.id)
+                    self._wait_for_free_slot(max_wait=120)
+                    if not self._cancelled.is_set():
+                        logger.info("Pipeline %s: retrying step %s after nested session wait", self.task.name, step.id)
+                        runner2 = ClaudeRunner()
+                        runner2.run(prompt, model=step.model, workspace=ws,
+                                    system_prompt=None if self.task.minimal_context else SYSTEM_PROMPT)
+                        output = runner2.result_text or runner2.accumulated_text or ""
+                        if runner2.error_text and not output:
+                            raise RuntimeError(runner2.error_text)
+                        # Success on retry — continue to write output below
+                    else:
+                        raise RuntimeError("Pipeline cancelled during nested session wait")
+                else:
+                    raise RuntimeError(runner.error_text)
 
             # Write output to shared data directory
             output_file = data_dir / f"{step.id}.md"
@@ -1904,6 +1953,7 @@ class ClaudeTelegramBot:
                 time.sleep(5)
 
             executor = PipelineExecutor(task, self, ctx, self.routine_state)
+            executor._bot = self
             with self._active_pipelines_lock:
                 self._active_pipelines[task.name] = executor
             try:
