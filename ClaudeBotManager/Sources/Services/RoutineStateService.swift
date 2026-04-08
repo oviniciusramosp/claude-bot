@@ -110,8 +110,31 @@ actor RoutineStateService {
             finishedAt: finishedAt,
             error: data["error"] as? String,
             isPipeline: isPipeline,
-            pipelineSteps: pipelineSteps
+            pipelineSteps: pipelineSteps,
+            workspace: data["workspace"] as? String
         )
+    }
+
+    /// Load live pipeline activity from sidecar file (pipeline-activity.json).
+    /// Returns [pipelineName: [stepId: StepActivity]].
+    func loadPipelineActivity() -> [String: [String: StepActivity]] {
+        let path = (dataDir as NSString).appendingPathComponent("pipeline-activity.json")
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: [String: Any]]]
+        else { return [:] }
+
+        var result: [String: [String: StepActivity]] = [:]
+        for (pipelineName, steps) in json {
+            var stepMap: [String: StepActivity] = [:]
+            for (stepId, stepData) in steps {
+                let activityType = stepData["activity_type"] as? String ?? "thinking"
+                let detail = stepData["detail"] as? String ?? ""
+                let tools = stepData["tools"] as? [String] ?? []
+                stepMap[stepId] = StepActivity(activityType: activityType, detail: detail, tools: tools)
+            }
+            result[pipelineName] = stepMap
+        }
+        return result
     }
 
     private func parseStatus(_ str: String) -> RoutineExecution.Status {

@@ -80,6 +80,7 @@ DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
 CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
+PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 SESSION_MAX_AGE_DAYS = 60
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
@@ -460,6 +461,13 @@ class RoutineStateManager:
                                 step_entry["error"] = "Bot restarted"
         if changed:
             sf.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        # Clean up stale activity sidecar (no pipelines running after restart)
+        if PIPELINE_ACTIVITY_FILE.exists():
+            try:
+                PIPELINE_ACTIVITY_FILE.unlink()
+                logger.info("Startup cleanup: removed stale pipeline-activity.json")
+            except Exception:
+                pass
 
     def _state_file(self) -> Path:
         return ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"
@@ -504,7 +512,8 @@ class RoutineStateManager:
     # --- Pipeline-specific state methods ---
 
     def set_pipeline_status(self, name: str, time_slot: str, status: str,
-                            steps_init: Optional[list] = None, error: Optional[str] = None) -> None:
+                            steps_init: Optional[list] = None, error: Optional[str] = None,
+                            workspace: Optional[str] = None) -> None:
         """Set pipeline-level status. Optionally initialize step statuses from step id list."""
         with self._lock:
             data = self._load()
@@ -513,6 +522,8 @@ class RoutineStateManager:
             entry = data[name].get(time_slot, {})
             entry["status"] = status
             entry["type"] = "pipeline"
+            if workspace:
+                entry["workspace"] = workspace
             if status == "running" and "started_at" not in entry:
                 entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             elif status in ("completed", "failed"):
@@ -1207,6 +1218,10 @@ class ClaudeRunner:
                     with self._lock:
                         self.accumulated_text += block["text"]
                         self.activity_type = "text"
+                elif btype == "thinking":
+                    with self._lock:
+                        self.activity_type = "thinking"
+                        self.last_activity = time.time()
                 elif btype == "tool_use":
                     tool_name = block.get("name", "?")
                     # Extract a short hint from input
@@ -1376,6 +1391,7 @@ class PipelineExecutor:
         self._step_attempts: Dict[str, int] = {s.id: 0 for s in task.steps}
         self._active_runners: Dict[str, ClaudeRunner] = {}
         self._lock = threading.Lock()
+        self._activity_lock = threading.Lock()
         self._cancelled = threading.Event()
         self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
         self._bot = None  # set by _enqueue_pipeline if available
@@ -1425,9 +1441,10 @@ class PipelineExecutor:
         data_dir = self.workspace / "data"
         data_dir.mkdir(exist_ok=True)
 
-        # Initialize pipeline state with all step ids
+        # Initialize pipeline state with all step ids + workspace path
         step_ids = [s.id for s in self.task.steps]
-        self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running", steps_init=step_ids)
+        self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
+                                        steps_init=step_ids, workspace=str(self.workspace))
 
         # Send live progress message to Telegram
         self._send_progress_message()
@@ -1465,6 +1482,8 @@ class PipelineExecutor:
                 shutil.rmtree(self.workspace, ignore_errors=True)
             except Exception:
                 pass
+        # Remove pipeline activity sidecar
+        self._cleanup_activity()
         return all_completed
 
     def cancel(self) -> None:
@@ -1474,6 +1493,76 @@ class PipelineExecutor:
             for runner in self._active_runners.values():
                 if runner.running:
                     runner.cancel()
+
+    # -- Activity sidecar (pipeline-activity.json) --------------------------------
+
+    def _write_step_activity(self, step_id: str, runner: "ClaudeRunner") -> None:
+        """Write live activity snapshot for a running step to the sidecar file."""
+        with self._activity_lock:
+            try:
+                data: Dict = {}
+                if PIPELINE_ACTIVITY_FILE.exists():
+                    try:
+                        data = json.loads(PIPELINE_ACTIVITY_FILE.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        data = {}
+                pipeline_entry = data.setdefault(self.task.name, {})
+                with runner._lock:
+                    activity_type = runner.activity_type or "thinking"
+                    # Get last 3 tool entries, strip emoji prefix
+                    raw_tools = runner.tool_log[-3:] if runner.tool_log else []
+                    tools = [t.replace("🔧 ", "") for t in raw_tools]
+                    detail = tools[-1] if tools else ""
+                pipeline_entry[step_id] = {
+                    "activity_type": activity_type,
+                    "detail": detail,
+                    "tools": tools,
+                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                }
+                # Atomic write: temp file + rename
+                import tempfile as _tf
+                tmp = _tf.NamedTemporaryFile(mode="w", dir=str(DATA_DIR),
+                                             suffix=".json", delete=False, encoding="utf-8")
+                tmp.write(json.dumps(data, ensure_ascii=False))
+                tmp.close()
+                os.rename(tmp.name, str(PIPELINE_ACTIVITY_FILE))
+            except Exception as exc:
+                logger.debug("Activity sidecar write failed: %s", exc)
+
+    def _remove_step_activity(self, step_id: str) -> None:
+        """Remove a step's entry from the activity sidecar."""
+        with self._activity_lock:
+            try:
+                if not PIPELINE_ACTIVITY_FILE.exists():
+                    return
+                data = json.loads(PIPELINE_ACTIVITY_FILE.read_text(encoding="utf-8"))
+                if self.task.name in data:
+                    data[self.task.name].pop(step_id, None)
+                    if not data[self.task.name]:
+                        data.pop(self.task.name)
+                if data:
+                    PIPELINE_ACTIVITY_FILE.write_text(
+                        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                else:
+                    PIPELINE_ACTIVITY_FILE.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.debug("Activity sidecar remove failed: %s", exc)
+
+    def _cleanup_activity(self) -> None:
+        """Remove entire pipeline entry from activity sidecar."""
+        with self._activity_lock:
+            try:
+                if not PIPELINE_ACTIVITY_FILE.exists():
+                    return
+                data = json.loads(PIPELINE_ACTIVITY_FILE.read_text(encoding="utf-8"))
+                data.pop(self.task.name, None)
+                if data:
+                    PIPELINE_ACTIVITY_FILE.write_text(
+                        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+                else:
+                    PIPELINE_ACTIVITY_FILE.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _run_dag_loop(self, data_dir: Path) -> None:
         """Execute steps in topological waves until all are terminal."""
@@ -1587,6 +1676,7 @@ class PipelineExecutor:
             #   - inactivity_timeout: max seconds without any output from Claude
             #   - timeout: max wall-clock seconds (hard limit)
             hard_deadline = time.time() + step.timeout
+            last_activity_write = 0.0
             while runner_thread.is_alive() and time.time() < hard_deadline:
                 if self._cancelled.is_set():
                     runner.cancel()
@@ -1606,6 +1696,11 @@ class PipelineExecutor:
                         runner.cancel()
                         raise TimeoutError(
                             f"Step {step.id} idle for {int(idle)}s (inactivity limit: {step.inactivity_timeout}s)")
+                # Write activity sidecar every 3 seconds
+                now = time.time()
+                if now - last_activity_write >= 3.0:
+                    self._write_step_activity(step.id, runner)
+                    last_activity_write = now
                 time.sleep(1)
             if runner_thread.is_alive() or runner.running:
                 elapsed = int(time.time() - runner.start_time)
@@ -1659,6 +1754,7 @@ class PipelineExecutor:
         finally:
             with self._lock:
                 self._active_runners.pop(step.id, None)
+            self._remove_step_activity(step.id)
 
     def _build_step_prompt(self, step: PipelineStep, data_dir: Path) -> str:
         """Build the full prompt for a step, including workspace context and upstream data."""

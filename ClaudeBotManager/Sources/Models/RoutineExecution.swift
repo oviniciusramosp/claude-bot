@@ -11,6 +11,7 @@ struct RoutineExecution: Identifiable, Hashable, Sendable {
     var error: String?
     var isPipeline: Bool = false
     var pipelineSteps: [StepExecution] = []
+    var workspace: String?  // Pipeline workspace path (/tmp/claude-pipeline-...)
 
     enum Status: String, Sendable {
         case pending
@@ -77,6 +78,12 @@ struct RoutineExecution: Identifiable, Hashable, Sendable {
     }
 }
 
+struct StepActivity: Hashable, Sendable {
+    var activityType: String  // "thinking", "tool", "text"
+    var detail: String        // e.g. "Bash: curl -s https://..."
+    var tools: [String]       // last 3 tool calls
+}
+
 struct StepExecution: Identifiable, Hashable, Sendable {
     var id: String      // step id
     var status: RoutineExecution.Status
@@ -84,6 +91,7 @@ struct StepExecution: Identifiable, Hashable, Sendable {
     var finishedAt: Date?
     var error: String?
     var attempt: Int
+    var activity: StepActivity?  // live activity (from sidecar, only while running)
 
     var duration: String? {
         guard let start = startedAt, let end = finishedAt else { return nil }
