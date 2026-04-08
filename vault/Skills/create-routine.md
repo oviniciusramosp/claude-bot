@@ -18,7 +18,7 @@ Ajudar o usuario a criar uma rotina agendada que executa automaticamente um prom
 
 ## Dependencias
 
-- [[Routines]] — destino dos arquivos gerados por esta skill
+- Routines/ — destino dos arquivos gerados por esta skill
 
 ## Passos
 

@@ -14,8 +14,8 @@ tags: [skill, agent, openclaw, import, automation]
 
 ## Dependencias
 
-- [[Agents]] — destino dos agentes importados
-- [[create-agent]] — formato de referencia para a estrutura gerada
+- Agents/Agents.md — destino dos agentes importados
+- Skills/create-agent.md — formato de referencia para a estrutura gerada
 
 ## Objetivo
 
@@ -199,7 +199,7 @@ Se o agente herda o modelo default (`agents.defaults.model.primary`), usar `sonn
 
 - **Sub-agentes nao migram 1:1.** O OC usa pipelines multi-agente (manager -> writer -> reviewer). O vault usa um agente unico com instrucoes consolidadas. A skill sintetiza os roles em instrucoes para um unico agente.
 - **Instruction files com prefixo `_` sao contexto compartilhado** (_globals, _style, _apis, _notion). Eles devem ser incorporados no CLAUDE.md, nao ignorados.
-- **Cron jobs e schedules do OC nao migram automaticamente.** Rotinas devem ser criadas separadamente via [[create-routine]].
+- **Cron jobs e schedules do OC nao migram automaticamente.** Rotinas devem ser criadas separadamente via Skills/create-routine.md.
 - **Memory do OC nao eh importada.** Os arquivos em `memory/` do workspace OC sao historicos e nao migram. O agente comeca com journal limpo no vault.
 - **Skills do OC (ex: crypto-workflow) devem ser recriadas** como vault skills separadas se necessario.
 - **O campo `source_workspace` no agent.md** preserva a referencia ao workspace OC original, caso seja necessario consultar instruction files detalhados no futuro.

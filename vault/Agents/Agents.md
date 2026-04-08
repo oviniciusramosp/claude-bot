@@ -13,5 +13,6 @@ Agentes especializados com personalidade, instrucoes e journal proprio.
 
 ## Agentes disponiveis
 
-(nenhum criado ainda — use `/agent new` no Telegram)
+- [[parmeirense]] — Especialista em tudo sobre o Palmeiras, notícias, APIs e rotinas do Porco 🐷
+- [[crypto-bro]] — Especialista em Bitcoin e criptomoedas, aulas para iniciantes, análise de mercado e app Crypto Bros 💸
 

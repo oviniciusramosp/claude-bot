@@ -55,7 +55,11 @@ The `--resume` flag enables real session persistence (Claude maintains context a
 
 ## Configuration
 
-All configuration via environment variables (no hardcoded secrets):
+Este projeto usa **dois arquivos `.env` com propositos distintos** — nao os confunda:
+
+### `~/claude-bot/.env` — Config operacional do bot
+
+Lido pelo `claude-fallback-bot.py` na inicializacao e pelo ClaudeBotManager (app macOS). Contem credenciais e caminhos necessarios para o bot funcionar:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -63,6 +67,20 @@ All configuration via environment variables (no hardcoded secrets):
 | `TELEGRAM_CHAT_ID` | Yes | — | Authorized Telegram chat ID |
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI binary |
 | `CLAUDE_WORKSPACE` | No | `$HOME` | Working directory for Claude sessions |
+
+**Editado via:** ClaudeBotManager → Settings, ou diretamente no arquivo.
+
+### `vault/.env` — API keys para tarefas do vault
+
+Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sessoes interativas). Contem chaves para servicos externos que o Claude pode precisar acessar:
+
+- `NOTION_API_KEY` — Notion integration
+- `FIGMA_TOKEN` — Figma MCP
+- Outras chaves de APIs externas conforme necessario
+
+**Nao contem** credenciais do Telegram nem caminhos do bot.
+
+**Por que separados?** `vault/` pode ser sincronizado (iCloud, Git) — misturar tokens do Telegram com API keys de terceiros seria risco de seguranca desnecessario. O bot ops config fica local; as keys de workspace ficam no vault.
 
 ## Bot Commands
 

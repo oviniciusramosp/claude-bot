@@ -14,4 +14,7 @@ Rotinas agendadas que executam prompts no Claude Code automaticamente.
 ## Rotinas ativas
 
 - [[btc-preco-matinal]] — Preco do Bitcoin todo dia as 8:30
+- [[btc-preco-crypto-bro]] — Preco do Bitcoin todo dia as 10:30 via agente Crypto Bro
 
+
+- [[teste-routine]] — Ping o usuario para ele saber que a rotina funcionou
