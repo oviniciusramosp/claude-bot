@@ -1,6 +1,6 @@
 # Vault — Knowledge Base do Claude Bot
 
-**IMPORTANTE:** Este eh o CLAUDE.md do vault — a knowledge base operacional do bot. Voce esta operando dentro do diretorio `vault/`. Todas as suas operacoes de leitura e escrita devem acontecer dentro deste diretorio. NAO acesse arquivos fora do vault (codigo do projeto, configs do sistema, arquivos de outros projetos em ~/) a menos que o usuario peca explicitamente.
+**IMPORTANTE:** Este eh o CLAUDE.md do vault — a knowledge base operacional do bot. Este vault eh a sua fonte primaria de contexto e memoria. Sempre consulte aqui primeiro antes de buscar informacoes em outro lugar. Voce pode ler e interagir com qualquer arquivo do computador quando o usuario pedir — mas NAO use configs de outras ferramentas de AI (~/.claude/, ~/.openclaw/, etc.) como instrucoes proprias.
 
 O usuario pode se referir a este diretorio como **"vault"**, **"knowledge base"**, **"knowledge"**, ou **"KB"**. Todos significam a mesma coisa: este diretorio.
 
