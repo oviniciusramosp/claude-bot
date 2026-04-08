@@ -7,7 +7,10 @@ struct DashboardView: View {
         ScrollView {
             VStack(spacing: Spacing.xl) {
                 BotStatusCard()
-                ClaudeUsageCard()
+                HStack(alignment: .top, spacing: Spacing.xl) {
+                    ClaudeUsageCard()
+                    ZAIUsageCard()
+                }
                 TodayRoutinesCard()
             }
             .padding(Spacing.xl)
@@ -26,7 +29,7 @@ struct BotStatusCard: View {
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             HStack(spacing: Spacing.xl) {
-                // Image container — 50% width, image stays at fixed natural size
+                // Image container — 50% width, fixed image inside
                 if let img = Bundle.module.image(forResource: "bot-avatar") {
                     HStack {
                         Spacer()
@@ -42,9 +45,8 @@ struct BotStatusCard: View {
 
                 // Status info — 50% width
                 VStack(alignment: .leading, spacing: Spacing.md) {
-                    cardHeader("Bot Status", symbol: "apple.terminal")
+                    cardHeader("Bot Status", symbol: "waveform.path.ecg.text.page")
 
-                    // "Running 🟢" — status text + play.circle.fill indicator
                     HStack(spacing: Spacing.sm) {
                         Text(statusText)
                             .font(.system(size: 17, weight: .bold))
@@ -52,14 +54,14 @@ struct BotStatusCard: View {
                         if appState.isRunning {
                             Image(systemName: "play.circle.fill")
                                 .font(.system(size: 17))
-                                .foregroundStyle(Color(red: 0.204, green: 0.780, blue: 0.349)) // #34C759
+                                .foregroundStyle(Color(red: 0.204, green: 0.780, blue: 0.349))
                         }
                     }
 
                     if case .running(let pid, let uptime) = appState.botStatus {
                         Text("\(formatUptime(uptime)) - PID \(pid)")
                             .font(.system(size: 10))
-                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447)) // #727272
+                            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                     }
 
                     HStack(spacing: Spacing.md) {
@@ -147,18 +149,19 @@ struct ClaudeUsageCard: View {
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Claude Usage", symbol: "archivebox")
+                cardHeader("Claude Usage", symbol: "cpu")
 
                 if usage.isAvailable || usage.hasTokenData {
-                    // Large percentage — 17px bold
                     Text("\(Int(effectiveWeeklyPercent * 100))%")
                         .font(.system(size: 17, weight: .bold))
                         .tracking(-0.51)
 
-                    // Segmented bar
                     WeeklySegmentBar(
                         percent: effectiveWeeklyPercent,
-                        referencePercent: weekReferencePercent
+                        referencePercent: weekReferencePercent,
+                        barColor: effectiveWeeklyPercent > weekReferencePercent
+                            ? Color(red: 1.0, green: 0.220, blue: 0.235) // red when above pace
+                            : .statusBlue
                     )
 
                     paceRow
@@ -173,7 +176,6 @@ struct ClaudeUsageCard: View {
         }
     }
 
-    // "⏱ On pace: -2% (expected 58%)"
     private var paceRow: some View {
         let expected = Int(weekReferencePercent * 100)
         let actual   = Int(effectiveWeeklyPercent * 100)
@@ -186,19 +188,21 @@ struct ClaudeUsageCard: View {
         }
 
         return HStack(spacing: 4) {
-            Image(systemName: "timer")
+            Image(systemName: "gauge.open.with.lines.needle.33percent")
             Text(label)
         }
         .font(.system(size: 10))
         .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
     }
 
-    // "🕐 Renew Friday 20:00 (3 day 22h)"
     @ViewBuilder
     private var renewRow: some View {
         if let reset = usage.weeklyResetsAt {
             let dayName = { () -> String in
-                let f = DateFormatter(); f.dateFormat = "EEEE"; return f.string(from: reset)
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US")
+                f.dateFormat = "EEEE"
+                return f.string(from: reset)
             }()
             let timeStr = { () -> String in
                 let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: reset)
@@ -212,7 +216,7 @@ struct ClaudeUsageCard: View {
             }()
 
             HStack(spacing: 4) {
-                Image(systemName: "clock")
+                Image(systemName: "arrow.clockwise.circle")
                 Text("Renew \(dayName) \(timeStr) (\(remaining))")
             }
             .font(.system(size: 10))
@@ -220,12 +224,12 @@ struct ClaudeUsageCard: View {
         }
     }
 
-    // 3 stat chips — 5px gap, 24px height
+    /// Stat chips — icons match sidebar (Agents, Routines, Skills)
     private var statChips: some View {
         HStack(spacing: 5) {
-            DashboardChip(symbol: "person.2", value: appState.agents.count)
-            DashboardChip(symbol: "clock.arrow.circlepath", value: appState.routines.count)
-            DashboardChip(symbol: "bolt", value: appState.skills.count)
+            DashboardChip(symbol: SidebarItem.agents.symbol, value: appState.agents.count)
+            DashboardChip(symbol: SidebarItem.routines.symbol, value: appState.routines.count)
+            DashboardChip(symbol: SidebarItem.skills.symbol, value: appState.skills.count)
         }
     }
 
@@ -283,19 +287,43 @@ struct ClaudeUsageCard: View {
     }
 }
 
+// MARK: - Z.AI Usage Card (disconnected placeholder)
+
+struct ZAIUsageCard: View {
+    var body: some View {
+        GlassCard(padding: Spacing.xl) {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                cardHeader("Z.AI", symbol: "cpu")
+
+                VStack(spacing: Spacing.sm) {
+                    Image(systemName: "link.badge.plus")
+                        .font(.title2)
+                        .foregroundStyle(.tertiary)
+                    Text("Not Connected")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                    Text("GLM integration coming soon")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.quaternary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.xl)
+            }
+        }
+    }
+}
+
 // MARK: - Today's Routines Card
 
 struct TodayRoutinesCard: View {
     @EnvironmentObject var appState: AppState
 
-    /// Only automatic executions — excludes manual dry-runs
     private var autoExecutions: [RoutineExecution] {
         appState.routines
             .flatMap { $0.todayExecutions }
             .filter { $0.timeSlot != "dry-run" }
     }
 
-    /// Scheduled timeline slots paired with their execution (if any)
     private var timeline: [(routine: Routine, time: String, execution: RoutineExecution?)] {
         var entries: [(routine: Routine, time: String, execution: RoutineExecution?)] = []
         for routine in appState.routines where routine.enabled {
@@ -316,7 +344,7 @@ struct TodayRoutinesCard: View {
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Today's Routines", symbol: "clock.arrow.circlepath")
+                cardHeader("Today's Routines", symbol: SidebarItem.routines.symbol)
 
                 if timeline.isEmpty {
                     HStack {
@@ -362,7 +390,6 @@ struct TodayRoutinesCard: View {
                                     status: entry.execution?.status ?? .pending
                                 )
 
-                                // Progress line between past and future
                                 if isPast && nextIsFuture {
                                     HStack(spacing: 0) {
                                         Rectangle()
@@ -383,7 +410,7 @@ struct TodayRoutinesCard: View {
     }
 }
 
-// MARK: - Card Header (Figma spec: icon 17px regular + title 15px bold, opacity 50%)
+// MARK: - Card Header (Figma: icon 17px regular + title 15px bold, opacity 50%)
 
 private func cardHeader(_ title: String, symbol: String) -> some View {
     HStack(spacing: 5) {
@@ -447,7 +474,7 @@ struct RoutineStatCard: View {
     }
 }
 
-// MARK: - Timeline Row (Figma: 10px, icon colored, name bold, #727272)
+// MARK: - Timeline Row (Figma: icon + " time - " + bold name, 10px, #727272)
 
 struct TimelineRow: View {
     var time: String
@@ -456,10 +483,10 @@ struct TimelineRow: View {
 
     private var statusColor: Color {
         switch status {
-        case .completed: Color(red: 0.204, green: 0.780, blue: 0.349) // #34C759
-        case .failed:    Color(red: 1.0, green: 0.220, blue: 0.235)   // #FF383C
+        case .completed: Color(red: 0.204, green: 0.780, blue: 0.349)
+        case .failed:    Color(red: 1.0, green: 0.220, blue: 0.235)
         case .running:   Color(red: 0.25, green: 0.56, blue: 0.98)
-        case .pending, .skipped: Color(red: 0.447, green: 0.447, blue: 0.447) // #727272
+        case .pending, .skipped: Color(red: 0.447, green: 0.447, blue: 0.447)
         }
     }
 

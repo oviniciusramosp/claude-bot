@@ -30,31 +30,39 @@ struct SidebarView: View {
 
     private func sidebarLabel(_ item: SidebarItem) -> some View {
         Label {
-            Text(item.rawValue)
-        } icon: {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: item.symbol)
-                if showBadge(for: item) {
-                    Circle()
-                        .fill(Color.statusRed)
-                        .frame(width: 7, height: 7)
-                        .offset(x: 5, y: -5)
+            HStack {
+                Text(item.rawValue)
+                Spacer()
+                if let badge = badgeText(for: item) {
+                    Text(badge)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.tertiary)
                 }
             }
+        } icon: {
+            Image(systemName: item.symbol)
         }
         .tag(item)
     }
 
-    private func showBadge(for item: SidebarItem) -> Bool {
+    private func badgeText(for item: SidebarItem) -> String? {
         switch item {
         case .dashboard:
-            return !appState.isRunning
+            return appState.isRunning ? "Running" : nil
+        case .agents:
+            let c = appState.agents.count
+            return c > 0 ? "\(c)" : nil
         case .routines:
-            return appState.routines.contains { r in
-                r.lastExecution?.status == .failed
-            }
+            let c = appState.routines.count
+            return c > 0 ? "\(c)" : nil
+        case .skills:
+            let c = appState.skills.count
+            return c > 0 ? "\(c)" : nil
+        case .logs:
+            let errors = appState.routines.flatMap { $0.todayExecutions }.filter { $0.status == .failed }.count
+            return errors > 0 ? "⚠ \(errors)" : nil
         default:
-            return false
+            return nil
         }
     }
 }

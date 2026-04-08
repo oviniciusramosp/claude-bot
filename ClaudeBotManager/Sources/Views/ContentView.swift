@@ -13,11 +13,11 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
-        case .dashboard: "gauge.open.with.lines.needle.33percent"
-        case .agents: "person.2.fill"
+        case .dashboard: "square.grid.2x2.fill"
+        case .agents: "person.2"
         case .routines: "clock.arrow.2.circlepath"
-        case .skills: "wand.and.stars"
-        case .sessions: "list.bullet.rectangle"
+        case .skills: "bolt"
+        case .sessions: "folder"
         case .logs: "exclamationmark.triangle"
         case .settings: "gearshape"
         }
