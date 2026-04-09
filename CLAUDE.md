@@ -140,44 +140,67 @@ Edit the constants at the top of `claude-fallback-bot.py`:
 
 ## Versionamento e Commits
 
-### Bumpar a versão
+### Semantic Versioning
 
-O projeto usa **Semantic Versioning** (MAJOR.MINOR.PATCH). A versão vive em dois lugares — sempre atualizar os dois juntos:
+O projeto segue **[Semantic Versioning 2.0.0](https://semver.org/)** (MAJOR.MINOR.PATCH). A versão vive em dois lugares — **sempre atualizar os dois juntos**:
 
-1. `claude-fallback-bot.py`, linha `BOT_VERSION = "X.Y.Z"` — adicionar comentário descritivo
+1. `claude-fallback-bot.py`, linha `BOT_VERSION = "X.Y.Z"` — com comentário descritivo da mudança
 2. `ClaudeBotManager/Sources/App/Info.plist`, campo `CFBundleShortVersionString`
 
-Critérios:
-- **PATCH** (2.0.0 → 2.0.1) — bug fix, ajuste de prompt, mudança de configuração
-- **MINOR** (2.0.0 → 2.1.0) — nova feature, mudança de comportamento, refactoring estrutural
-- **MAJOR** (2.0.0 → 3.0.0) — breaking change na API do bot, redesign de sessões/workspace
+### Quando bumpar (regra de ouro)
+
+**Toda mudança que afeta o comportamento do bot em runtime DEVE bumpar a versão.** Isso inclui bug fixes, novos comandos, mudanças de prompt, alterações de constantes, e refactoring que muda comportamento. A versão é o que identifica o que está rodando — sem bump, não há como distinguir builds.
+
+**NÃO bumpar** para mudanças puramente documentais (CLAUDE.md, README, comentários no código) ou arquivos do vault (skills, rotinas, journal) que não alteram o código do bot.
+
+### Como decidir o tipo de bump
+
+| Tipo | Quando usar | Exemplos |
+|------|------------|----------|
+| **PATCH** (+0.0.1) | Bug fix, ajuste de comportamento existente, mudança de configuração/constante, ajuste de prompt | fix: corrige timeout, ajusta `STREAM_EDIT_INTERVAL` |
+| **MINOR** (+0.1.0) | Nova funcionalidade, novo comando, mudança de comportamento visível ao usuário, refactoring estrutural | feat: adiciona `/voice`, novo handler de inline keyboard |
+| **MAJOR** (+1.0.0) | Breaking change — altera formato de `sessions.json`, muda API de comandos existentes de forma incompatível, redesign de arquitetura | redesign do SessionManager, migração de formato de dados |
+
+**Dica prática:** Se em dúvida entre PATCH e MINOR, pergunte: "o usuário vai notar a diferença?" Se sim → MINOR. Se não → PATCH.
+
+### Version bump proativo
+
+**Bumpar a versão NO MESMO commit da mudança** — nunca em commit separado. O bump faz parte da mudança, não é uma tarefa à parte.
+
+Sequência obrigatória para mudanças em `claude-fallback-bot.py`:
+```bash
+# 1. Fazer a mudança no código
+# 2. Bumpar versão nos dois arquivos (mesmo commit)
+# 3. Verificar sintaxe
+python3 -m py_compile claude-fallback-bot.py
+# 4. Commitar tudo junto
+git add claude-fallback-bot.py ClaudeBotManager/Sources/App/Info.plist
+git commit -m "feat: adiciona comando /foo"
+```
+
+### Conventional Commits
+
+Seguir **[Conventional Commits](https://www.conventionalcommits.org/)** para mensagens de commit:
+
+| Prefixo | Uso | Bump implícito |
+|---------|-----|----------------|
+| `feat:` | Nova funcionalidade | MINOR |
+| `fix:` | Correção de bug | PATCH |
+| `refactor:` | Mudança de código sem alterar comportamento externo | PATCH (se runtime) ou nenhum |
+| `docs:` | Apenas documentação | nenhum |
+| `chore:` | Manutenção, tooling, configs sem impacto em runtime | nenhum |
+
+O prefixo do commit **implica** o tipo de bump — `feat:` → MINOR, `fix:` → PATCH. Não usar `chore: bump version` como commit isolado.
 
 ### Quando commitar
 
 **Commitar proativamente** após cada mudança coerente — não acumular alterações não relacionadas num commit só.
 
 Fazer commit imediatamente após:
-- Qualquer mudança em `claude-fallback-bot.py` (corrigir bug, adicionar comando, mudar constante)
+- Qualquer mudança em `claude-fallback-bot.py` (com version bump)
 - Criação ou edição de skill, rotina, ou agent no vault
 - Mudança em CLAUDE.md (raiz ou vault)
 - Mudança em configuração (`.env`, plist, `settings.local.json`)
-
-Sequência padrão:
-```bash
-# 1. Bumpar versão (se mudança relevante)
-# 2. Verificar sintaxe
-python3 -m py_compile claude-fallback-bot.py
-
-# 3. Commitar
-git add claude-fallback-bot.py vault/CLAUDE.md CLAUDE.md  # arquivos específicos
-git commit -m "tipo: descrição concisa"
-```
-
-Formato da mensagem de commit:
-- `feat: adiciona comando /foo`
-- `fix: corrige timeout em sessões com agente`
-- `refactor: separa CLAUDE.md em dev/runtime`
-- `chore: bump version 2.0.0 → 2.1.0`
 
 ## Routines
 
