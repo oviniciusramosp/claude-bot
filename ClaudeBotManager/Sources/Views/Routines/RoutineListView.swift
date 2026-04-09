@@ -151,7 +151,12 @@ struct RoutineRow: View {
                         Button {
                             isStopping = true
                             Task {
-                                try? await appState.stopRoutine(routine)
+                                do {
+                                    try await appState.stopRoutine(routine)
+                                } catch {
+                                    // Stop failed — force reload to sync stale state
+                                    await appState.loadRoutines()
+                                }
                                 isDryRunning = false
                                 isStopping = false
                             }
@@ -329,7 +334,11 @@ struct RoutineRow: View {
             Button {
                 isStopping = true
                 Task {
-                    try? await appState.stopRoutine(routine)
+                    do {
+                        try await appState.stopRoutine(routine)
+                    } catch {
+                        await appState.loadRoutines()
+                    }
                     isDryRunning = false
                     isStopping = false
                 }

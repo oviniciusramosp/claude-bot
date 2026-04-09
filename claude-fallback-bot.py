@@ -704,10 +704,11 @@ class RoutineScheduler:
         now_day_idx = time.localtime().tm_wday  # 0=Monday
         today_str = time.strftime("%Y-%m-%d")
 
-        # Reset notification tracking at day boundary
+        # Reset notification tracking at day boundary + daily cleanup
         if self._notified_date != today_str:
             self._notified_invalid_routines.clear()
             self._notified_date = today_str
+            _cleanup_stale_pipeline_workspaces()
 
         for md_file in sorted(ROUTINES_DIR.glob("*.md")):
             try:
@@ -1557,11 +1558,7 @@ class PipelineExecutor:
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
             logger.warning("Pipeline %s %s: %s", self.task.name, status, err)
 
-        # Cleanup workspace
-        try:
-            shutil.rmtree(self.workspace, ignore_errors=True)
-        except Exception as exc:
-            logger.debug("Pipeline workspace cleanup failed: %s", exc)
+        # Workspace kept for 24h (cleaned by _cleanup_stale_pipeline_workspaces on next startup)
         # Remove pipeline activity sidecar
         self._cleanup_activity()
         return all_completed
@@ -2001,7 +1998,7 @@ class PipelineExecutor:
                     break
 
         sent_text = None
-        if self.task.notify == "summary" or output_text is None:
+        if self.task.notify == "summary" or not output_text:
             mins = elapsed // 60
             secs = elapsed % 60
             sent_text = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
@@ -2237,6 +2234,13 @@ class ClaudeTelegramBot:
             try:
                 self._ctx = ctx
                 self._execute_routine_task(task)
+            except Exception as exc:
+                logger.error("Routine %s crashed: %s", task.name, exc, exc_info=True)
+                self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
+                try:
+                    self.send_message(f"❌ Rotina *{task.name}* crashed: `{exc}`")
+                except Exception:
+                    pass
             finally:
                 with self._routine_contexts_lock:
                     self._routine_contexts.pop(task.name, None)
@@ -2265,6 +2269,13 @@ class ClaudeTelegramBot:
             try:
                 self._ctx = ctx
                 executor.execute()
+            except Exception as exc:
+                logger.error("Pipeline %s crashed: %s", task.name, exc, exc_info=True)
+                self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
+                try:
+                    self.send_message(f"❌ Pipeline *{task.name}* crashed: `{exc}`")
+                except Exception:
+                    pass
             finally:
                 with self._active_pipelines_lock:
                     self._active_pipelines.pop(task.name, None)
@@ -3556,7 +3567,7 @@ class ClaudeTelegramBot:
             return s
         # No context or no session_name — ensure at least one session exists
         self.sessions.ensure_active()
-        active = self.sessions.active_name
+        active = self.sessions.active_session
         if active and active in self.sessions.sessions:
             return self.sessions.sessions[active]
         # Last resort: create a default session
@@ -4372,7 +4383,17 @@ class ClaudeTelegramBot:
                             ctx.runner.cancel()
                             self._respond(200, {"ok": True})
                         else:
-                            self._respond(404, {"error": "routine not running"})
+                            # Clean stale "running" state if routine already crashed
+                            cleaned = False
+                            state = bot.routine_state.get_today_state()
+                            for slot, info in state.get(name, {}).items():
+                                if isinstance(info, dict) and info.get("status") == "running":
+                                    bot.routine_state.set_status(name, slot, "failed", "stopped (not running)")
+                                    cleaned = True
+                            if cleaned:
+                                self._respond(200, {"ok": True, "cleaned": True})
+                            else:
+                                self._respond(404, {"error": "routine not running"})
                     elif self.path == "/pipeline/status":
                         name = body.get("name", "")
                         time_slot = body.get("time_slot", "")
@@ -4560,6 +4581,17 @@ if __name__ == "__main__":
         print(f"FATAL: Missing required config: {', '.join(_missing)}", file=sys.stderr)
         print(f"Set them in environment or in {_env_file}", file=sys.stderr)
         sys.exit(1)
+
+    # Global safety net: log uncaught exceptions in daemon threads
+    _orig_excepthook = getattr(threading, "excepthook", None)
+
+    def _thread_excepthook(args):
+        logger.error("Uncaught exception in thread %s: %s", args.thread and args.thread.name, args.exc_value, exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+        if _orig_excepthook:
+            _orig_excepthook(args)
+
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = _thread_excepthook
 
     if "--run" in sys.argv or len(sys.argv) == 1:
         bot = ClaudeTelegramBot()
