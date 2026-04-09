@@ -17,8 +17,6 @@ struct SettingsView: View {
     // Vault API Keys
     @State private var vaultEntries: [VaultEnvEntry] = []
     @State private var showVaultSecrets: Set<String> = []
-    @State private var isVaultSaving = false
-    @State private var vaultSavedMessage = ""
     @State private var vaultNeedsRestart = false
     @State private var expandedGroups: Set<String> = []
     @State private var addingInGroup: String? = nil  // group id currently showing add form
@@ -230,55 +228,31 @@ struct SettingsView: View {
             // "Other" group for unmatched entries
             vaultOtherSection(otherVaultIndices())
 
-            // Save bar
-            HStack {
-                if !vaultSavedMessage.isEmpty {
-                    Label(vaultSavedMessage, systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(Color.statusGreen)
-                        .font(.callout)
-                }
-                if vaultNeedsRestart {
-                    Button {
-                        Task {
-                            await appState.restartBot()
-                            vaultNeedsRestart = false
-                        }
-                    } label: {
-                        Label("Restart Bot", systemImage: "arrow.clockwise")
-                            .font(.callout)
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.orange)
-                }
-                Spacer()
-                Button("Apply") {
-                    isVaultSaving = true
-                    do {
-                        try appState.saveVaultEnv(vaultEntries)
-                        vaultSavedMessage = "Applied"
-                        vaultNeedsRestart = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { vaultSavedMessage = "" }
-                    } catch {
-                        vaultSavedMessage = "Error: \(error.localizedDescription)"
-                    }
-                    isVaultSaving = false
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isVaultSaving)
-            }
-            .padding(.top, Spacing.sm)
         }
 
-        // Save (bot config)
+        // Unified save bar
         HStack {
             if !savedMessage.isEmpty {
                 Label(savedMessage, systemImage: "checkmark.circle.fill")
                     .foregroundStyle(Color.statusGreen)
                     .font(.callout)
             }
+            if vaultNeedsRestart {
+                Button {
+                    Task {
+                        await appState.restartBot()
+                        vaultNeedsRestart = false
+                    }
+                } label: {
+                    Label("Restart Bot", systemImage: "arrow.clockwise")
+                        .font(.callout)
+                }
+                .buttonStyle(.bordered)
+                .tint(.orange)
+            }
             Spacer()
             Button("Save") {
-                saveBotConfig()
+                saveAll()
             }
             .buttonStyle(.borderedProminent)
             .disabled(isSaving)
@@ -368,7 +342,7 @@ struct SettingsView: View {
             }
             Spacer()
             Button("Save") {
-                saveBotConfig()
+                saveAll()
             }
             .buttonStyle(.borderedProminent)
             .disabled(isSaving)
@@ -378,7 +352,7 @@ struct SettingsView: View {
 
     // MARK: - Actions
 
-    private func saveBotConfig() {
+    private func saveAll() {
         let fm = FileManager.default
         let expandedClaude = NSString(string: config.claudePath).expandingTildeInPath
         let expandedWorkspace = NSString(string: config.claudeWorkspace).expandingTildeInPath
@@ -408,7 +382,9 @@ struct SettingsView: View {
         isSaving = true
         do {
             try appState.saveConfig(config)
+            try appState.saveVaultEnv(vaultEntries)
             savedMessage = "Saved"
+            vaultNeedsRestart = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { savedMessage = "" }
         } catch {
             savedMessage = "Error: \(error.localizedDescription)"
