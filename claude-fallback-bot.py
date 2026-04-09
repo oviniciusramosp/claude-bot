@@ -1143,6 +1143,7 @@ class ClaudeRunner:
         max_budget: Optional[float] = None,
         effort: Optional[str] = None,
         system_prompt: Optional[str] = SYSTEM_PROMPT,
+        lightweight: bool = False,
     ) -> None:
         cmd = [
             CLAUDE_PATH,
@@ -1152,6 +1153,15 @@ class ClaudeRunner:
             "--output-format", "stream-json",
             "--verbose",
         ]
+        if lightweight:
+            # Fast path: skip plugins, MCP servers, skills, tools, session persistence
+            cmd += [
+                "--disable-slash-commands",
+                "--tools", "",
+                "--no-session-persistence",
+                "--mcp-config", '{"mcpServers":{}}',
+                "--strict-mcp-config",
+            ]
         if session_id:
             cmd += ["--resume", session_id]
         if max_budget:
@@ -3442,6 +3452,7 @@ class ClaudeTelegramBot:
                 "workspace": session.workspace,
                 "effort": effective_effort,
                 "system_prompt": effective_sp,
+                "lightweight": force_tts,
             },
             daemon=True,
         )
