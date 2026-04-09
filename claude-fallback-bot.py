@@ -3567,7 +3567,8 @@ class ClaudeTelegramBot:
                           max_total_timeout: int = 600,
                           routine_mode: bool = False,
                           system_prompt: Optional[str] = SYSTEM_PROMPT,
-                          force_tts: bool = False) -> None:
+                          force_tts: bool = False,
+                          suppress_text: bool = False) -> None:
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -3610,7 +3611,6 @@ class ClaudeTelegramBot:
                 "workspace": session.workspace,
                 "effort": effective_effort,
                 "system_prompt": effective_sp,
-                "lightweight": force_tts,
             },
             daemon=True,
         )
@@ -3633,7 +3633,8 @@ class ClaudeTelegramBot:
 
         # Finalize
         self._finalize_response(session, runner, prompt=prompt if not _retry else None,
-                                routine_mode=routine_mode, force_tts=tts_this_request)
+                                routine_mode=routine_mode, force_tts=tts_this_request,
+                                suppress_text=force_tts)
 
         # Process queued messages for this context
         self._process_pending()
@@ -3748,7 +3749,8 @@ class ClaudeTelegramBot:
                     self.edit_message(stream_msg, display)
 
     def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None,
-                           routine_mode: bool = False, force_tts: bool = False) -> None:
+                           routine_mode: bool = False, force_tts: bool = False,
+                           suppress_text: bool = False) -> None:
         ctx = self._ctx
 
         if runner.captured_session_id:
@@ -3822,7 +3824,7 @@ class ClaudeTelegramBot:
                 if ctx:
                     ctx.stream_msg_id = None
             self.send_message(final_text)
-        elif force_tts:
+        elif suppress_text:
             # Inline #voice: send only audio, suppress text message
             if stream_msg:
                 self.delete_message(stream_msg)
