@@ -237,7 +237,7 @@ Fazer commit imediatamente após:
 
 ### Pipeline notifications
 
-Pipelines notificam via `_notify_success` / `_notify_failure`. O step marcado com `output: telegram` tem seu output enviado ao Telegram. O campo `notify` controla:
+Pipelines notificam via `_notify_success` / `_notify_failure`. O step marcado com `output: telegram` tem seu output (conteudo do arquivo `data/{id}.md`) enviado ao Telegram. Se o step ja envia ao Telegram via API propria (ex: publisher), usar `output: none` para evitar duplicacao. O campo `notify` controla:
 - `final` — envia output do step marcado (ou ultimo step) ao completar
 - `all` — envia progresso a cada step completado
 - `summary` — envia resumo compacto (X/Y steps in Nm Ns)

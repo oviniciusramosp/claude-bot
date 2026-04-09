@@ -100,6 +100,12 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
     var retry: Int = 0
     var outputToTelegram: Bool = false
     var outputType: String = "file"  // "none", "file", "telegram", or vault-relative path
+    var outputFile: String = ""      // custom output filename (empty = {stepId}.md)
+
+    /// Resolved output filename: custom if set, otherwise {stepId}.md
+    var resolvedFilename: String {
+        outputFile.isEmpty ? "\(stepId).md" : outputFile
+    }
 
     /// Auto-generate stepId from name
     mutating func autoId() {
@@ -123,6 +129,7 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
         if inactivityTimeout != 300 { lines.append("    inactivity_timeout: \(inactivityTimeout)") }
         if retry > 0 { lines.append("    retry: \(retry)") }
         if outputType != "file" { lines.append("    output: \(outputType)") }
+        if !outputFile.isEmpty { lines.append("    output_file: \(outputFile)") }
         return lines
     }
 

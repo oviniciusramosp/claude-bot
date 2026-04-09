@@ -310,7 +310,8 @@ actor VaultService {
                 let lower = raw.lowercased()
                 if lower == "telegram" || lower == "none" { return lower }
                 return raw  // vault path
-            }()
+            }(),
+            outputFile: dict["output_file"]?.trimmingCharacters(in: .whitespaces) ?? ""
         )
     }
 

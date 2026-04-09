@@ -336,7 +336,8 @@ steps:
 - `timeout` — limite total em segundos (default: 1200)
 - `inactivity_timeout` — limite de inatividade (default: 300)
 - `retry` — tentativas em caso de falha (default: 0)
-- `output: telegram` — marcar no step final que envia resultado
+- `output` — destino do output: `telegram` (bot envia conteudo do arquivo ao Telegram), `none` (silencioso), `file` (default, salva em data/). Se o step ja envia ao Telegram via API propria, usar `none` para evitar duplicacao
+- `output_file` — nome customizado do arquivo de output (default: `{id}.md`). Util quando steps downstream precisam referenciar o arquivo por um nome especifico
 
 **Comportamento:**
 - Steps sem `depends_on` rodam em paralelo
@@ -369,8 +370,13 @@ name: Nome Legivel
 personality: Tom e estilo
 model: sonnet
 icon: "🤖"
+default: false
+chat_id: "-100XXXXXXXXXX"   # Telegram chat/group ID para notificacoes do agente
+thread_id: 123              # Telegram topic/thread ID (para grupos com topics)
 ---
 ```
+
+Os campos `chat_id` e `thread_id` sao opcionais. Quando presentes, pipelines e rotinas vinculadas ao agente enviam notificacoes diretamente para esse canal/topic, em vez de depender de uma sessao ativa.
 
 **CLAUDE.md** — instrucoes lidas pelo Claude Code quando o agente esta ativo. NAO tem frontmatter. NAO tem wikilinks. Contem apenas:
 ```markdown

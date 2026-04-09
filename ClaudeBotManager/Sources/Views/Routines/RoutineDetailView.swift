@@ -852,7 +852,8 @@ struct StepRow: View {
                     .clipShape(Capsule())
                 } else {
                     // Temp file
-                    let filePath = workspace.map { "\($0)/data/\(step.id).md" }
+                    let fname = stepDef?.resolvedFilename ?? "\(step.id).md"
+                    let filePath = workspace.map { "\($0)/data/\(fname)" }
                     let fileExists = filePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
                     if step.status == .completed && fileExists, let fp = filePath {
                         Button {
@@ -860,7 +861,7 @@ struct StepRow: View {
                         } label: {
                             HStack(spacing: 2) {
                                 Image(systemName: "doc.text").font(.system(size: 8))
-                                Text("data/\(step.id).md").font(.system(size: 9, weight: .medium))
+                                Text("data/\(fname)").font(.system(size: 9, weight: .medium))
                             }
                             .foregroundStyle(.secondary)
                         }
@@ -871,7 +872,7 @@ struct StepRow: View {
                     } else {
                         HStack(spacing: 2) {
                             Image(systemName: "doc.text").font(.system(size: 8))
-                            Text("data/\(step.id).md").font(.system(size: 9, weight: .medium))
+                            Text("data/\(fname)").font(.system(size: 9, weight: .medium))
                         }
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 5).padding(.vertical, 1)

@@ -605,14 +605,11 @@ struct PipelineStepCard: View {
                                             .textFieldStyle(.roundedBorder)
                                             .frame(height: 24)
                                     } else {
-                                        Text(effectiveStepId.isEmpty ? "step.md" : "\(effectiveStepId).md")
+                                        let defaultName = effectiveStepId.isEmpty ? "step.md" : "\(effectiveStepId).md"
+                                        TextField(defaultName, text: $step.outputFile)
                                             .font(.system(size: 13, weight: .medium))
-                                            .foregroundStyle(Color.primary.opacity(0.85))
-                                            .frame(height: 24, alignment: .leading)
-                                            .padding(.horizontal, 8)
-                                            .background(Color.white)
-                                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.black.opacity(0.08), lineWidth: 1))
+                                            .textFieldStyle(.roundedBorder)
+                                            .frame(height: 24)
                                     }
                                 }
                             }

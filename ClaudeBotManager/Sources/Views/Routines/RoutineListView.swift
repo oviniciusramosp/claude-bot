@@ -507,15 +507,16 @@ struct RoutineRow: View {
                             .help("Open \(outType) in vault")
                         } else {
                             // Temp file — show clickable link when completed
+                            let fname = i < defSteps.count ? defSteps[i].resolvedFilename : "\(stepId).md"
                             if let ws = wsPath, status == .completed,
-                               FileManager.default.fileExists(atPath: "\(ws)/data/\(stepId).md") {
+                               FileManager.default.fileExists(atPath: "\(ws)/data/\(fname)") {
                                 Button {
-                                    NSWorkspace.shared.open(URL(fileURLWithPath: "\(ws)/data/\(stepId).md"))
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: "\(ws)/data/\(fname)"))
                                 } label: {
                                     HStack(spacing: 2) {
                                         Image(systemName: "doc.text")
                                             .font(.system(size: 8))
-                                        Text("\(stepId).md")
+                                        Text(fname)
                                             .font(.system(size: 8, weight: .medium))
                                     }
                                     .foregroundStyle(.secondary)
@@ -525,12 +526,12 @@ struct RoutineRow: View {
                                 .padding(.vertical, 1)
                                 .background(Color.primary.opacity(0.04))
                                 .clipShape(Capsule())
-                                .help("Open \(stepId).md")
+                                .help("Open \(fname)")
                             } else {
                                 HStack(spacing: 2) {
                                     Image(systemName: "doc.text")
                                         .font(.system(size: 8))
-                                    Text("\(stepId).md")
+                                    Text(fname)
                                         .font(.system(size: 8, weight: .medium))
                                 }
                                 .foregroundStyle(.tertiary)

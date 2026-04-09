@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.8.0"  # inline #voice trigger, voice support for routines/pipelines
+BOT_VERSION = "2.10.0"  # pipeline: absolute paths fix, output_file field, per-agent chat_id routing
 
 import http.server
 import json
@@ -489,7 +489,13 @@ class PipelineStep:
     retry: int = 0
     output_to_telegram: bool = False
     output_type: str = "file"  # "none", "file", "telegram", or vault-relative path
+    output_file: Optional[str] = None  # custom output filename (default: {id}.md)
     engine: str = "claude"
+
+    @property
+    def resolved_filename(self) -> str:
+        """Return the output filename: custom if set, otherwise {id}.md."""
+        return self.output_file if self.output_file else f"{self.id}.md"
 
 
 @dataclass
@@ -854,6 +860,7 @@ class RoutineScheduler:
                 retry=int(s.get("retry", 1)),
                 output_to_telegram=(raw_output == "telegram"),
                 output_type=out_type,
+                output_file=s.get("output_file") or None,
                 engine=str(s.get("engine", "claude")),
             ))
 
@@ -1852,10 +1859,22 @@ class PipelineExecutor:
                 else:
                     raise RuntimeError(runner.error_text)
 
-            # Capture output: prefer file written by Claude (via tools), fallback to runner text
-            output_file = data_dir / f"{step.id}.md"
+            # Capture output: prefer file written by Claude, fallback to runner text
+            output_file = data_dir / step.resolved_filename
+            if not (output_file.exists() and output_file.stat().st_size > 0):
+                # Fallback: check if Claude wrote to the agent's data/ dir instead
+                # (safety net for when agent workspace differs from pipeline data_dir)
+                agent_id = step.agent or self.task.agent
+                if agent_id:
+                    agent_data_file = AGENTS_DIR / agent_id / "data" / step.resolved_filename
+                    if agent_data_file.exists() and agent_data_file.stat().st_size > 0:
+                        output = agent_data_file.read_text(encoding="utf-8")
+                        output_file.write_text(output, encoding="utf-8")
+                        logger.info("Pipeline %s: step %s output recovered from agent workspace %s",
+                                    self.task.name, step.id, agent_id)
+
             if output_file.exists() and output_file.stat().st_size > 0:
-                # Claude wrote the file directly via Write/Edit tool — use that
+                # Claude wrote the file directly — use that
                 output = output_file.read_text(encoding="utf-8")
             elif output:
                 # Claude returned text but didn't write the file — save it
@@ -1885,38 +1904,45 @@ class PipelineExecutor:
 
     def _build_step_prompt(self, step: PipelineStep, data_dir: Path) -> str:
         """Build the full prompt for a step, including workspace context and upstream data."""
-        # List available data from completed dependencies
+        # List available data from completed dependencies (using resolved filenames)
         available = []
         for dep_id in step.depends_on:
-            dep_file = data_dir / f"{dep_id}.md"
             dep_step = self._steps_by_id.get(dep_id)
+            dep_fname = dep_step.resolved_filename if dep_step else f"{dep_id}.md"
+            dep_file = data_dir / dep_fname
             dep_name = dep_step.name if dep_step else dep_id
             if dep_file.exists():
-                available.append(f"- data/{dep_id}.md ({dep_name} — completed)")
+                available.append(f"- {data_dir}/{dep_fname} ({dep_name} — completed)")
 
         # Also list any other completed step outputs
         with self._lock:
             for sid, st in self._step_status.items():
                 if st == "completed" and sid not in step.depends_on:
-                    sfile = data_dir / f"{sid}.md"
+                    s_step = self._steps_by_id.get(sid)
+                    s_fname = s_step.resolved_filename if s_step else f"{sid}.md"
+                    sfile = data_dir / s_fname
                     if sfile.exists():
-                        sname = self._steps_by_id.get(sid, PipelineStep(sid, sid, "", "")).name
-                        available.append(f"- data/{sid}.md ({sname} — completed, not a dependency)")
+                        sname = s_step.name if s_step else sid
+                        available.append(f"- {data_dir}/{s_fname} ({sname} — completed, not a dependency)")
 
+        # Use absolute paths so Claude writes to the correct location
+        # regardless of the CLI's working directory (which may differ when agent is set)
+        abs_data_dir = str(data_dir)
         prefix_lines = [
             f"[PIPELINE: {self.task.name} | Step: {step.name} ({step.id})]",
             "",
-            "Seu workspace compartilhado está em data/.",
+            f"Seu workspace compartilhado está em {abs_data_dir}/.",
         ]
         if available:
             prefix_lines.append("Dados disponíveis de etapas anteriores:")
             prefix_lines.extend(available)
         prefix_lines.extend([
             "",
-            f"Escreva seu output em: data/{step.id}.md",
+            f"Escreva seu output em: {abs_data_dir}/{step.resolved_filename}",
             "",
-            "Importante: execute a tarefa e escreva apenas o output. "
-            "Não adicione cabeçalho nem confirmação de execução.",
+            "IMPORTANTE: execute a tarefa e escreva APENAS os dados/conteúdo solicitados no arquivo acima. "
+            "NÃO escreva confirmações de execução, resumos de status, nem mensagens como '✅ Coleta concluída'. "
+            "O arquivo deve conter exclusivamente o output da tarefa no formato especificado.",
             "",
             "---",
             "",
@@ -2222,15 +2248,25 @@ class ClaudeTelegramBot:
 
     def _find_context_for_routine(self, task: "RoutineTask") -> "ThreadContext":
         """Find the correct Telegram context for a routine based on its agent assignment."""
-        with self._contexts_lock:
-            if task.agent:
-                # Find a context whose session is bound to this agent
+        if task.agent:
+            # Priority 1: agent has a dedicated chat_id in its agent.md frontmatter
+            agent_def = load_agent(task.agent)
+            if agent_def:
+                agent_chat_id = agent_def.get("chat_id") or agent_def.get("telegram_chat_id")
+                agent_thread_id = agent_def.get("thread_id") or agent_def.get("telegram_thread_id")
+                if agent_chat_id:
+                    return self._get_context(str(agent_chat_id), str(agent_thread_id) if agent_thread_id else None)
+
+            # Priority 2: find active session bound to this agent
+            with self._contexts_lock:
                 for ctx in self._contexts.values():
                     if ctx.session_name:
                         session = self.sessions.sessions.get(ctx.session_name)
                         if session and session.agent == task.agent:
                             return ctx
-            # No agent (or no matching context): prefer private chat (positive chat_id, no thread)
+
+        # Fallback: prefer private chat (positive chat_id, no thread)
+        with self._contexts_lock:
             for ctx in self._contexts.values():
                 if ctx.thread_id is None and ctx.chat_id and not ctx.chat_id.startswith("-"):
                     return ctx
@@ -3480,7 +3516,10 @@ class ClaudeTelegramBot:
         # Remove emojis (macOS say reads them aloud as descriptions)
         text = re.sub(
             r"[\U0001F300-\U0001FAFF\U00002702-\U000027B0\U0000FE00-\U0000FE0F"
-            r"\U0000200D\U00002600-\U000026FF\U00002B50\U00002B55]+", "", text)
+            r"\U0000200D\U00002600-\U000026FF\U00002B50\U00002B55"
+            r"\U000023E0-\U000023FF\U00002300-\U000023CF\U0000203C\U00002049"
+            r"\U000020E3\U00003030\U0000303D\U00003297\U00003299"
+            r"\U0001F000-\U0001F02F\U0001F900-\U0001F9FF]+", "", text)
         # Collapse whitespace
         text = re.sub(r"\n{2,}", "\n", text).strip()
         return text
@@ -3932,10 +3971,17 @@ class ClaudeTelegramBot:
         if changed:
             self.sessions.save()
 
+        # Parse #voice from prompt text (same as interactive messages)
+        task_prompt = task.prompt
+        inline_tts = False
+        if re.search(r'(?:^|\s)#voice\b', task_prompt, re.IGNORECASE):
+            inline_tts = True
+            task_prompt = re.sub(r'(?:^|\s)#voice\b', '', task_prompt, flags=re.IGNORECASE).strip()
+
         prompt = (f"[ROTINA: {task.name} | {task.time_slot}]\n"
                   f"Importante: execute a tarefa abaixo e envie apenas o output. "
                   f"Não adicione cabeçalho, confirmação de execução, nem frase dizendo que a rotina rodou.\n\n"
-                  f"{task.prompt}")
+                  f"{task_prompt}")
 
         # Send progress message so it can be updated on failure/cancellation
         progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._")
@@ -3946,7 +3992,7 @@ class ClaudeTelegramBot:
             self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200,
                                     routine_mode=True,
                                     system_prompt=None if task.minimal_context else SYSTEM_PROMPT,
-                                    force_tts=task.voice)
+                                    force_tts=task.voice or inline_tts)
             # Check if there was an error or cancellation
             runner = self.runner
             if runner.exit_code == 130:
