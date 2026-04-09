@@ -20,9 +20,11 @@ struct SettingsView: View {
     @State private var isVaultSaving = false
     @State private var vaultSavedMessage = ""
     @State private var vaultNeedsRestart = false
-    @State private var showAddKey = false
+    @State private var expandedGroups: Set<String> = []
+    @State private var addingInGroup: String? = nil  // group id currently showing add form
     @State private var newKeyName = ""
     @State private var newKeyValue = ""
+    @State private var newKeyEnvName = ""  // auto-generated, editable
 
     var body: some View {
         VStack(spacing: 0) {
@@ -214,86 +216,21 @@ struct SettingsView: View {
 
         // Paths Info
         SectionCard(title: "Data Paths", symbol: "folder") {
-            PathRow(label: "Vault", path: appState.vaultPath)
-            PathRow(label: "Data Dir", path: appState.dataDir)
-            PathRow(label: "Log", path: "\(appState.dataDir)/bot.log")
+            PathRow(label: "Bot Dir", path: appState.dataDir)
+            PathRow(label: "Vault (Brain)", path: appState.vaultPath)
+            PathRow(label: "Logs", path: "\(appState.dataDir)/bot.log")
         }
 
         // Vault API Keys
         SectionCard(title: "Vault API Keys", symbol: "key.fill") {
-            if vaultEntries.isEmpty {
-                Text("No keys found in vault/.env")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            } else {
-                ForEach($vaultEntries) { $entry in
-                    SettingRow(entry.friendlyLabel) {
-                        HStack {
-                            if entry.isSensitive && !showVaultSecrets.contains(entry.id) {
-                                SecureField("", text: $entry.value)
-                                    .font(.system(.callout, design: .monospaced))
-                                    .textFieldStyle(.roundedBorder)
-                            } else {
-                                TextField("", text: $entry.value)
-                                    .font(.system(.callout, design: .monospaced))
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            if entry.isSensitive {
-                                Button {
-                                    if showVaultSecrets.contains(entry.id) {
-                                        showVaultSecrets.remove(entry.id)
-                                    } else {
-                                        showVaultSecrets.insert(entry.id)
-                                    }
-                                } label: {
-                                    Image(systemName: showVaultSecrets.contains(entry.id) ? "eye.slash" : "eye")
-                                        .font(.callout)
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                }
+            ForEach(VaultKeyGroup.allGroups) { group in
+                vaultGroupSection(group)
             }
 
-            // Add new key form
-            if showAddKey {
-                Divider()
-                HStack(spacing: Spacing.sm) {
-                    TextField("KEY_NAME", text: $newKeyName)
-                        .font(.system(.callout, design: .monospaced))
-                        .textFieldStyle(.roundedBorder)
-                        .frame(maxWidth: 180)
-                    Text("=")
-                        .font(.system(.callout, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                    TextField("value", text: $newKeyValue)
-                        .font(.system(.callout, design: .monospaced))
-                        .textFieldStyle(.roundedBorder)
-                    Button("Add") {
-                        let key = newKeyName.trimmingCharacters(in: .whitespaces)
-                            .uppercased()
-                            .replacingOccurrences(of: " ", with: "_")
-                        guard !key.isEmpty,
-                              !vaultEntries.contains(where: { $0.id == key }) else { return }
-                        vaultEntries.append(VaultEnvEntry(id: key, value: newKeyValue))
-                        newKeyName = ""
-                        newKeyValue = ""
-                        showAddKey = false
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(newKeyName.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Button("Cancel") {
-                        newKeyName = ""
-                        newKeyValue = ""
-                        showAddKey = false
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .padding(.top, Spacing.xs)
-            }
+            // "Other" group for unmatched entries
+            vaultOtherSection(otherVaultIndices())
 
+            // Save bar
             HStack {
                 if !vaultSavedMessage.isEmpty {
                     Label(vaultSavedMessage, systemImage: "checkmark.circle.fill")
@@ -314,13 +251,6 @@ struct SettingsView: View {
                     .tint(.orange)
                 }
                 Spacer()
-                Button {
-                    showAddKey.toggle()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.callout)
-                }
-                .buttonStyle(.bordered)
                 Button("Save") {
                     isVaultSaving = true
                     do {
@@ -336,7 +266,7 @@ struct SettingsView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(isVaultSaving)
             }
-            .padding(.top, Spacing.xs)
+            .padding(.top, Spacing.sm)
         }
 
         // Save (bot config)
@@ -484,6 +414,266 @@ struct SettingsView: View {
             savedMessage = "Error: \(error.localizedDescription)"
         }
         isSaving = false
+    }
+
+    // MARK: - Vault Key Groups
+
+    private func indicesForGroup(_ group: VaultKeyGroup) -> [Int] {
+        vaultEntries.indices.filter { i in
+            if let matched = VaultKeyGroup.group(for: vaultEntries[i].id) {
+                return matched.id == group.id
+            }
+            return false
+        }
+    }
+
+    private func otherVaultIndices() -> [Int] {
+        vaultEntries.indices.filter { i in
+            let e = vaultEntries[i]
+            if e.isAgentRouting { return false }
+            return VaultKeyGroup.group(for: e.id) == nil
+        }
+    }
+
+    @ViewBuilder
+    private func vaultGroupSection(_ group: VaultKeyGroup) -> some View {
+        let groupIndices = indicesForGroup(group)
+        let predefinedKeys = Set(group.predefinedKeys.map(\.envKey))
+        let customIndices = groupIndices.filter { !predefinedKeys.contains(vaultEntries[$0].id) }
+        let isExpanded = Binding(
+            get: { expandedGroups.contains(group.id) },
+            set: { val in
+                if val { expandedGroups.insert(group.id) } else { expandedGroups.remove(group.id) }
+            }
+        )
+
+        DisclosureGroup(isExpanded: isExpanded) {
+            // Predefined keys
+            ForEach(Array(group.predefinedKeys.enumerated()), id: \.offset) { _, predef in
+                if let idx = vaultEntries.firstIndex(where: { $0.id == predef.envKey }) {
+                    vaultEntryRow(binding: $vaultEntries[idx], label: predef.label)
+                } else {
+                    // Predefined slot not yet in .env — show empty field
+                    HStack {
+                        Text(predef.label)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 120, alignment: .leading)
+                        TextField("Not set", text: .constant(""))
+                            .font(.system(.callout, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(true)
+                        Button {
+                            vaultEntries.append(VaultEnvEntry(id: predef.envKey, value: ""))
+                            expandedGroups.insert(group.id)
+                        } label: {
+                            Image(systemName: "plus.circle").font(.callout)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Color.accentColor)
+                    }
+                }
+            }
+
+            // Custom entries (matched by prefix but not predefined)
+            ForEach(customIndices, id: \.self) { idx in
+                vaultEntryRow(binding: $vaultEntries[idx], label: vaultEntries[idx].friendlyLabel, showRemove: true)
+            }
+
+            // Add custom entry form
+            if let addGroup = addingInGroup, addGroup == group.id {
+                addCustomEntryForm(group: group)
+            }
+
+            // Add button
+            if let label = group.customLabel {
+                Button {
+                    addingInGroup = group.id
+                    newKeyName = ""
+                    newKeyValue = ""
+                    newKeyEnvName = ""
+                } label: {
+                    Label(label, systemImage: "plus")
+                        .font(.callout)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+                .padding(.top, Spacing.xs)
+            }
+        } label: {
+            Label(group.name, systemImage: group.symbol)
+                .font(.callout.weight(.medium))
+        }
+    }
+
+    @ViewBuilder
+    private func vaultOtherSection(_ indices: [Int]) -> some View {
+        let isExpanded = Binding(
+            get: { expandedGroups.contains("other") },
+            set: { val in
+                if val { expandedGroups.insert("other") } else { expandedGroups.remove("other") }
+            }
+        )
+
+        DisclosureGroup(isExpanded: isExpanded) {
+            ForEach(indices, id: \.self) { idx in
+                vaultEntryRow(binding: $vaultEntries[idx], label: vaultEntries[idx].friendlyLabel, showRemove: true)
+            }
+
+            // Add form for "Other"
+            if addingInGroup == "other" {
+                addOtherEntryForm()
+            }
+
+            Button {
+                addingInGroup = "other"
+                newKeyName = ""
+                newKeyValue = ""
+                newKeyEnvName = ""
+            } label: {
+                Label("Add Key", systemImage: "plus")
+                    .font(.callout)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .padding(.top, Spacing.xs)
+        } label: {
+            Label("Other", systemImage: "ellipsis.circle")
+                .font(.callout.weight(.medium))
+        }
+    }
+
+    @ViewBuilder
+    private func vaultEntryRow(binding: Binding<VaultEnvEntry>, label: String, showRemove: Bool = false) -> some View {
+        HStack {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: 120, alignment: .leading)
+                .lineLimit(1)
+            if binding.wrappedValue.isSensitive && !showVaultSecrets.contains(binding.wrappedValue.id) {
+                SecureField("", text: binding.value)
+                    .font(.system(.callout, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+            } else {
+                TextField("", text: binding.value)
+                    .font(.system(.callout, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+            }
+            if binding.wrappedValue.isSensitive {
+                Button {
+                    if showVaultSecrets.contains(binding.wrappedValue.id) {
+                        showVaultSecrets.remove(binding.wrappedValue.id)
+                    } else {
+                        showVaultSecrets.insert(binding.wrappedValue.id)
+                    }
+                } label: {
+                    Image(systemName: showVaultSecrets.contains(binding.wrappedValue.id) ? "eye.slash" : "eye")
+                        .font(.callout)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+            if showRemove {
+                Button {
+                    vaultEntries.removeAll { $0.id == binding.wrappedValue.id }
+                } label: {
+                    Image(systemName: "minus.circle.fill").font(.callout)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func addCustomEntryForm(group: VaultKeyGroup) -> some View {
+        VStack(spacing: Spacing.sm) {
+            HStack(spacing: Spacing.sm) {
+                TextField("Name (e.g. Posts Database)", text: $newKeyName)
+                    .font(.callout)
+                    .textFieldStyle(.roundedBorder)
+                    .onChange(of: newKeyName) { _, name in
+                        let slug = name.trimmingCharacters(in: .whitespaces)
+                            .uppercased()
+                            .replacingOccurrences(of: " ", with: "_")
+                        let suffix = group.customSuggestedSuffix ?? ""
+                        newKeyEnvName = slug.isEmpty ? "" : "\(group.prefix)\(slug)\(suffix)"
+                    }
+            }
+            HStack(spacing: Spacing.sm) {
+                TextField("ENV_KEY", text: $newKeyEnvName)
+                    .font(.system(.caption, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 200)
+                TextField("Value", text: $newKeyValue)
+                    .font(.system(.callout, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+                Button("Add") {
+                    let key = newKeyEnvName.trimmingCharacters(in: .whitespaces)
+                    guard !key.isEmpty, !vaultEntries.contains(where: { $0.id == key }) else { return }
+                    let friendly = newKeyName.trimmingCharacters(in: .whitespaces)
+                    vaultEntries.append(VaultEnvEntry(
+                        id: key,
+                        value: newKeyValue,
+                        friendlyName: friendly.isEmpty ? nil : friendly
+                    ))
+                    addingInGroup = nil
+                    newKeyName = ""
+                    newKeyValue = ""
+                    newKeyEnvName = ""
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(newKeyEnvName.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button("Cancel") {
+                    addingInGroup = nil
+                    newKeyName = ""
+                    newKeyValue = ""
+                    newKeyEnvName = ""
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+        .padding(.top, Spacing.xs)
+    }
+
+    @ViewBuilder
+    private func addOtherEntryForm() -> some View {
+        HStack(spacing: Spacing.sm) {
+            TextField("KEY_NAME", text: $newKeyEnvName)
+                .font(.system(.callout, design: .monospaced))
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 180)
+            Text("=")
+                .font(.system(.callout, design: .monospaced))
+                .foregroundStyle(.secondary)
+            TextField("value", text: $newKeyValue)
+                .font(.system(.callout, design: .monospaced))
+                .textFieldStyle(.roundedBorder)
+            Button("Add") {
+                let key = newKeyEnvName.trimmingCharacters(in: .whitespaces)
+                    .uppercased()
+                    .replacingOccurrences(of: " ", with: "_")
+                guard !key.isEmpty, !vaultEntries.contains(where: { $0.id == key }) else { return }
+                vaultEntries.append(VaultEnvEntry(id: key, value: newKeyValue))
+                addingInGroup = nil
+                newKeyEnvName = ""
+                newKeyValue = ""
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(newKeyEnvName.trimmingCharacters(in: .whitespaces).isEmpty)
+            Button("Cancel") {
+                addingInGroup = nil
+                newKeyEnvName = ""
+                newKeyValue = ""
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(.top, Spacing.xs)
     }
 
     private func switchAccount() {

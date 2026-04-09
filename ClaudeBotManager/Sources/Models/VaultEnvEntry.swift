@@ -3,8 +3,12 @@ import Foundation
 struct VaultEnvEntry: Identifiable {
     let id: String   // env var name (immutable key)
     var value: String
+    var friendlyName: String?  // user-defined label stored as inline comment
 
     var friendlyLabel: String {
+        if let name = friendlyName, !name.isEmpty {
+            return name
+        }
         if let known = Self.knownLabels[id] {
             return known
         }
@@ -25,15 +29,34 @@ struct VaultEnvEntry: Identifiable {
     // MARK: - Known labels
 
     private static let knownLabels: [String: String] = [
-        "NOTION_API_KEY": "Notion API Key",
-        "NOTION_POSTS_DB_ID": "Notion Posts Database",
-        "NOTION_PALMEIRAS_DB_ID": "Notion Palmeiras Database",
-        "TELEGRAM_GROUP_ID": "Telegram Group ID",
-        "TELEGRAM_CRYPTO_THREAD": "Telegram Crypto Thread",
-        "TELEGRAM_PALMEIRAS_THREAD": "Telegram Palmeiras Thread",
-        "FIGMA_TOKEN": "Figma Token",
-        "GEMINI_API_KEY": "Gemini API Key",
-        "OPENAI_API_KEY": "OpenAI API Key",
+        "NOTION_API_KEY": "API Key",
+        "NOTION_POSTS_DB_ID": "Posts Database",
+        "NOTION_PALMEIRAS_DB_ID": "Palmeiras Database",
+        "NOTION_DB_PALMEIRAS_PARTIDAS": "Palmeiras Matches DB",
+        "NOTION_DB_CRYPTO_NEWS": "Crypto News DB",
+        "NOTION_DB_CONTAS": "Contas DB",
+        "NOTION_DB_ADS": "Ads DB",
+        "TELEGRAM_GROUP_ID": "Group ID",
+        "TELEGRAM_CRYPTO_THREAD": "Crypto Thread",
+        "TELEGRAM_PALMEIRAS_THREAD": "Palmeiras Thread",
+        "FIGMA_TOKEN": "Token",
+        "GEMINI_API_KEY": "API Key",
+        "GEMINI_API_KEY_NANO_BANANA": "Nano Banana Key",
+        "GEMINI_API_KEY_SKILLS": "Skills Key",
+        "OPENAI_API_KEY": "API Key",
+        "X_AUTH_TOKEN": "Auth Token",
+        "X_CT0": "CT0 Cookie",
+        "TWITTER_LIST_ID": "List ID",
+        "SMARTTHINGS_TOKEN": "Token",
+        "TMDB_TOKEN": "Token",
+        "FINNHUB_API_KEY": "API Key",
+        "ZAI_API_KEY": "API Key",
+        "TRANSMISSION_USER": "Username",
+        "TRANSMISSION_PASS": "Password",
+        "JELLYFIN_TOKEN": "Token",
+        "OPENSUBS_USER": "Username",
+        "OPENSUBS_PASS": "Password",
+        "OPENSUBS_API_KEY": "API Key",
     ]
 
     // MARK: - Auto-label for unknown keys
@@ -71,5 +94,149 @@ struct VaultEnvEntry: Identifiable {
     private static func titleCase(_ s: String) -> String {
         guard !s.isEmpty else { return s }
         return s.prefix(1).uppercased() + s.dropFirst().lowercased()
+    }
+}
+
+// MARK: - Key Groups
+
+struct VaultKeyGroup: Identifiable {
+    let id: String
+    let name: String
+    let symbol: String
+    let predefinedKeys: [(envKey: String, label: String)]
+    let prefix: String           // used to match entries to groups
+    let customLabel: String?     // button label for adding custom entries
+    let customSuggestedSuffix: String?  // suggested suffix for new keys
+
+    static let allGroups: [VaultKeyGroup] = [
+        VaultKeyGroup(
+            id: "notion",
+            name: "Notion",
+            symbol: "book.closed",
+            predefinedKeys: [("NOTION_API_KEY", "API Key")],
+            prefix: "NOTION_",
+            customLabel: "Add Database",
+            customSuggestedSuffix: "_DB_ID"
+        ),
+        VaultKeyGroup(
+            id: "openai",
+            name: "OpenAI",
+            symbol: "brain",
+            predefinedKeys: [("OPENAI_API_KEY", "API Key")],
+            prefix: "OPENAI_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "gemini",
+            name: "Gemini",
+            symbol: "sparkles",
+            predefinedKeys: [("GEMINI_API_KEY", "API Key")],
+            prefix: "GEMINI_",
+            customLabel: "Add Key",
+            customSuggestedSuffix: "_API_KEY"
+        ),
+        VaultKeyGroup(
+            id: "x",
+            name: "X (Twitter)",
+            symbol: "at",
+            predefinedKeys: [
+                ("X_AUTH_TOKEN", "Auth Token"),
+                ("X_CT0", "CT0 Cookie"),
+            ],
+            prefix: "X_",
+            customLabel: "Add Custom",
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "figma",
+            name: "Figma",
+            symbol: "paintbrush",
+            predefinedKeys: [("FIGMA_TOKEN", "Token")],
+            prefix: "FIGMA_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "smartthings",
+            name: "SmartThings",
+            symbol: "house",
+            predefinedKeys: [("SMARTTHINGS_TOKEN", "Token")],
+            prefix: "SMARTTHINGS_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "tmdb",
+            name: "TMDB",
+            symbol: "film",
+            predefinedKeys: [("TMDB_TOKEN", "Token")],
+            prefix: "TMDB_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "jellyfin",
+            name: "Jellyfin / Transmission",
+            symbol: "play.tv",
+            predefinedKeys: [
+                ("JELLYFIN_TOKEN", "Jellyfin Token"),
+                ("TRANSMISSION_USER", "Transmission User"),
+                ("TRANSMISSION_PASS", "Transmission Password"),
+            ],
+            prefix: "JELLYFIN_",  // matched by multi-prefix logic
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "opensubs",
+            name: "OpenSubtitles",
+            symbol: "captions.bubble",
+            predefinedKeys: [
+                ("OPENSUBS_API_KEY", "API Key"),
+                ("OPENSUBS_USER", "Username"),
+                ("OPENSUBS_PASS", "Password"),
+            ],
+            prefix: "OPENSUBS_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "finnhub",
+            name: "Finnhub",
+            symbol: "chart.line.uptrend.xyaxis",
+            predefinedKeys: [("FINNHUB_API_KEY", "API Key")],
+            prefix: "FINNHUB_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+        VaultKeyGroup(
+            id: "zai",
+            name: "Z.AI",
+            symbol: "globe.asia.australia",
+            predefinedKeys: [("ZAI_API_KEY", "API Key")],
+            prefix: "ZAI_",
+            customLabel: nil,
+            customSuggestedSuffix: nil
+        ),
+    ]
+
+    // Extra prefixes that route to a group but aren't the group's primary prefix
+    private static let extraPrefixes: [String: String] = [
+        "TWITTER_": "x",
+        "TRANSMISSION_": "jellyfin",
+    ]
+
+    /// Find the group for a given env key. Returns nil if it belongs to "Other".
+    static func group(for envKey: String) -> VaultKeyGroup? {
+        let upper = envKey.uppercased()
+        // Check extra prefixes first
+        for (prefix, groupId) in extraPrefixes {
+            if upper.hasPrefix(prefix) {
+                return allGroups.first { $0.id == groupId }
+            }
+        }
+        // Check primary prefixes
+        return allGroups.first { upper.hasPrefix($0.prefix) }
     }
 }

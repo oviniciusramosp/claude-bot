@@ -130,7 +130,7 @@ final class AppState: ObservableObject {
     }
 
     func saveMainAgent(_ agent: Agent) async throws {
-        try await vaultService?.saveMainAgent(instructions: agent.instructions)
+        try await vaultService?.saveMainAgent(rawContent: agent.otherInstructions)
         await loadMainAgent()
     }
 
@@ -449,18 +449,38 @@ final class AppState: ObservableObject {
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), trimmed.contains("=") else { continue }
-            let parts = trimmed.components(separatedBy: "=")
+            // Parse inline comment as friendly name: KEY=value # Friendly Name
+            var payload = trimmed
+            var friendlyName: String? = nil
+            if let hashRange = Self.inlineCommentRange(in: payload) {
+                let comment = String(payload[hashRange.upperBound...]).trimmingCharacters(in: .whitespaces)
+                if !comment.isEmpty { friendlyName = comment }
+                payload = String(payload[..<hashRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+            }
+            let parts = payload.components(separatedBy: "=")
             guard parts.count >= 2 else { continue }
             let key = parts[0].trimmingCharacters(in: .whitespaces)
             let value = parts[1...].joined(separator: "=").trimmingCharacters(in: .whitespaces)
-            entries.append(VaultEnvEntry(id: key, value: value))
+            entries.append(VaultEnvEntry(id: key, value: value, friendlyName: friendlyName))
         }
         vaultEnvEntries = entries
     }
 
+    /// Find the range of an inline comment `# ...` that is NOT inside a value.
+    /// Skips `#` that appear to be part of passwords or tokens (no space before `#`).
+    private static func inlineCommentRange(in line: String) -> Range<String.Index>? {
+        // Look for " # " pattern (space-hash-space) after the = sign
+        guard let eqIndex = line.firstIndex(of: "=") else { return nil }
+        let afterEq = line[line.index(after: eqIndex)...]
+        if let range = afterEq.range(of: " # ") {
+            return range
+        }
+        return nil
+    }
+
     func saveVaultEnv(_ entries: [VaultEnvEntry]) throws {
         let envPath = "\(vaultPath)/.env"
-        let lookup = Dictionary(entries.map { ($0.id, $0.value) }, uniquingKeysWith: { _, last in last })
+        let lookup = Dictionary(entries.map { ($0.id, $0) }, uniquingKeysWith: { _, last in last })
 
         // Reconstruct existing lines with updated values
         var output: [String] = []
@@ -471,9 +491,14 @@ final class AppState: ObservableObject {
                 output.append(line)
                 continue
             }
-            let key = trimmed.components(separatedBy: "=").first?.trimmingCharacters(in: .whitespaces) ?? ""
-            if let newValue = lookup[key] {
-                output.append("\(key)=\(newValue)")
+            // Strip inline comment to get the key
+            var payload = trimmed
+            if let hashRange = Self.inlineCommentRange(in: payload) {
+                payload = String(payload[..<hashRange.lowerBound]).trimmingCharacters(in: .whitespaces)
+            }
+            let key = payload.components(separatedBy: "=").first?.trimmingCharacters(in: .whitespaces) ?? ""
+            if let entry = lookup[key] {
+                output.append(Self.formatEnvLine(entry))
                 handledKeys.insert(key)
             } else {
                 output.append(line)
@@ -483,11 +508,18 @@ final class AppState: ObservableObject {
 
         // Append new keys that weren't in the original file
         for entry in entries where !handledKeys.contains(entry.id) {
-            output.append("\(entry.id)=\(entry.value)")
+            output.append(Self.formatEnvLine(entry))
         }
 
         try output.joined(separator: "\n").write(toFile: envPath, atomically: true, encoding: .utf8)
         loadVaultEnv()
+    }
+
+    private static func formatEnvLine(_ entry: VaultEnvEntry) -> String {
+        if let name = entry.friendlyName, !name.isEmpty {
+            return "\(entry.id)=\(entry.value) # \(name)"
+        }
+        return "\(entry.id)=\(entry.value)"
     }
 
     private func formatUptime(_ t: TimeInterval) -> String {
