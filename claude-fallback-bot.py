@@ -767,6 +767,12 @@ class RoutineScheduler:
                 prompt_path = pipeline_dir / str(pf)
                 if prompt_path.exists():
                     prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+                    # Strip trailing vault wikilink (Obsidian graph metadata, not prompt)
+                    if prompt_text:
+                        _lines = prompt_text.split("\n")
+                        while _lines and re.match(r'^\s*(\(.*\[\[.+\]\].*\)|(?:rotina:\s*)?\[\[.+\]\])\s*$', _lines[-1]):
+                            _lines.pop()
+                        prompt_text = "\n".join(_lines).rstrip()
                 else:
                     logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)
             if not prompt_text:

@@ -1,16 +1,21 @@
 ---
-title: Importar Agente do OpenClaw
-description: Skill para importar agentes existentes do OpenClaw para o vault do claude-bot. Le instruction files, config e metadata do OC e gera a estrutura vault/Agents/{id}/ com agent.md + CLAUDE.md + Journal/.
+title: Importar ou Revisar Agente Importado
+description: Skill para importar agentes de sistemas externos (ex. OpenClaw) para o vault do claude-bot, ou revisar agentes previamente importados para verificar se a sintese do CLAUDE.md foi adequada. Le instruction files, config e metadata e gera a estrutura vault/Agents/{id}/ com agent.md + CLAUDE.md + Journal/.
 type: skill
 created: 2026-04-07
-updated: 2026-04-07
-trigger: "quando o usuario quiser importar um agente do OpenClaw, ou usar /import agent"
-tags: [skill, agent, openclaw, import, automation]
+updated: 2026-04-09
+trigger: "quando o usuario quiser importar um agente do OpenClaw ou de outro sistema, importar agente de outro sistema, revisar agente importado, verificar importacao, ou usar /import agent"
+tags: [skill, agent, openclaw, import, automation, review]
 ---
 
 # Importar Agente do OpenClaw
 
 [[Skills]]
+
+## Modos de operacao
+
+- **Importacao** — importar agente de sistema externo (atualmente OpenClaw) para o vault
+- **Revisao** — revisar agentes previamente importados para verificar se a sintese do CLAUDE.md foi adequada
 
 ## Dependencias
 
@@ -25,15 +30,13 @@ Migrar agentes do OpenClaw (OC) para o vault do claude-bot, traduzindo instructi
 
 ### 1. Listar agentes disponiveis no OpenClaw
 
-Ler `~/.openclaw/openclaw.json` na chave `agents.list`. Cada entrada tem:
+Verificar o arquivo de config em `~/.openclaw/openclaw.json` na chave `agents.list`. Cada entrada tem:
 
 ```
 { "id": "...", "name": "...", "model": "...", "workspace": "..." }
 ```
 
-Agentes conhecidos: `main` (Jarvis), `palmeiras`, `crypto-reports`, `crypto-posts`.
-
-Apresentar ao usuario a lista com ID, nome e modelo.
+Listar os agentes encontrados no arquivo de config. Apresentar ao usuario a lista com ID, nome e modelo.
 
 ### 2. Perguntar qual agente importar
 
@@ -47,12 +50,7 @@ Para cada agente, os arquivos relevantes estao distribuidos em:
 - Campos: `id`, `name`, `model`, `workspace`, `thinkingDefault`, `reasoningDefault`
 - Modelo default (se nao especificado): herda de `agents.defaults.model.primary`
 
-**Workspace do agente:** Verificar o campo `workspace` na config. Se nao existir, usar o default `~/.openclaw/workspace/`.
-- Workspaces conhecidos:
-  - main: `~/.openclaw/workspace/`
-  - palmeiras: `~/.openclaw/workspace-palmeiras/`
-  - crypto-reports: `~/.openclaw/workspace-crypto-reports/`
-  - crypto-posts: `~/.openclaw/workspace-crypto-posts/`
+**Workspace do agente:** Verificar o campo `workspace` na config do agente. Se nao existir, usar o default `~/.openclaw/workspace/`. Os workspaces especificos de cada agente estao definidos no arquivo de config.
 
 **Instruction files:** Dentro do workspace, em `instructions/`. Estrutura tipica:
 ```
@@ -194,6 +192,18 @@ Informar ao usuario:
 | perfil-leve | ollama/jarvis-local | haiku | Ultimo recurso |
 
 Se o agente herda o modelo default (`agents.defaults.model.primary`), usar `sonnet`.
+
+> **Nota:** Esta tabela reflete os modelos disponiveis na data de criacao. Verificar se ha modelos novos ou descontinuados antes de usar.
+
+### Modo Revisao
+
+Para agentes previamente importados (aqueles com `source: openclaw` no agent.md):
+
+1. Verificar se o CLAUDE.md sintetiza adequadamente os instruction files originais
+2. Verificar se o mapeamento de modelo ainda eh apropriado
+3. Checar se o agente foi utilizado (entradas no Journal) e se ajustes sao necessarios
+4. Comparar o CLAUDE.md atual com as instrucoes do workspace fonte (se ainda acessivel)
+5. Apresentar recomendacoes e aplicar mudancas aprovadas pelo usuario
 
 ### Caveats
 

@@ -213,10 +213,12 @@ actor VaultService {
             .appending(component: "steps", directoryHint: .isDirectory)
         try fm.createDirectory(at: stepsDir, withIntermediateDirectories: true)
 
-        // Write each step file
+        // Write each step file (auto-append vault wikilink for Obsidian graph)
         for step in steps where !step.stepId.isEmpty {
             let fileURL = stepsDir.appending(component: "\(step.stepId).md")
-            try step.prompt.write(to: fileURL, atomically: true, encoding: .utf8)
+            let content = step.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+                + "\n\nrotina: [[\(routineId)]]\n"
+            try content.write(to: fileURL, atomically: true, encoding: .utf8)
         }
 
         // Remove orphan step files
@@ -266,7 +268,17 @@ actor VaultService {
 
         for i in steps.indices {
             let fileURL = stepsDir.appending(component: "\(steps[i].stepId).md")
-            steps[i].prompt = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+            var text = (try? String(contentsOf: fileURL, encoding: .utf8)) ?? ""
+            // Strip trailing vault wikilink (auto-managed Obsidian graph metadata)
+            let lines = text.components(separatedBy: "\n")
+            if let last = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }),
+               last.contains("[[") && last.contains("]]") {
+                text = lines.reversed().drop(while: {
+                    let t = $0.trimmingCharacters(in: .whitespaces)
+                    return t.isEmpty || (t.contains("[[") && t.contains("]]"))
+                }).reversed().joined(separator: "\n")
+            }
+            steps[i].prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         return steps
