@@ -250,14 +250,7 @@ struct RoutineDetailView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Agent").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                    Picker("", selection: $routine.agentId) {
-                        Text("\u{1F916} Main (Default)").tag(String?.none)
-                        ForEach(appState.agents) { a in
-                            Text("\(a.icon) \(a.name)").tag(Optional(a.id))
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    menuPicker(label: agentPickerLabel, selection: $routine.agentId, options: agentOptions)
                     Text(agentDescription)
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))
@@ -270,13 +263,11 @@ struct RoutineDetailView: View {
                 HStack(alignment: .top, spacing: 40) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                        Picker("", selection: $routine.model) {
-                            ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                                Text(modelDisplayName(m)).tag(m)
-                            }
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity)
+                        menuPicker(label: modelDisplayName(routine.model), selection: $routine.model, options: [
+                            ("sonnet", modelDisplayName("sonnet")),
+                            ("opus", modelDisplayName("opus")),
+                            ("haiku", modelDisplayName("haiku")),
+                        ])
                         Text(modelDescription(routine.model))
                             .font(.system(size: 10))
                             .foregroundStyle(Color(white: 0.45))
@@ -438,6 +429,55 @@ struct RoutineDetailView: View {
         .padding(.leading, 20)
         .padding(.trailing, 32)
         .padding(.vertical, 16)
+    }
+
+    /// A full-width dropdown that actually stretches (Menu-based, not Picker)
+    private func menuPicker<V: Hashable>(label: String, selection: Binding<V>, options: [(V, String)]) -> some View {
+        Menu {
+            ForEach(options, id: \.0) { value, text in
+                Button {
+                    selection.wrappedValue = value
+                } label: {
+                    HStack {
+                        Text(text)
+                        if selection.wrappedValue == value {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .frame(height: 24)
+            .background(Color.black.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var agentPickerLabel: String {
+        if let id = routine.agentId, let agent = appState.agents.first(where: { $0.id == id }) {
+            return "\(agent.icon) \(agent.name)"
+        }
+        return "\u{1F916} Main (Default)"
+    }
+
+    private var agentOptions: [(String?, String)] {
+        var opts: [(String?, String)] = [(nil, "\u{1F916} Main (Default)")]
+        for a in appState.agents {
+            opts.append((a.id, "\(a.icon) \(a.name)"))
+        }
+        return opts
     }
 
     private func toggleDay(_ day: String) {

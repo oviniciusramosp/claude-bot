@@ -181,17 +181,10 @@ struct RoutineFormSheet: View {
                 // Agent
                 VStack(alignment: .leading, spacing: 5) {
                     fieldLabel("Agent")
-                    Picker("", selection: Binding(
+                    formMenuPicker(label: agentPickerLabel, selection: Binding(
                         get: { agentId ?? "__none__" },
                         set: { agentId = $0 == "__none__" ? nil : $0 }
-                    )) {
-                        Text("\u{1F916} Main (Default)").tag("__none__")
-                        ForEach(appState.agents) { a in
-                            Text("\(a.icon) \(a.name)").tag(a.id)
-                        }
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    ), options: agentMenuOptions)
                     fieldLabel("Send to the Bot's conversation.")
                 }
                 .frame(maxWidth: .infinity)
@@ -202,13 +195,11 @@ struct RoutineFormSheet: View {
                 HStack(alignment: .top, spacing: 40) {
                     VStack(alignment: .leading, spacing: 5) {
                         fieldLabel("Model")
-                        Picker("", selection: $model) {
-                            Text("Sonnet 4.6").tag("sonnet")
-                            Text("Opus 4.6").tag("opus")
-                            Text("Haiku 4.5").tag("haiku")
-                        }
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity)
+                        formMenuPicker(label: modelDisplayName, selection: $model, options: [
+                            ("sonnet", "Sonnet 4.6"),
+                            ("opus", "Opus 4.6"),
+                            ("haiku", "Haiku 4.5"),
+                        ])
                         fieldLabel(modelDescription)
                     }
                     .frame(maxWidth: .infinity)
@@ -395,6 +386,63 @@ struct RoutineFormSheet: View {
         Text(text)
             .font(.system(size: 10))
             .foregroundStyle(Color(hex: 0x727272))
+    }
+
+    /// Full-width dropdown using Menu (NSPopUpButton via Picker ignores maxWidth)
+    private func formMenuPicker<V: Hashable>(label: String, selection: Binding<V>, options: [(V, String)]) -> some View {
+        Menu {
+            ForEach(options, id: \.0) { value, text in
+                Button {
+                    selection.wrappedValue = value
+                } label: {
+                    HStack {
+                        Text(text)
+                        if selection.wrappedValue == value {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .frame(height: 24)
+            .background(Color.black.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var agentPickerLabel: String {
+        if let id = agentId, let agent = appState.agents.first(where: { $0.id == id }) {
+            return "\(agent.icon) \(agent.name)"
+        }
+        return "\u{1F916} Main (Default)"
+    }
+
+    private var agentMenuOptions: [(String, String)] {
+        var opts: [(String, String)] = [("__none__", "\u{1F916} Main (Default)")]
+        for a in appState.agents {
+            opts.append((a.id, "\(a.icon) \(a.name)"))
+        }
+        return opts
+    }
+
+    private var modelDisplayName: String {
+        switch model {
+        case "opus": return "Opus 4.6"
+        case "haiku": return "Haiku 4.5"
+        default: return "Sonnet 4.6"
+        }
     }
 
     private var executionTypeDescription: String {
