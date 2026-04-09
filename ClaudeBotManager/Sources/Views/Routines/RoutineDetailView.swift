@@ -435,28 +435,18 @@ struct RoutineDetailView: View {
         .padding(.vertical, 16)
     }
 
-    /// A picker that stretches to fill its parent width, styled as a popup button
+    /// A picker aligned to the leading edge of its column
     private func fullWidthPicker<SelectionValue: Hashable, Content: View>(
         selection: Binding<SelectionValue>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        ZStack {
-            // Full-width background
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.black.opacity(0.05))
-                .frame(height: 24)
-            // Picker overlaid, aligned leading
-            HStack {
-                Picker("", selection: selection) {
-                    content()
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                Spacer(minLength: 0)
+        HStack {
+            Picker("", selection: selection) {
+                content()
             }
+            .labelsHidden()
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 24)
     }
 
     private func toggleDay(_ day: String) {

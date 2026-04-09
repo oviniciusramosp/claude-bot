@@ -392,26 +392,18 @@ struct RoutineFormSheet: View {
             .foregroundStyle(Color(hex: 0x727272))
     }
 
-    /// Full-width popup dropdown matching Figma design (h=24, rounded 6, black 5% bg)
+    /// A picker aligned to the leading edge of its column
     private func formDropdown<SelectionValue: Hashable, Content: View>(
         selection: Binding<SelectionValue>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 6)
-                .fill(Color.black.opacity(0.05))
-                .frame(height: 24)
-            HStack {
-                Picker("", selection: selection) {
-                    content()
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                Spacer(minLength: 0)
+        HStack {
+            Picker("", selection: selection) {
+                content()
             }
+            .labelsHidden()
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 24)
     }
 
     private var executionTypeDescription: String {
