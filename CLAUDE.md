@@ -108,6 +108,9 @@ Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sess
 | `/workspace <path>` | Change working directory |
 | `/effort <low\|medium\|high>` | Set reasoning effort |
 | `/clear` | Reset current session |
+| `/voice [on\|off]` | Toggle TTS voice responses for all messages |
+| `/audio` | Choose transcription language |
+| `#voice` (in message) | One-shot voice response (audio only, no text) |
 
 ## Development Guidelines
 
@@ -215,6 +218,30 @@ Se o output de uma rotina (nao pipeline) for exatamente `NO_REPLY`, o bot nao en
 | Rotina | Descricao |
 |--------|-----------|
 | `update-check` | Verifica diariamente se ha updates do Claude Code CLI (brew) ou do repo (git). Notifica apenas quando ha algo para atualizar. |
+
+## Voice / TTS
+
+O bot suporta respostas por voz (Text-to-Speech) via macOS `say` + ffmpeg (OGG Opus):
+
+- **`/voice on`** — ativa TTS para todas as proximas mensagens da sessao (texto + audio)
+- **`/voice off`** — desativa TTS
+- **`#voice` na mensagem** — TTS one-shot (so audio, sem texto)
+- **`voice: true` no frontmatter** — rotinas/pipelines entregam resposta como audio
+
+A voz segue o `HEAR_LOCALE` (default `pt-BR` → voz Luciana). O prompt TTS instrui o Claude a responder na lingua configurada, sem emojis, curto e conversacional. Emojis sao removidos do audio via `_strip_markdown()`.
+
+## Auto-compact e rotacao de sessoes
+
+- **Auto-compact**: a cada `AUTO_COMPACT_INTERVAL` (25) turns, roda `/compact` em background
+- **Auto-rotate**: apos `AUTO_ROTATE_THRESHOLD` (80) turns, reseta session_id (proxima msg inicia sessao nova)
+- Aplica apenas a sessoes interativas (rotinas usam session_id=None)
+
+## Watchdog
+
+`bot-watchdog.sh` roda via launchd a cada 60s (`com.vr.claude-bot-watchdog.plist`):
+- Se o bot nao esta rodando: reinicia via `launchctl start` e notifica no Telegram
+- Se o bot voltou: envia mensagem de recuperacao
+- Usa flag file (`~/.claude-bot/.watchdog-notified`) para notificar apenas uma vez por downtime
 
 ## ClaudeBotManager
 
