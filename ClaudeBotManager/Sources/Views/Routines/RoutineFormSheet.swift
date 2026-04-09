@@ -218,7 +218,7 @@ struct RoutineFormSheet: View {
     private var promptSection: some View {
         formSection(icon: "text.alignleft", title: "Prompt") {
             TextEditor(text: $promptBody)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 13))
                 .frame(minHeight: 181)
                 .padding(8)
                 .scrollContentBackground(.hidden)
@@ -401,8 +401,11 @@ struct RoutineFormSheet: View {
             content()
         }
         .labelsHidden()
-        .frame(maxWidth: .infinity)
+        .pickerStyle(.menu)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: 24)
+        .background(Color.black.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private var executionTypeDescription: String {

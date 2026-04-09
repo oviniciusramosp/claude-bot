@@ -249,15 +249,12 @@ struct RoutineDetailView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Agent").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                    Picker("", selection: $routine.agentId) {
+                    fullWidthPicker(selection: $routine.agentId) {
                         Text("Main (Default)").tag(String?.none)
                         ForEach(appState.agents) { a in
                             Text("\(a.icon) \(a.name)").tag(Optional(a.id))
                         }
                     }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 24)
                     Text(agentDescription)
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))
@@ -270,14 +267,11 @@ struct RoutineDetailView: View {
                 HStack(alignment: .top, spacing: 40) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                        Picker("", selection: $routine.model) {
+                        fullWidthPicker(selection: $routine.model) {
                             ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
                                 Text(modelDisplayName(m)).tag(m)
                             }
                         }
-                        .labelsHidden()
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 24)
                         Text(modelDescription(routine.model))
                             .font(.system(size: 10))
                             .foregroundStyle(Color(white: 0.45))
@@ -294,7 +288,7 @@ struct RoutineDetailView: View {
     private var promptSection: some View {
         detailFormSection(icon: "text.alignleft", title: "Prompt") {
             TextEditor(text: $routine.promptBody)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 13))
                 .frame(minHeight: 181)
                 .padding(8)
                 .scrollContentBackground(.hidden)
@@ -439,6 +433,22 @@ struct RoutineDetailView: View {
         .padding(.leading, 20)
         .padding(.trailing, 32)
         .padding(.vertical, 16)
+    }
+
+    /// A picker that stretches to fill its parent width, styled as a popup button
+    private func fullWidthPicker<SelectionValue: Hashable, Content: View>(
+        selection: Binding<SelectionValue>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Picker("", selection: selection) {
+            content()
+        }
+        .labelsHidden()
+        .pickerStyle(.menu)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: 24)
+        .background(Color.black.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private func toggleDay(_ day: String) {
