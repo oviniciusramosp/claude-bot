@@ -3421,18 +3421,26 @@ class ClaudeTelegramBot:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
-        # Inline #voice uses a fresh session for fast response (no heavy context to load)
-        effective_session_id = None if force_tts else session.session_id
+        # Inline #voice: fast path — minimal system prompt, haiku, fresh session, low effort
+        if force_tts:
+            effective_sp = _tts_prompt_suffix()
+            effective_session_id = None
+            effective_model = "haiku"
+            effective_effort = "low"
+        else:
+            effective_session_id = session.session_id
+            effective_model = session.model
+            effective_effort = self.effort
 
         # Start runner thread
         runner_thread = threading.Thread(
             target=runner.run,
             kwargs={
                 "prompt": prompt,
-                "model": session.model,
+                "model": effective_model,
                 "session_id": effective_session_id,
                 "workspace": session.workspace,
-                "effort": self.effort,
+                "effort": effective_effort,
                 "system_prompt": effective_sp,
             },
             daemon=True,
