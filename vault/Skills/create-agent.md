@@ -53,7 +53,8 @@ default: false
 {descricao detalhada do tom e estilo}
 
 ## Instrucoes
-- Registrar conversas no Journal proprio: Journal/YYYY-MM-DD.md
+- Registrar conversas no Journal proprio: `Journal/YYYY-MM-DD.md`
+- IMPORTANTE: registrar no Journal DURANTE a conversa, nao apenas no final. Registre sempre que: uma decisao for tomada, uma tarefa for concluida, informacao nova for descoberta, ou o usuario pedir para lembrar algo.
 - {instrucoes especificas}
 
 ## Especializacoes
