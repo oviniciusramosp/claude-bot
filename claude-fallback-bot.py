@@ -3515,7 +3515,7 @@ class ClaudeTelegramBot:
                 "prompt": prompt,
                 "model": effective_model,
                 "session_id": effective_session_id,
-                "workspace": session.workspace,
+                "workspace": "/tmp" if force_tts else session.workspace,
                 "effort": effective_effort,
                 "system_prompt": effective_sp,
                 "lightweight": force_tts,
