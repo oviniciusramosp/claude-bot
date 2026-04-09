@@ -1188,12 +1188,17 @@ class ClaudeRunner:
         self.activity_type = "thinking"
 
         try:
+            # Strip CLAUDECODE env var to prevent "nested session" errors.
+            # Claude CLI checks this var to detect nesting — we must ensure
+            # our subprocesses never inherit it.
+            clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE,
                 cwd=workspace,
+                env=clean_env,
                 text=True,
                 bufsize=1,
             )
@@ -1482,7 +1487,13 @@ class PipelineExecutor:
             logger.info("Pipeline %s completed in %ds", self.task.name, elapsed)
         else:
             failed_steps = [sid for sid, st in self._step_status.items() if st == "failed"]
-            err = f"Steps failed: {', '.join(failed_steps)}"
+            skipped_steps = [sid for sid, st in self._step_status.items() if st == "skipped"]
+            parts = []
+            if failed_steps:
+                parts.append(f"failed: {', '.join(failed_steps)}")
+            if skipped_steps:
+                parts.append(f"skipped: {', '.join(skipped_steps)}")
+            err = f"Steps {'; '.join(parts)}" if parts else "Pipeline did not complete (unknown state)"
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=err)
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
             logger.warning("Pipeline %s failed: %s", self.task.name, err)
@@ -1626,9 +1637,19 @@ class PipelineExecutor:
                 threads.append(t)
                 t.start()
 
-            # Wait for this wave
+            # Wait for this wave — check cancellation periodically so we don't
+            # block forever on stuck step threads.
             for t in threads:
-                t.join()
+                while t.is_alive():
+                    t.join(timeout=2)
+                    if self._cancelled.is_set():
+                        break
+                if self._cancelled.is_set():
+                    # Give running threads a moment to wrap up after runners are killed
+                    for t2 in threads:
+                        if t2.is_alive():
+                            t2.join(timeout=5)
+                    break
 
             # Post-wave: handle retries and cascade skips
             with self._lock:
@@ -1724,23 +1745,34 @@ class PipelineExecutor:
             # Capture output
             output = runner.result_text or runner.accumulated_text or ""
             if runner.error_text and not output:
-                # Detect nested session error — wait and retry once
-                if "cannot be launched inside another" in runner.error_text.lower() or \
-                   "nested sessions" in runner.error_text.lower():
-                    logger.warning("Pipeline %s: step %s hit nested session error, retrying after 15s...",
-                                   self.task.name, step.id)
-                    time.sleep(15)
-                    if not self._cancelled.is_set():
+                # Detect nested session error — retry with exponential backoff
+                is_nested = ("cannot be launched inside another" in runner.error_text.lower() or
+                             "nested sessions" in runner.error_text.lower())
+                if is_nested:
+                    # Force-clean the env var in case it leaked in
+                    os.environ.pop("CLAUDECODE", None)
+                    for delay in (15, 30):
+                        logger.warning("Pipeline %s: step %s hit nested session error, retrying after %ds...",
+                                       self.task.name, step.id, delay)
+                        time.sleep(delay)
+                        if self._cancelled.is_set():
+                            raise RuntimeError("Pipeline cancelled during nested session wait")
                         logger.info("Pipeline %s: retrying step %s after nested session wait", self.task.name, step.id)
                         runner2 = ClaudeRunner()
+                        with self._lock:
+                            self._active_runners[step.id] = runner2
                         runner2.run(prompt, model=step.model, workspace=ws,
                                     system_prompt=None if self.task.minimal_context else SYSTEM_PROMPT)
                         output = runner2.result_text or runner2.accumulated_text or ""
                         if runner2.error_text and not output:
+                            is_still_nested = ("cannot be launched inside another" in runner2.error_text.lower() or
+                                               "nested sessions" in runner2.error_text.lower())
+                            if is_still_nested:
+                                continue  # try next delay
                             raise RuntimeError(runner2.error_text)
-                        # Success on retry — continue to write output below
+                        break  # Success on retry
                     else:
-                        raise RuntimeError("Pipeline cancelled during nested session wait")
+                        raise RuntimeError(f"Step {step.id} failed after nested session retries: {runner.error_text}")
                 else:
                     raise RuntimeError(runner.error_text)
 
@@ -2147,6 +2179,11 @@ class ClaudeTelegramBot:
 
     def _enqueue_pipeline(self, task: PipelineTask) -> None:
         """Called by the scheduler thread to enqueue a pipeline for execution."""
+        # Guard: prevent duplicate pipeline executions
+        with self._active_pipelines_lock:
+            if task.name in self._active_pipelines:
+                logger.warning("Pipeline %s already running, skipping duplicate enqueue", task.name)
+                return
         # Use a dummy RoutineTask to find context (reuses same routing logic)
         dummy = RoutineTask(name=task.name, prompt="", model=task.model,
                             time_slot=task.time_slot, agent=task.agent)
