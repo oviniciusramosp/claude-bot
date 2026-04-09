@@ -122,6 +122,17 @@ Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sess
 - The bot validates `AUTHORIZED_CHAT_ID` on every incoming message — unauthorized messages are silently ignored.
 - Plist files use `__HOME__` and `__SCRIPT_DIR__` placeholders — the install script (`claude-bot.sh`) substitutes them via `sed`.
 
+### Tratamento de erros — zero erros silenciosos
+
+Ao encontrar um erro, **nunca trate como caso pontual**. Seguir este fluxo obrigatório:
+
+1. **Investigar a causa raiz** — não corrigir apenas o sintoma. Rastrear o caminho do erro até a origem real (dado inválido, estado inconsistente, race condition, etc.)
+2. **Corrigir a causa raiz** — a fix deve eliminar a classe de erro, não apenas a instância observada
+3. **Adicionar proteção estrutural** — implementar validação, guard clause, ou check que previna a recorrência. Se o erro pode voltar por fatores externos (API fora, arquivo ausente, etc.), adicionar tratamento resiliente
+4. **Garantir visibilidade** — todo erro que não puder ser prevenido DEVE notificar o usuário (via Telegram, log, ou ambos). Nenhum `except: pass`, nenhum `try/except` que engole o erro silenciosamente. Se capturar uma exceção, no mínimo logar com `logging.error()` e notificar no Telegram quando possível
+
+**Princípio:** O usuário deve saber quando algo deu errado — mesmo que o bot se recupere automaticamente. Erros silenciosos acumulam e geram problemas maiores depois.
+
 ## Common Tasks
 
 ### Adding a new command
