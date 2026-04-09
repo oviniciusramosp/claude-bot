@@ -8,7 +8,7 @@ trigger: "quando o usuario quiser importar um agente do OpenClaw ou de outro sis
 tags: [skill, agent, openclaw, import, automation, review]
 ---
 
-# Importar Agente do OpenClaw
+# Importar ou Revisar Agente Importado
 
 [[Skills]]
 
@@ -195,21 +195,71 @@ Se o agente herda o modelo default (`agents.defaults.model.primary`), usar `sonn
 
 > **Nota:** Esta tabela reflete os modelos disponiveis na data de criacao. Verificar se ha modelos novos ou descontinuados antes de usar.
 
-### Modo Revisao
+## Modo Revisao
 
-Para agentes previamente importados (aqueles com `source: openclaw` no agent.md):
+Acionado quando o usuario pede para revisar agentes importados ou verificar se a importacao ficou adequada.
 
-1. Verificar se o CLAUDE.md sintetiza adequadamente os instruction files originais
-2. Verificar se o mapeamento de modelo ainda eh apropriado
-3. Checar se o agente foi utilizado (entradas no Journal) e se ajustes sao necessarios
-4. Comparar o CLAUDE.md atual com as instrucoes do workspace fonte (se ainda acessivel)
-5. Apresentar recomendacoes e aplicar mudancas aprovadas pelo usuario
+### Passo 1 — Identificar agentes importados
+
+Listar agentes em `vault/Agents/` que tem `source: openclaw` (ou outro source) no frontmatter do `agent.md`.
+
+### Passo 2 — Analisar cada agente importado
+
+Para cada agente, ler `agent.md`, `CLAUDE.md`, e o Journal. Avaliar com o checklist:
+
+#### A. Qualidade da sintese
+
+- [ ] O CLAUDE.md captura a essencia dos instruction files originais?
+- [ ] Informacoes importantes foram perdidas na sintese? (comparar com `source_workspace` se acessivel)
+- [ ] O CLAUDE.md esta muito longo (>200 linhas)? Pode ser condensado?
+- [ ] O CLAUDE.md esta muito curto? Faltam instrucoes que existiam no original?
+
+#### B. Modelo e personalidade
+
+- [ ] O modelo mapeado faz sentido para o uso real do agente?
+- [ ] A personalidade extraida de IDENTITY.md/SOUL.md ficou fiel?
+- [ ] O icone representa bem o agente?
+
+#### C. Uso pos-importacao
+
+- [ ] O agente tem entradas no Journal? (esta sendo usado?)
+- [ ] Se esta em uso — o usuario encontrou problemas que requerem ajuste no CLAUDE.md?
+- [ ] Se NAO esta em uso — o agente eh relevante? Sugerir desativar ou remover.
+
+#### D. Integracao com o vault
+
+- [ ] O agente tem rotinas associadas? Se nao e deveria → sugerir criar via [[create-routine]]
+- [ ] Skills do OC que este agente usava foram recriadas no vault?
+- [ ] Cron jobs do OC que este agente tinha foram convertidos em rotinas?
+
+### Passo 3 — Apresentar recomendacoes
+
+```
+### {nome-do-agente} (importado de {source})
+Status: OK / Melhorias sugeridas
+
+- [melhoria 1]: motivo e beneficio
+- [melhoria 2]: motivo e beneficio
+```
+
+### Passo 4 — Executar melhorias aprovadas
+
+- **Melhorar CLAUDE.md** → re-sintetizar a partir dos instruction files originais (se acessiveis)
+- **Ajustar modelo** → editar `agent.md`
+- **Criar rotinas** → redirecionar para [[create-routine]] com `agent: {id}`
+- **Recriar skills do OC** → usar formato vault `Skills/{nome}.md`
+
+### Passo 5 — Registrar no Journal
+
+Appendar no journal do dia com as mudancas aplicadas.
+
+---
 
 ### Caveats
 
-- **Sub-agentes nao migram 1:1.** O OC usa pipelines multi-agente (manager -> writer -> reviewer). O vault usa um agente unico com instrucoes consolidadas. A skill sintetiza os roles em instrucoes para um unico agente.
-- **Instruction files com prefixo `_` sao contexto compartilhado** (_globals, _style, _apis, _notion). Eles devem ser incorporados no CLAUDE.md, nao ignorados.
-- **Cron jobs e schedules do OC nao migram automaticamente.** Rotinas devem ser criadas separadamente via Skills/create-routine.md.
-- **Memory do OC nao eh importada.** Os arquivos em `memory/` do workspace OC sao historicos e nao migram. O agente comeca com journal limpo no vault.
-- **Skills do OC (ex: crypto-workflow) devem ser recriadas** como vault skills separadas se necessario.
-- **O campo `source_workspace` no agent.md** preserva a referencia ao workspace OC original, caso seja necessario consultar instruction files detalhados no futuro.
+- **Sub-agentes nao migram 1:1.** O OC usa pipelines multi-agente (manager -> writer -> reviewer). O vault consolida em um agente unico. → Se o workflow original era complexo, sugerir criar uma **pipeline** via [[create-pipeline]] para replicar a orquestracao.
+- **Instruction files com prefixo `_` sao contexto compartilhado** (_globals, _style, _apis, _notion). Devem ser incorporados no CLAUDE.md, nao ignorados.
+- **Cron jobs e schedules do OC nao migram automaticamente.** → Apos importar, perguntar ao usuario se quer criar rotinas para este agente usando [[create-routine]] com `agent: {id}`.
+- **Memory do OC nao eh importada.** Os arquivos em `memory/` sao historicos e nao migram. → Se houver contexto critico em memory/, sugerir criar uma nota em `vault/Notes/` com o conteudo relevante.
+- **Skills do OC devem ser recriadas** como vault skills em `Skills/{nome}.md`. → Listar as skills que o agente usava no OC e perguntar se o usuario quer recriar alguma.
+- **O campo `source_workspace` no agent.md** preserva a referencia ao workspace OC original para consulta futura dos instruction files detalhados.

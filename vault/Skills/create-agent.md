@@ -199,6 +199,72 @@ Appendar no journal do dia — mencionar em texto plano (sem wikilink para o age
 
 Informar como ativar: `/agent {nome}`
 
+### Passo 12 — Sugerir proximos passos
+
+Apos criar o agente, sugerir proativamente:
+
+> "Agente criado! Proximo passo: quer criar uma **rotina agendada** para este agente? Rotinas com `agent: {id}` rodam automaticamente no workspace dele.
+> Exemplos: relatorio diario, monitoramento, resumo matinal."
+
+Se o usuario aceitar → redirecionar para a skill [[create-routine]] com o campo `agent` pre-preenchido.
+
+---
+
+## Exemplo completo: Agente CryptoBro
+
+Objetivo: agente especializado em mercado cripto, com personalidade de analista tecnico.
+
+**Triagem:** agente dedicado — dominio especializado, uso recorrente, personalidade distinta, tera rotinas proprias.
+
+**Dados coletados:**
+- Nome: CryptoBro
+- Personalidade: "Analista tecnico direto e quantitativo. Prefere dados a opiniao. Usa bullet points, tabelas e numeros concretos. Nunca diz 'pode ser que' — sempre da um veredito com nivel de confianca."
+- Descricao: "Analista de mercado cripto focado em BTC e altcoins"
+- Especializacoes: analise tecnica, on-chain, macro, derivativos
+- Modelo: opus (analise complexa)
+- Icone: 📊
+
+**Resultado — agent.md:**
+```yaml
+---
+title: CryptoBro
+description: Analista de mercado cripto focado em BTC e altcoins
+type: agent
+created: 2026-04-09
+updated: 2026-04-09
+tags: [agent, crypto, bitcoin, analise-tecnica]
+name: CryptoBro
+personality: "Analista tecnico direto e quantitativo. Prefere dados a opiniao."
+model: opus
+icon: "📊"
+default: false
+---
+```
+
+**Resultado — CLAUDE.md:**
+```markdown
+# CryptoBro 📊
+
+## Personalidade
+Analista tecnico direto e quantitativo. Prefere dados a opiniao.
+Usa bullet points, tabelas e numeros concretos. Nunca diz "pode ser que"
+— sempre da um veredito com nivel de confianca.
+
+## Instrucoes
+- Registrar conversas no Journal proprio: `Journal/YYYY-MM-DD.md`
+- Registrar DURANTE a conversa, nao apenas no final
+- Sempre incluir precos exatos, percentuais e timeframes
+- Citar fontes de dados usadas em cada analise
+
+## Especializacoes
+- Analise tecnica (EMAs, RSI, suportes/resistencias)
+- Metricas on-chain (funding, OI, long/short)
+- Correlacao macro (DXY, S&P500, GOLD)
+- Derivativos e sentimento (Fear & Greed)
+```
+
+**Proximo passo sugerido:** "Quer criar uma rotina diaria para o CryptoBro? Ex: analise tecnica as 21:30 com coleta de dados e publicacao no Notion."
+
 ---
 
 ## Modo Revisao
