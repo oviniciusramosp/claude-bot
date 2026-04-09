@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.10.0"  # pipeline: absolute paths fix, output_file field, per-agent chat_id routing
+BOT_VERSION = "2.11.0"  # telegram: MarkdownV2, reply-to, copy-code button, sendDocument, link preview, silent routines, scoped commands
 
 import http.server
 import json
@@ -2058,13 +2058,15 @@ class PipelineExecutor:
             secs = elapsed % 60
             sent_text = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
             try:
-                self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+                self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
+                                      disable_notification=True)
             except Exception as exc:
                 logger.warning("Pipeline notify_success send failed: %s", exc)
         elif output_text:
             sent_text = output_text
             try:
-                self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+                self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
+                                      disable_notification=True)
             except Exception as exc:
                 logger.warning("Pipeline notify_success send failed: %s", exc)
 
@@ -2392,7 +2394,8 @@ class ClaudeTelegramBot:
             )
 
         # File field
-        mime = "audio/ogg" if file_path.suffix == ".ogg" else "application/octet-stream"
+        _mime_map = {".ogg": "audio/ogg", ".md": "text/markdown", ".txt": "text/plain"}
+        mime = _mime_map.get(file_path.suffix, "application/octet-stream")
         file_data = file_path.read_bytes()
         body_parts.append(
             f"--{boundary}\r\n"
@@ -2429,6 +2432,52 @@ class ClaudeTelegramBot:
         logger.error("_tg_upload_file %s failed after 3 attempts", method)
         return None
 
+    # Large output threshold for sending as document instead of chunked messages
+    DOCUMENT_THRESHOLD = 8000
+
+    def _send_as_document(self, text: str, filename: str = "response.md",
+                          caption: str = "",
+                          chat_id: Optional[str] = None,
+                          thread_id: Optional[str] = None,
+                          reply_to_message_id: Optional[int] = None) -> Optional[int]:
+        """Send large text as a .md document attachment with optional caption."""
+        import tempfile
+        chat_id = chat_id or self._chat_id
+        thread_id = thread_id or (self._ctx.thread_id if self._ctx else None)
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+            f.write(text)
+            tmp_path = Path(f.name)
+
+        try:
+            # Rename to desired filename
+            target = tmp_path.parent / filename
+            tmp_path.rename(target)
+
+            data: Dict[str, str] = {"chat_id": chat_id}
+            if thread_id:
+                data["message_thread_id"] = thread_id
+            if caption:
+                sanitized = self._sanitize_markdown_v2(caption)
+                data["caption"] = sanitized
+                data["parse_mode"] = "MarkdownV2"
+            if reply_to_message_id:
+                # sendDocument doesn't support reply_parameters as JSON string in multipart,
+                # but we can pass reply_to_message_id directly
+                data["reply_to_message_id"] = str(reply_to_message_id)
+
+            resp = self._tg_upload_file("sendDocument", target, file_field="document", data=data)
+            if resp and resp.get("ok"):
+                return resp["result"]["message_id"]
+            return None
+        finally:
+            # Clean up temp files
+            for p in (target, tmp_path):
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
     @property
     def _chat_id(self) -> str:
         return self._ctx.chat_id if self._ctx else str(TELEGRAM_CHAT_ID)
@@ -2441,11 +2490,15 @@ class ClaudeTelegramBot:
         # Fallback: create a transient runner
         return ClaudeRunner()
 
-    def send_message(self, text: str, parse_mode: str = "Markdown",
+    def send_message(self, text: str, parse_mode: str = "MarkdownV2",
                      reply_markup: Optional[Dict] = None,
                      chat_id: Optional[str] = None,
-                     thread_id: Optional[str] = None) -> Optional[int]:
-        if parse_mode == "Markdown":
+                     thread_id: Optional[str] = None,
+                     reply_to_message_id: Optional[int] = None,
+                     disable_notification: bool = False) -> Optional[int]:
+        if parse_mode == "MarkdownV2":
+            text = self._sanitize_markdown_v2(text)
+        elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
         chunks = self._split_message(text)
         last_msg_id = None
@@ -2453,7 +2506,7 @@ class ClaudeTelegramBot:
             chat_id = self._chat_id
         if thread_id is None:
             thread_id = self._ctx.thread_id if self._ctx else None
-        for chunk in chunks:
+        for i, chunk in enumerate(chunks):
             data: Dict[str, Any] = {"chat_id": chat_id, "text": chunk}
             if thread_id:
                 data["message_thread_id"] = thread_id
@@ -2461,6 +2514,14 @@ class ClaudeTelegramBot:
                 data["parse_mode"] = parse_mode
             if reply_markup and chunk == chunks[-1]:
                 data["reply_markup"] = reply_markup
+            # Reply-to only on first chunk
+            if reply_to_message_id and i == 0:
+                data["reply_parameters"] = {"message_id": reply_to_message_id,
+                                            "allow_sending_without_reply": True}
+            # Suppress link previews in bot responses
+            data["link_preview_options"] = {"is_disabled": True}
+            if disable_notification:
+                data["disable_notification"] = True
             resp = self.tg_request("sendMessage", data)
             if resp and resp.get("ok"):
                 last_msg_id = resp["result"]["message_id"]
@@ -2472,10 +2533,12 @@ class ClaudeTelegramBot:
                         last_msg_id = resp["result"]["message_id"]
         return last_msg_id
 
-    def edit_message(self, message_id: int, text: str, parse_mode: str = "Markdown") -> bool:
+    def edit_message(self, message_id: int, text: str, parse_mode: str = "MarkdownV2") -> bool:
         if not text.strip():
             return False
-        if parse_mode == "Markdown":
+        if parse_mode == "MarkdownV2":
+            text = self._sanitize_markdown_v2(text)
+        elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
         text = text[:MAX_MESSAGE_LENGTH]
         chat_id = self._chat_id
@@ -2554,6 +2617,136 @@ class ClaudeTelegramBot:
 
     # -- Markdown sanitization --
 
+    # Characters that must be escaped in MarkdownV2 outside code/pre blocks
+    _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~>#\+\-=|{}.!\\])')
+
+    @staticmethod
+    def _sanitize_markdown_v2(text: str) -> str:
+        """Convert Claude's natural Markdown output to Telegram MarkdownV2.
+
+        Strategy: split text into code blocks (``` and inline `) which are
+        left untouched, and prose segments where special chars are escaped
+        while preserving intended formatting (bold, italic, links, etc.).
+        """
+        # Fix unbalanced triple-backtick code blocks first
+        if text.count("```") % 2 != 0:
+            text += "\n```"
+
+        parts = text.split("```")
+        for i in range(len(parts)):
+            if i % 2 == 1:
+                # Inside fenced code block — leave as-is (pre block in MDv2)
+                continue
+            # Outside code blocks — escape special chars, preserving formatting
+            parts[i] = ClaudeTelegramBot._escape_mdv2_segment(parts[i])
+
+        return "```".join(parts)
+
+    @staticmethod
+    def _escape_mdv2_segment(text: str) -> str:
+        """Escape a prose segment for MarkdownV2, preserving bold/italic/links/inline code."""
+        result = []
+        pos = 0
+        n = len(text)
+
+        while pos < n:
+            # Inline code: ` ... ` — leave contents unescaped
+            if text[pos] == '`':
+                end = text.find('`', pos + 1)
+                if end != -1:
+                    result.append(text[pos:end + 1])
+                    pos = end + 1
+                    continue
+                else:
+                    result.append('`')
+                    pos += 1
+                    continue
+
+            # Markdown links: [text](url) — escape text, leave url structure
+            if text[pos] == '[':
+                # Find matching ] then (url)
+                close_bracket = text.find(']', pos + 1)
+                if close_bracket != -1 and close_bracket + 1 < n and text[close_bracket + 1] == '(':
+                    close_paren = text.find(')', close_bracket + 2)
+                    if close_paren != -1:
+                        link_text = text[pos + 1:close_bracket]
+                        url = text[close_bracket + 2:close_paren]
+                        escaped_text = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', link_text)
+                        result.append(f'[{escaped_text}]({url})')
+                        pos = close_paren + 1
+                        continue
+
+            # Bold: **text** or *text* — preserve markers, escape inside
+            if text[pos] == '*':
+                # Double ** (bold)
+                if pos + 1 < n and text[pos + 1] == '*':
+                    end = text.find('**', pos + 2)
+                    if end != -1:
+                        inner = text[pos + 2:end]
+                        escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
+                        result.append(f'*{escaped}*')
+                        pos = end + 2
+                        continue
+                # Single * (italic in standard md, bold in Telegram)
+                end = text.find('*', pos + 1)
+                if end != -1 and end > pos + 1:
+                    inner = text[pos + 1:end]
+                    escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
+                    result.append(f'*{escaped}*')
+                    pos = end + 1
+                    continue
+
+            # Italic: _text_ — preserve markers, escape inside
+            if text[pos] == '_':
+                # Double __ (underline in MDv2)
+                if pos + 1 < n and text[pos + 1] == '_':
+                    end = text.find('__', pos + 2)
+                    if end != -1:
+                        inner = text[pos + 2:end]
+                        escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
+                        result.append(f'__{escaped}__')
+                        pos = end + 2
+                        continue
+                # Single _ (italic)
+                end = text.find('_', pos + 1)
+                if end != -1 and end > pos + 1:
+                    inner = text[pos + 1:end]
+                    # Skip if looks like snake_case (no spaces)
+                    if ' ' not in inner and pos > 0 and text[pos - 1].isalnum():
+                        result.append('\\_')
+                        pos += 1
+                        continue
+                    escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
+                    result.append(f'_{escaped}_')
+                    pos = end + 1
+                    continue
+
+            # Strikethrough: ~text~
+            if text[pos] == '~':
+                end = text.find('~', pos + 1)
+                if end != -1 and end > pos + 1:
+                    inner = text[pos + 1:end]
+                    escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
+                    result.append(f'~{escaped}~')
+                    pos = end + 1
+                    continue
+
+            # Blockquote: > at start of line — MDv2 expects unescaped >
+            if text[pos] == '>' and (pos == 0 or text[pos - 1] == '\n'):
+                result.append('>')
+                pos += 1
+                continue
+
+            # Regular character — escape if special
+            ch = text[pos]
+            if ch in r'_*[]()~>#+-=|{}.!\\":':
+                result.append(f'\\{ch}')
+            else:
+                result.append(ch)
+            pos += 1
+
+        return ''.join(result)
+
     @staticmethod
     def _sanitize_markdown(text: str) -> str:
         """Fix unbalanced Markdown v1 markers to avoid Telegram parse errors.
@@ -2583,6 +2776,29 @@ class ClaudeTelegramBot:
                 parts[i] = seg + "_"
 
         return "```".join(parts)
+
+    # -- Code extraction for CopyTextButton --
+
+    @staticmethod
+    def _extract_copyable_code(text: str) -> Optional[str]:
+        """Extract code from response if it has a single dominant code block.
+
+        Returns the code content (without fences) if the response contains
+        exactly one fenced code block that makes up most of the response.
+        Returns None otherwise (multiple blocks, no blocks, or too much prose).
+        """
+        blocks = re.findall(r'```(?:\w*\n)?(.*?)```', text, re.DOTALL)
+        if len(blocks) != 1:
+            return None
+        code = blocks[0].strip()
+        # Only offer copy if code block is at least 40% of the response
+        if len(code) < 20 or len(code) < len(text) * 0.4:
+            return None
+        # Telegram copy_text has a 256-char limit per button — skip if too long
+        # Actually the limit is much higher, but cap at 4096 for sanity
+        if len(code) > 4096:
+            return None
+        return code
 
     # -- Message splitting --
 
@@ -3700,7 +3916,8 @@ class ClaudeTelegramBot:
             self.sessions.save()
         if not _retry and not routine_mode:
             if ctx:
-                ctx.stream_msg_id = self.send_message("⏳ _Processando..._")
+                ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
+                                                       reply_to_message_id=ctx.user_msg_id)
 
         # Start watchdog thread
         watchdog_thread = threading.Thread(
@@ -3889,6 +4106,14 @@ class ClaudeTelegramBot:
             final_text += f"\n\n💰 Custo: ${runner.cost_usd:.4f} (total: ${runner.total_cost_usd:.4f})"
             _track_cost(runner.cost_usd)
 
+        # Build copy-code button if response has a single dominant code block
+        copy_markup = None
+        copyable = self._extract_copyable_code(final_text)
+        if copyable:
+            copy_markup = {"inline_keyboard": [[
+                {"text": "📋 Copiar código", "copy_text": {"text": copyable}}
+            ]]}
+
         # Send final
         stream_msg = ctx.stream_msg_id if ctx else None
         if routine_mode:
@@ -3902,7 +4127,7 @@ class ClaudeTelegramBot:
                 self.delete_message(stream_msg)
                 if ctx:
                     ctx.stream_msg_id = None
-            self.send_message(final_text)
+            self.send_message(final_text, disable_notification=True)
         elif suppress_text:
             # Inline #voice: send only audio, suppress text message
             if stream_msg:
@@ -3916,7 +4141,14 @@ class ClaudeTelegramBot:
             if not sent:
                 if stream_msg:
                     self.edit_message(stream_msg, "✅")
-                self.send_message(final_text)
+                # Large responses: send as document attachment instead of chunked messages
+                if len(final_text) > self.DOCUMENT_THRESHOLD and '```' in final_text:
+                    # Extract first meaningful line as caption
+                    first_line = final_text.split('\n', 1)[0][:200].strip()
+                    caption = f"{first_line}\n\n📎 _Resposta completa no arquivo anexo_"
+                    self._send_as_document(final_text, filename="response.md", caption=caption)
+                else:
+                    self.send_message(final_text, reply_markup=copy_markup)
 
         # TTS: send voice message if enabled or forced (background, non-blocking)
         if force_tts and ctx:
@@ -3984,7 +4216,8 @@ class ClaudeTelegramBot:
                   f"{task_prompt}")
 
         # Send progress message so it can be updated on failure/cancellation
-        progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._")
+        progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._",
+                                                   disable_notification=True)
 
         saved_timeout = self.timeout_seconds
         self.timeout_seconds = 300  # 5 min inactivity for routines
@@ -4342,8 +4575,9 @@ class ClaudeTelegramBot:
         return []
 
     def _register_commands(self) -> None:
-        """Register bot commands with Telegram so they appear in autocomplete."""
-        commands = [
+        """Register bot commands with Telegram, scoped by chat type."""
+        # Full command set for private chats
+        private_commands = [
             {"command": "help", "description": "Mostrar comandos disponiveis"},
             {"command": "status", "description": "Info da sessao e processo"},
             {"command": "new", "description": "Nova sessao"},
@@ -4367,7 +4601,27 @@ class ClaudeTelegramBot:
             {"command": "voice", "description": "Ativar/desativar resposta por voz (TTS)"},
             {"command": "clear", "description": "Resetar sessao atual"},
         ]
-        self.tg_request("setMyCommands", {"commands": commands})
+        # Compact command set for groups (most-used commands only)
+        group_commands = [
+            {"command": "help", "description": "Mostrar comandos disponiveis"},
+            {"command": "status", "description": "Info da sessao e processo"},
+            {"command": "new", "description": "Nova sessao"},
+            {"command": "stop", "description": "Cancelar execucao"},
+            {"command": "model", "description": "Escolher modelo"},
+            {"command": "voice", "description": "Ativar/desativar resposta por voz (TTS)"},
+            {"command": "clear", "description": "Resetar sessao atual"},
+        ]
+        # Register scoped commands
+        self.tg_request("setMyCommands", {
+            "commands": private_commands,
+            "scope": {"type": "all_private_chats"},
+        })
+        self.tg_request("setMyCommands", {
+            "commands": group_commands,
+            "scope": {"type": "all_group_chats"},
+        })
+        # Default scope fallback (same as private)
+        self.tg_request("setMyCommands", {"commands": private_commands})
 
     def _start_control_server(self) -> None:
         bot = self
