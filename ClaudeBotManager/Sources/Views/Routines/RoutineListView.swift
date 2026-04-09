@@ -147,7 +147,31 @@ struct RoutineRow: View {
 
                     Spacer()
 
-                    if routine.isPipeline {
+                    if isRunning {
+                        Button {
+                            isStopping = true
+                            Task {
+                                try? await appState.stopRoutine(routine)
+                                isDryRunning = false
+                                isStopping = false
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "stop.circle.fill")
+                                    .font(.system(size: 10))
+                                Text("Stop")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.statusRed.opacity(isStopping ? 0.5 : 1.0))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isStopping)
+                        .help("Stop routine")
+                    } else if routine.isPipeline {
                         HStack(spacing: 4) {
                             Image(systemName: "checklist")
                                 .font(.system(size: 10))

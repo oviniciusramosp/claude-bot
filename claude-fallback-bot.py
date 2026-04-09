@@ -76,6 +76,20 @@ FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "/opt/homebrew/bin/ffmpeg")
 HEAR_PATH = os.environ.get("HEAR_PATH", "")
 HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 
+# TTS (Text-to-Speech) voice response
+TTS_VOICE = os.environ.get("TTS_VOICE", "")  # empty = auto-select by locale
+SAY_PATH = "/usr/bin/say"
+SAY_VOICE_MAP = {
+    "pt-BR": "Luciana", "en-US": "Samantha", "es-ES": "Mónica",
+    "fr-FR": "Thomas", "it-IT": "Alice", "de-DE": "Anna",
+    "ja-JP": "Kyoko", "zh-CN": "Tingting", "en-GB": "Daniel",
+}
+TTS_PROMPT_SUFFIX = (
+    "\n\nIMPORTANT: The user is listening to your response as audio. "
+    "Keep your answer SHORT and conversational — max 3-4 sentences, no code blocks, "
+    "no markdown formatting, no bullet lists. Speak naturally as if talking to someone."
+)
+
 DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
 CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
@@ -203,6 +217,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 🎤 *Áudio*
 • `/audio` — Escolher idioma de transcrição
+• `/voice [on|off]` — Ativar/desativar respostas por voz
 • Envie mensagens de voz — serão transcritas e enviadas ao Claude
 
 💬 Qualquer outra mensagem é enviada como prompt ao Claude.
@@ -1363,6 +1378,7 @@ class ThreadContext:
     last_edit_time: float = 0.0
     last_typing_time: float = 0.0
     last_snapshot_len: int = 0
+    tts_enabled: bool = False
 
     def ensure_runner(self) -> "ClaudeRunner":
         if self.runner is None:
@@ -1981,6 +1997,16 @@ class ClaudeTelegramBot:
                            self._voice_tools.get("ffmpeg", "not found"),
                            self._voice_tools.get("hear", "not found"))
 
+        # TTS synthesis tools
+        self._tts_tools = self._check_tts_tools()
+        if self._tts_tools["can_synthesize"]:
+            logger.info("TTS synthesis: enabled (say=%s, ffmpeg=%s)",
+                        self._tts_tools["say"], self._tts_tools["ffmpeg"])
+        else:
+            logger.warning("TTS synthesis: disabled (say=%s, ffmpeg=%s)",
+                           self._tts_tools.get("say", "not found"),
+                           self._tts_tools.get("ffmpeg", "not found"))
+
         logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
 
     def _load_contexts(self) -> None:
@@ -1996,6 +2022,7 @@ class ClaudeTelegramBot:
                 if cid and sname:
                     ctx = ThreadContext(chat_id=cid, thread_id=tid)
                     ctx.session_name = sname
+                    ctx.tts_enabled = entry.get("tts_enabled", False)
                     self._contexts[(cid, tid)] = ctx
             logger.info("Loaded %d contexts from disk", len(self._contexts))
         except Exception as exc:
@@ -2011,6 +2038,7 @@ class ClaudeTelegramBot:
                     "chat_id": cid,
                     "thread_id": tid,
                     "session_name": ctx.session_name,
+                    "tts_enabled": ctx.tts_enabled,
                 })
             data = {"contexts": entries}
             tmp = CONTEXTS_FILE.with_suffix(".tmp")
@@ -2153,6 +2181,48 @@ class ClaudeTelegramBot:
                 if attempt < 2:
                     time.sleep(2)
         logger.error("tg_request %s failed after 3 attempts", method)
+        return None
+
+    def _tg_upload_file(self, method: str, file_path: Path, file_field: str = "voice",
+                        data: Optional[Dict] = None) -> Optional[Dict]:
+        """Upload a file to Telegram API using multipart/form-data (stdlib only)."""
+        url = f"{self.base_url}/{method}"
+        boundary = secrets.token_hex(16)
+        body_parts: list = []
+
+        # Text fields
+        for key, value in (data or {}).items():
+            body_parts.append(
+                f"--{boundary}\r\n"
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'
+                f"{value}\r\n".encode("utf-8")
+            )
+
+        # File field
+        mime = "audio/ogg" if file_path.suffix == ".ogg" else "application/octet-stream"
+        file_data = file_path.read_bytes()
+        body_parts.append(
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="{file_field}"; filename="{file_path.name}"\r\n'
+            f"Content-Type: {mime}\r\n\r\n".encode("utf-8")
+        )
+        body_parts.append(file_data)
+        body_parts.append(f"\r\n--{boundary}--\r\n".encode("utf-8"))
+
+        payload = b"".join(body_parts)
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    return json.loads(resp.read().decode("utf-8"))
+            except Exception as exc:
+                logger.warning("_tg_upload_file %s attempt %d failed: %s", method, attempt + 1, exc)
+                if attempt < 2:
+                    time.sleep(2)
+        logger.error("_tg_upload_file %s failed after 3 attempts", method)
         return None
 
     @property
@@ -2343,6 +2413,9 @@ class ClaudeTelegramBot:
         if self.runner.running and self.runner.process:
             lines.append(f"• PID: {self.runner.process.pid}")
         lines.append(f"• Turns cumulativos: {self.sessions.cumulative_turns}")
+        ctx = self._ctx
+        voice_status = "🔊 On" if (ctx and ctx.tts_enabled) else "🔇 Off"
+        lines.append(f"• Resposta por voz: {voice_status}")
         self.send_message("\n".join(lines))
 
     def cmd_model_switch(self, model: str) -> None:
@@ -2397,6 +2470,29 @@ class ClaudeTelegramBot:
             reply_markup=markup,
         )
 
+    def cmd_voice(self, arg: str = "") -> None:
+        """Toggle TTS voice responses on/off."""
+        ctx = self._ctx
+        if not ctx:
+            self.send_message("❌ Contexto não disponível.")
+            return
+        if not self._tts_tools.get("can_synthesize"):
+            self.send_message(
+                "❌ TTS indisponível.\n"
+                "Necessário: `say` (macOS built-in) + `ffmpeg`."
+            )
+            return
+        if arg.lower() in ("on", "1", "sim"):
+            ctx.tts_enabled = True
+        elif arg.lower() in ("off", "0", "nao", "não"):
+            ctx.tts_enabled = False
+        else:
+            ctx.tts_enabled = not ctx.tts_enabled
+        self._save_contexts()
+        voice = TTS_VOICE or SAY_VOICE_MAP.get(HEAR_LOCALE, "Samantha")
+        status = "✅ ativado" if ctx.tts_enabled else "❌ desativado"
+        self.send_message(f"🔊 Resposta por voz: {status}\nVoz: `{voice}`")
+
     def cmd_new(self, name: Optional[str]) -> None:
         # Consolidate current session before creating a new one
         self._consolidate_session()
@@ -2450,12 +2546,38 @@ class ClaudeTelegramBot:
     def cmd_doctor(self) -> None:
         self._run_claude_prompt("/doctor")
 
-    def cmd_stop(self) -> None:
+    def cmd_stop(self, arg: str = "") -> None:
+        arg = arg.strip().replace(".md", "")
+
+        # /stop <name> — stop a specific routine/pipeline
+        if arg:
+            if self._stop_routine_by_name(arg):
+                self.send_message(f"🛑 `{arg}` cancelado.")
+            else:
+                self.send_message(f"ℹ️ `{arg}` não está rodando.")
+            return
+
+        # /stop (no arg) — stop current user task first
         if self.runner.running:
             self.runner.cancel()
             self.send_message("🛑 Cancelamento enviado.")
-        else:
+            return
+
+        # No user task — check running routines/pipelines
+        running = self._get_running_routines()
+        if not running:
             self.send_message("ℹ️ Nenhum processo rodando.")
+        elif len(running) == 1:
+            name, rtype = running[0]
+            self._stop_routine_by_name(name)
+            icon = "🔗" if rtype == "pipeline" else "🔁"
+            self.send_message(f"🛑 {icon} `{name}` cancelado.")
+        else:
+            buttons = []
+            for name, rtype in running:
+                icon = "🔗" if rtype == "pipeline" else "🔁"
+                buttons.append([{"text": f"🛑 {icon} {name}", "callback_data": f"stop:{name}"}])
+            self.send_message("🛑 *Qual processo parar?*", reply_markup={"inline_keyboard": buttons})
 
     def cmd_timeout(self, val: str) -> None:
         try:
@@ -2625,6 +2747,34 @@ class ClaudeTelegramBot:
         if name:
             prompt += f"\n\nO usuario quer editar: {name}"
         self._run_claude_prompt(prompt)
+
+    # -- Stop helpers --
+
+    def _get_running_routines(self) -> list:
+        """Returns list of (name, type) for all running routines and pipelines."""
+        running = []
+        with self._active_pipelines_lock:
+            for name in self._active_pipelines:
+                running.append((name, "pipeline"))
+        with self._routine_contexts_lock:
+            for name, ctx in self._routine_contexts.items():
+                if ctx.runner and ctx.runner.running:
+                    running.append((name, "routine"))
+        return running
+
+    def _stop_routine_by_name(self, name: str) -> bool:
+        """Cancel a running routine or pipeline by name. Returns True if found."""
+        with self._active_pipelines_lock:
+            executor = self._active_pipelines.get(name)
+        if executor:
+            executor.cancel()
+            return True
+        with self._routine_contexts_lock:
+            ctx = self._routine_contexts.get(name)
+        if ctx and ctx.runner and ctx.runner.running:
+            ctx.runner.cancel()
+            return True
+        return False
 
     # -- Run command (manual trigger) --
 
@@ -3059,6 +3209,135 @@ class ClaudeTelegramBot:
         else:
             self.send_message(text)
 
+    # -- Voice synthesis (TTS) --
+
+    def _check_tts_tools(self) -> Dict[str, Any]:
+        """Check availability of TTS synthesis tools (say + ffmpeg)."""
+        result: Dict[str, Any] = {"can_synthesize": False, "say": None, "ffmpeg": None}
+        if Path(SAY_PATH).is_file():
+            result["say"] = SAY_PATH
+        ffmpeg = FFMPEG_PATH if Path(FFMPEG_PATH).is_file() else shutil.which("ffmpeg")
+        if ffmpeg:
+            result["ffmpeg"] = ffmpeg
+        result["can_synthesize"] = bool(result["say"] and result["ffmpeg"])
+        return result
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove Markdown formatting to produce clean text for TTS."""
+        # Remove code blocks (triple backticks and content)
+        text = re.sub(r"```[\s\S]*?```", "", text)
+        # Remove inline code
+        text = re.sub(r"`([^`]*)`", r"\1", text)
+        # Remove bold/italic markers
+        text = re.sub(r"\*{1,3}(.*?)\*{1,3}", r"\1", text)
+        text = re.sub(r"_{1,3}(.*?)_{1,3}", r"\1", text)
+        # Remove links [text](url) keeping text
+        text = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", text)
+        # Remove bullet/list markers
+        text = re.sub(r"^[\s]*[-*•]\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^[\s]*\d+\.\s+", "", text, flags=re.MULTILINE)
+        # Remove headings
+        text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+        # Remove cost line (appended by bot)
+        text = re.sub(r"\n*💰.*$", "", text)
+        # Collapse whitespace
+        text = re.sub(r"\n{2,}", "\n", text).strip()
+        return text
+
+    def _tts_generate(self, text: str) -> Optional[Path]:
+        """Convert text to OGG Opus audio file. Returns path or None on failure."""
+        if not self._tts_tools.get("can_synthesize"):
+            return None
+
+        clean = self._strip_markdown(text)
+        if len(clean) < 10:
+            return None
+
+        ts = int(time.time() * 1000)
+        aiff_path = TEMP_AUDIO_DIR / f"tts_{ts}.aiff"
+        ogg_path = TEMP_AUDIO_DIR / f"tts_{ts}.ogg"
+        TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Determine voice
+        voice = TTS_VOICE or SAY_VOICE_MAP.get(HEAR_LOCALE, "Samantha")
+
+        try:
+            # Generate AIFF via macOS say
+            result = subprocess.run(
+                [SAY_PATH, "-v", voice, "-o", str(aiff_path), clean],
+                capture_output=True, timeout=60,
+            )
+            if result.returncode != 0 or not aiff_path.exists():
+                logger.error("say failed: %s", result.stderr.decode(errors="replace"))
+                return None
+
+            # Convert AIFF to OGG Opus via ffmpeg
+            ffmpeg = self._tts_tools["ffmpeg"]
+            result = subprocess.run(
+                [ffmpeg, "-y", "-i", str(aiff_path), "-c:a", "libopus", "-b:a", "48k", str(ogg_path)],
+                capture_output=True, timeout=30,
+            )
+            if result.returncode != 0 or not ogg_path.exists():
+                logger.error("ffmpeg TTS conversion failed: %s", result.stderr.decode(errors="replace"))
+                return None
+
+            return ogg_path
+        except Exception as exc:
+            logger.error("TTS generation failed: %s", exc)
+            return None
+        finally:
+            # Cleanup intermediate AIFF
+            try:
+                if aiff_path.exists():
+                    aiff_path.unlink()
+            except OSError:
+                pass
+
+    def _send_voice_message(self, ogg_path: Path, chat_id: str,
+                            thread_id: Optional[int] = None) -> Optional[int]:
+        """Upload OGG file as Telegram voice message."""
+        data: Dict[str, Any] = {"chat_id": chat_id}
+        if thread_id:
+            data["message_thread_id"] = thread_id
+        resp = self._tg_upload_file("sendVoice", ogg_path, file_field="voice", data=data)
+        if resp and resp.get("ok"):
+            return resp.get("result", {}).get("message_id")
+        return None
+
+    def _maybe_send_tts(self, text: str, chat_id: str, thread_id: Optional[int] = None) -> None:
+        """Dispatch TTS generation and sending in a background thread."""
+        if not self._tts_tools.get("can_synthesize"):
+            return
+        t = threading.Thread(
+            target=self._tts_worker, args=(text, chat_id, thread_id),
+            daemon=True, name="tts-worker",
+        )
+        t.start()
+
+    def _tts_worker(self, text: str, chat_id: str, thread_id: Optional[int] = None) -> None:
+        """Background: generate TTS audio and send as voice message."""
+        try:
+            ogg_path = self._tts_generate(text)
+            if not ogg_path:
+                return
+            # Show "sending audio" action
+            action_data: Dict[str, Any] = {"chat_id": chat_id, "action": "upload_voice"}
+            if thread_id:
+                action_data["message_thread_id"] = thread_id
+            self.tg_request("sendChatAction", action_data)
+            # Upload
+            self._send_voice_message(ogg_path, chat_id, thread_id)
+        except Exception as exc:
+            logger.error("TTS worker failed: %s", exc)
+        finally:
+            # Cleanup OGG
+            try:
+                if ogg_path and ogg_path.exists():
+                    ogg_path.unlink()
+            except (OSError, UnboundLocalError):
+                pass
+
     # -- Claude execution --
 
     def _get_session(self) -> Session:
@@ -3112,6 +3391,11 @@ class ClaudeTelegramBot:
             ctx.last_typing_time = time.time()
             ctx.last_snapshot_len = 0
 
+        # Append TTS instruction when voice mode is active
+        effective_sp = system_prompt
+        if ctx and ctx.tts_enabled and not routine_mode:
+            effective_sp = (effective_sp + TTS_PROMPT_SUFFIX) if effective_sp else TTS_PROMPT_SUFFIX
+
         # Start runner thread
         runner_thread = threading.Thread(
             target=runner.run,
@@ -3121,7 +3405,7 @@ class ClaudeTelegramBot:
                 "session_id": session.session_id,
                 "workspace": session.workspace,
                 "effort": self.effort,
-                "system_prompt": system_prompt,
+                "system_prompt": effective_sp,
             },
             daemon=True,
         )
@@ -3317,6 +3601,10 @@ class ClaudeTelegramBot:
                     self.edit_message(stream_msg, "✅")
                 self.send_message(final_text)
 
+        # TTS: send voice message if enabled (background, non-blocking)
+        if not routine_mode and ctx and ctx.tts_enabled:
+            self._maybe_send_tts(final_text, ctx.chat_id, ctx.thread_id)
+
         if ctx:
             ctx.stream_msg_id = None
             if ctx.user_msg_id:
@@ -3442,7 +3730,7 @@ class ClaudeTelegramBot:
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),
-                "/stop": lambda: self.cmd_stop(),
+                "/stop": lambda: self.cmd_stop(arg),
                 "/timeout": lambda: self.cmd_timeout(arg) if arg else self.send_message(f"ℹ️ Timeout atual: {self.timeout_seconds}s"),
                 "/workspace": lambda: self.cmd_workspace(arg) if arg else self.send_message("❌ Use: `/workspace <path>`"),
                 "/effort": lambda: self.cmd_effort(arg) if arg else self.send_message(f"ℹ️ Effort atual: {self.effort or 'padrão'}"),
@@ -3454,6 +3742,7 @@ class ClaudeTelegramBot:
                 "/agent": lambda: self.cmd_agent(arg),
                 "/skill": lambda: self.cmd_skill(arg),
                 "/audio": lambda: self.cmd_audio(),
+                "/voice": lambda: self.cmd_voice(arg),
             }
 
             fn = handler_map.get(cmd)
@@ -3554,6 +3843,13 @@ class ClaudeTelegramBot:
             name = data.split(":", 1)[1]
             self.answer_callback(cb_id, f"Executando {name}...")
             self.cmd_run(name)
+        elif data.startswith("stop:"):
+            name = data.split(":", 1)[1]
+            self.answer_callback(cb_id, f"Parando {name}...")
+            if self._stop_routine_by_name(name):
+                self.send_message(f"🛑 `{name}` cancelado.")
+            else:
+                self.send_message(f"ℹ️ `{name}` não está mais rodando.")
         elif data.startswith("skill:"):
             action = data.split(":", 1)[1]
             self.answer_callback(cb_id)
@@ -3717,6 +4013,7 @@ class ClaudeTelegramBot:
             {"command": "workspace", "description": "Alterar diretorio de trabalho"},
             {"command": "effort", "description": "Nivel de esforco (low/medium/high)"},
             {"command": "audio", "description": "Idioma de transcricao de audio"},
+            {"command": "voice", "description": "Ativar/desativar resposta por voz (TTS)"},
             {"command": "clear", "description": "Resetar sessao atual"},
         ]
         self.tg_request("setMyCommands", {"commands": commands})
