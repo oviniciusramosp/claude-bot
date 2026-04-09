@@ -15,3 +15,5 @@ Specialized agents with personality, instructions, and their own journal.
 
 - [[parmeirense]] — Palmeiras expert covering news, APIs, and "Porco" routines 🐷
 - [[crypto-bro]] — Bitcoin and crypto expert for beginner lessons, market analysis, and the Crypto Bros app 💸
+
+- [[crypto-bro/crypto-bro|Crypto Bro]] — Bitcoin and crypto specialist — beginner lessons, market analysis, macroeconomics, and technical analysis. Responsible for the Crypto Bros app.

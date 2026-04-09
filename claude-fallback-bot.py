@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.12.1"  # feat: voice/text response picker during audio transcription
+BOT_VERSION = "2.13.0"  # feat: standardized session name pattern YYYY-MM-DD-HH-MM-{agent}-{n}
 
 import http.server
 import json
@@ -1025,6 +1025,20 @@ def get_weekly_cost() -> dict:
 # ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
+
+
+def _make_session_name(agent: Optional[str], sessions: dict) -> str:
+    """Generate a session name: YYYY-MM-DD-HH-MM-{agent}-{n}."""
+    now = time.strftime("%Y-%m-%d-%H-%M")
+    agent_label = agent if agent else "main"
+    prefix = f"{now}-{agent_label}-"
+    max_n = 0
+    for name in sessions:
+        if name.startswith(prefix):
+            suffix = name[len(prefix):]
+            if suffix.isdigit():
+                max_n = max(max_n, int(suffix))
+    return f"{prefix}{max_n + 1}"
 
 
 @dataclass
@@ -2238,7 +2252,7 @@ class ClaudeTelegramBot:
             if key not in self._contexts:
                 ctx = ThreadContext(chat_id=chat_id, thread_id=thread_id)
                 # Auto-create session for this context
-                name = f"t{thread_id}" if thread_id else time.strftime("%d%b-%H%M").lower()
+                name = _make_session_name(None, self.sessions.sessions)
                 if name not in self.sessions.sessions:
                     self.sessions.create(name)
                 ctx.session_name = name
@@ -2986,7 +3000,9 @@ class ClaudeTelegramBot:
         # Consolidate current session before creating a new one
         self._consolidate_session()
         if not name:
-            name = time.strftime("%d%b-%H%M").lower()
+            current = self._get_session()
+            agent = current.agent if current else None
+            name = _make_session_name(agent, self.sessions.sessions)
         s = self.sessions.create(name)
         self.send_message(f"✅ Sessão `{s.name}` criada e ativada.")
 

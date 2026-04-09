@@ -113,6 +113,7 @@ struct RoutineFormSheet: View {
             Toggle("", isOn: $enabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
+                .tint(.green)
                 .frame(width: 54)
         }
         .padding(.horizontal, 20)

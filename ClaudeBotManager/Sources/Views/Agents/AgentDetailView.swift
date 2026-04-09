@@ -7,252 +7,330 @@ struct AgentDetailView: View {
     @State private var agent: Agent
     @State private var isSaving = false
     @State private var showDeleteConfirm = false
-    @State private var selectedTab = 0
-    @State private var newChatId = ""
-    @State private var newThreadId = ""
 
     init(agent: Agent) {
         _agent = State(initialValue: agent)
     }
 
-    var body: some View {
-        NavigationStack {
-            TabView(selection: $selectedTab) {
-                AgentInfoTab(agent: $agent)
-                    .tabItem { Label("Info", systemImage: "person.circle") }
-                    .tag(0)
+    /// Fallback chat ID from vault/.env TELEGRAM_GROUP_ID
+    private var defaultChatId: String {
+        appState.vaultEnvEntries.first(where: { $0.id == "TELEGRAM_GROUP_ID" })?.value ?? ""
+    }
 
-                AgentTelegramTab(agent: $agent, newChatId: $newChatId, newThreadId: $newThreadId)
-                    .tabItem { Label("Telegram", systemImage: "paperplane.fill") }
-                    .tag(1)
-            }
-            .navigationTitle(agent.name)
-            .navigationSubtitle(agent.id)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        isSaving = true
-                        Task {
-                            try? await appState.saveAgent(agent)
-                            isSaving = false
-                            dismiss()
-                        }
-                    }
-                    .disabled(isSaving)
-                }
-                ToolbarItem(placement: .destructiveAction) {
-                    Button(role: .destructive) {
-                        showDeleteConfirm = true
-                    } label: {
-                        Label("Move to Trash", systemImage: "trash")
-                    }
-                    .foregroundStyle(Color.statusRed)
+    var body: some View {
+        VStack(spacing: 0) {
+            configScrollView
+            Divider()
+            footerBar
+        }
+        .frame(minWidth: 720, minHeight: 560)
+        .background(Color(.windowBackgroundColor))
+        .confirmationDialog("Move Agent to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
+            Button("Move to Trash", role: .destructive) {
+                Task {
+                    try? await appState.deleteAgent(id: agent.id)
+                    dismiss()
                 }
             }
-            .confirmationDialog("Move Agent to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
-                Button("Move to Trash", role: .destructive) {
-                    Task {
-                        try? await appState.deleteAgent(id: agent.id)
-                        dismiss()
-                    }
-                }
-            } message: {
-                Text("The agent and all its files will be moved to Trash. You can restore from Finder.")
+        } message: {
+            Text("The agent and all its files will be moved to Trash. You can restore from Finder.")
+        }
+        .onAppear {
+            // Pre-fill chat ID from vault/.env when empty
+            if agent.chatId.isEmpty && !defaultChatId.isEmpty {
+                agent.chatId = defaultChatId
             }
         }
-        .frame(minWidth: 600, minHeight: 500)
     }
-}
 
-// MARK: - Info Tab
+    // MARK: - Config Scroll View
 
-struct AgentInfoTab: View {
-    @Binding var agent: Agent
-
-    var body: some View {
+    private var configScrollView: some View {
         ScrollView {
-            VStack(spacing: 16) {
-                identityCard
-                instructionsCard
-            }
-            .padding(20)
-        }
-    }
-
-    private var identityCard: some View {
-        GlassCard {
-            VStack(spacing: 14) {
-                HStack {
-                    Text(agent.icon)
-                        .font(.system(size: 50))
-                    VStack(alignment: .leading, spacing: 4) {
-                        TextField("Name", text: $agent.name)
-                            .font(.title2.bold())
-                            .textFieldStyle(.plain)
-                        TextField("Description", text: $agent.description)
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .textFieldStyle(.plain)
-                    }
-                    Spacer()
-                }
-
-                HStack {
-                    Text("Icon (emoji)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    TextField("Emoji", text: $agent.icon)
-                        .frame(width: 60)
-                        .textFieldStyle(.roundedBorder)
-                        .multilineTextAlignment(.center)
-                }
-
-                HStack {
-                    Text("Model")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Picker("", selection: $agent.model) {
-                        ForEach(Agent.modelOptions, id: \.self) { m in
-                            Text(m.capitalized).tag(m)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: 200)
-                }
-
-                TextField("Personality", text: $agent.personality, prompt: Text("Brief personality description"))
-                    .textFieldStyle(.roundedBorder)
-                    .font(.caption)
-
-                Toggle("Default Agent", isOn: $agent.isDefault)
-                    .font(.caption)
-            }
-        }
-    }
-
-    private var instructionsCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Instructions (CLAUDE.md)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $agent.instructions)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 200)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.primary.opacity(0.03))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
-    }
-}
-
-// MARK: - Telegram Tab
-
-struct AgentTelegramTab: View {
-    @Binding var agent: Agent
-    @Binding var newChatId: String
-    @Binding var newThreadId: String
-
-    var body: some View {
-        ScrollView {
-            VStack(spacing: 16) {
-                existingMappingsCard
-                addMappingCard
-            }
-            .padding(20)
-        }
-    }
-
-    private var existingMappingsCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Telegram Topic Mappings")
-                    .font(.headline)
-                Text("This agent responds to messages in the following chats/topics. Mappings created via Telegram are shown automatically.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Divider()
-
-                if agent.topicMappings.isEmpty {
-                    HStack {
-                        Image(systemName: "info.circle")
-                            .foregroundStyle(.secondary)
-                        Text("No Telegram topics linked yet")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 4)
-                } else {
-                    ForEach(agent.topicMappings) { mapping in
-                        MappingRow(mapping: mapping)
-                    }
+            VStack(spacing: 0) {
+                identitySection
+                Divider().padding(.horizontal, Spacing.xl)
+                configSection
+                Divider().padding(.horizontal, Spacing.xl)
+                personalitySection
+                Divider().padding(.horizontal, Spacing.xl)
+                instructionsSection
+                Divider().padding(.horizontal, Spacing.xl)
+                specializationsSection
+                if !agent.otherInstructions.isEmpty {
+                    Divider().padding(.horizontal, Spacing.xl)
+                    otherSection
                 }
             }
         }
     }
 
-    private var addMappingCard: some View {
-        GlassCard {
+    // MARK: - Identity Section
+
+    private var identitySection: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // Emoji button — click to open system emoji picker
+            Button {
+                NSApp.orderFrontCharacterPalette(nil)
+            } label: {
+                Text(agent.icon)
+                    .font(.system(size: 40))
+            }
+            .buttonStyle(.plain)
+            .frame(width: 44)
+
             VStack(alignment: .leading, spacing: 10) {
-                Text("Add Manual Mapping")
-                    .font(.caption.bold())
-                    .foregroundStyle(.secondary)
-
-                HStack {
-                    TextField("Chat ID", text: $newChatId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption)
-                    TextField("Thread ID (optional)", text: $newThreadId)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption)
-                    Button("Add") {
-                        let mapping = Agent.TopicMapping(
-                            chatId: newChatId,
-                            threadId: newThreadId.isEmpty ? nil : newThreadId,
-                            sessionName: "agent-\(agent.id)"
-                        )
-                        agent.topicMappings.append(mapping)
-                        newChatId = ""
-                        newThreadId = ""
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(newChatId.isEmpty)
-                    .font(.caption)
+                VStack(alignment: .leading, spacing: 0) {
+                    TextField("Name", text: $agent.name)
+                        .font(.system(size: 17, weight: .bold))
+                        .textFieldStyle(.plain)
+                    Text("Agents/\(agent.id)/")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(white: 0.45))
                 }
+                TextField("Description", text: $agent.description,
+                          prompt: Text("What this agent does").foregroundStyle(.quaternary))
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color(white: 0.45))
+                    .textFieldStyle(.plain)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: $agent.isDefault)
+                .labelsHidden()
+                .toggleStyle(.switch)
+        }
+        .padding(.horizontal, 20)
+        .padding(.trailing, 12)
+        .padding(.vertical, 16)
+    }
+
+    // MARK: - Config Section (Model + Telegram)
+
+    private func modelDisplayName(_ id: String) -> String {
+        switch id {
+        case "opus":  return "Opus 4.6"
+        case "haiku": return "Claude Haiku"
+        default:      return "Claude Sonnet"
+        }
+    }
+
+    private func modelDescription(_ id: String) -> String {
+        switch id {
+        case "opus":  return "Most capable for ambitious work"
+        case "haiku": return "Fastest and most compact"
+        default:      return "Balanced performance and speed"
+        }
+    }
+
+    private var configSection: some View {
+        detailFormSection(icon: "gear", title: "Configuration") {
+            HStack(alignment: .top, spacing: 40) {
+                // Model
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    menuPicker(label: modelDisplayName(agent.model), selection: $agent.model, options: [
+                        ("sonnet", modelDisplayName("sonnet")),
+                        ("opus", modelDisplayName("opus")),
+                        ("haiku", modelDisplayName("haiku")),
+                    ])
+                    Text(modelDescription(agent.model))
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(white: 0.45))
+                }
+                .frame(maxWidth: .infinity)
+
+                // Telegram
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Telegram Topic").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    HStack(spacing: 8) {
+                        TextField("Chat ID", text: $agent.chatId)
+                            .font(.system(size: 13, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 8)
+                            .frame(height: 24)
+                            .background(Color.black.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                        TextField("Thread", text: $agent.threadId)
+                            .font(.system(size: 13, design: .monospaced))
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, 8)
+                            .frame(width: 80, height: 24)
+                            .background(Color.black.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                    Text("Chat and thread where this agent responds")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(white: 0.45))
+                }
+                .frame(maxWidth: .infinity)
             }
         }
     }
-}
 
-struct MappingRow: View {
-    var mapping: Agent.TopicMapping
+    // MARK: - Personality Section
 
-    var body: some View {
-        HStack {
-            Image(systemName: "paperplane.fill")
-                .foregroundStyle(Color.statusBlue)
-                .font(.caption)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Chat \(mapping.chatId)")
-                    .font(.caption.monospacedDigit())
-                if let tid = mapping.threadId {
-                    Text("Topic \(tid)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+    private var personalitySection: some View {
+        detailFormSection(icon: "person.text.rectangle", title: "Personality and Tone") {
+            TextEditor(text: $agent.personalityAndTone)
+                .font(.system(size: 13))
+                .frame(minHeight: 80)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+    }
+
+    // MARK: - Instructions Section
+
+    private var instructionsSection: some View {
+        detailFormSection(icon: "text.alignleft", title: "Instructions") {
+            TextEditor(text: $agent.instructions)
+                .font(.system(size: 13))
+                .frame(minHeight: 120)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+    }
+
+    // MARK: - Specializations Section
+
+    private var specializationsSection: some View {
+        detailFormSection(icon: "star", title: "Specializations") {
+            TextEditor(text: $agent.specializations)
+                .font(.system(size: 13))
+                .frame(minHeight: 80)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+    }
+
+    // MARK: - Other Section
+
+    private var otherSection: some View {
+        detailFormSection(icon: "ellipsis.rectangle", title: "Other") {
+            TextEditor(text: $agent.otherInstructions)
+                .font(.system(size: 13))
+                .frame(minHeight: 80)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+    }
+
+    // MARK: - Footer Bar
+
+    private var footerBar: some View {
+        HStack(spacing: Spacing.sm) {
+            Button(role: .destructive) {
+                showDeleteConfirm = true
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+            .buttonStyle(.bordered)
+            .tint(Color.statusRed)
+
+            Spacer()
+
+            Button("Cancel") { dismiss() }
+                .buttonStyle(.bordered)
+
+            Button(isSaving ? "Saving…" : "Save") {
+                isSaving = true
+                // Sync personality frontmatter from the structured section (first line)
+                let firstLine = agent.personalityAndTone.components(separatedBy: "\n").first ?? ""
+                agent.personality = String(firstLine.prefix(200))
+                Task {
+                    try? await appState.saveAgent(agent)
+                    isSaving = false
+                    dismiss()
                 }
             }
-            Spacer()
-            Text(mapping.sessionName)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            .buttonStyle(.borderedProminent)
+            .disabled(isSaving)
         }
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.md)
+    }
+
+    // MARK: - Helpers
+
+    @ViewBuilder
+    private func detailFormSection<Content: View>(icon: String, title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 17))
+                .foregroundStyle(Color(white: 0.75))
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundStyle(Color.primary.opacity(0.5))
+
+                content()
+            }
+        }
+        .padding(.leading, 20)
+        .padding(.trailing, 32)
+        .padding(.vertical, 16)
+    }
+
+    private func menuPicker<V: Hashable>(label: String, selection: Binding<V>, options: [(V, String)]) -> some View {
+        Menu {
+            ForEach(options, id: \.0) { value, text in
+                Button {
+                    selection.wrappedValue = value
+                } label: {
+                    HStack {
+                        Text(text)
+                        if selection.wrappedValue == value {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(.primary)
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity)
+            .frame(height: 24)
+            .background(Color.black.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -270,69 +348,93 @@ struct MainAgentDetailView: View {
     }
 
     var body: some View {
-        NavigationStack {
+        VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 16) {
-                    identityCard
-                    instructionsCard
-                }
-                .padding(20)
-            }
-            .navigationTitle("Main (Default)")
-            .navigationSubtitle("Instruções do bot quando nenhum agente está ativo")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        isSaving = true
-                        Task {
-                            try? await appState.saveMainAgent(agent)
-                            isSaving = false
-                            dismiss()
+                VStack(spacing: 0) {
+                    // Identity
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(agent.icon)
+                            .font(.system(size: 40))
+                            .frame(width: 44)
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: Spacing.sm) {
+                                Text(agent.name)
+                                    .font(.system(size: 17, weight: .bold))
+                                Image(systemName: "pin.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color.statusBlue)
+                            }
+                            Text(agent.description)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color(white: 0.45))
+                        }
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.trailing, 12)
+                    .padding(.vertical, 16)
+
+                    Divider().padding(.horizontal, Spacing.xl)
+
+                    // Instructions
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "text.alignleft")
+                            .font(.system(size: 17))
+                            .foregroundStyle(Color(white: 0.75))
+                            .frame(width: 22)
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Instructions")
+                                .font(.system(size: 15, weight: .bold))
+                                .tracking(-0.6)
+                                .foregroundStyle(Color.primary.opacity(0.5))
+
+                            Text("~/claude-bot/CLAUDE.md")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(white: 0.45))
+
+                            TextEditor(text: $agent.otherInstructions)
+                                .font(.system(size: 13))
+                                .frame(minHeight: 360)
+                                .padding(8)
+                                .scrollContentBackground(.hidden)
+                                .background(Color.white)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                                )
                         }
                     }
-                    .disabled(isSaving)
+                    .padding(.leading, 20)
+                    .padding(.trailing, 32)
+                    .padding(.vertical, 16)
                 }
             }
-        }
-        .frame(minWidth: 640, minHeight: 540)
-    }
 
-    private var identityCard: some View {
-        GlassCard {
-            HStack(spacing: 14) {
-                Text(agent.icon)
-                    .font(.system(size: 44))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(agent.name)
-                        .font(.title2.bold())
-                    Text(agent.description)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
+            Divider()
+
+            HStack(spacing: Spacing.sm) {
                 Spacer()
-                Image(systemName: "pin.fill")
-                    .foregroundStyle(Color.statusBlue)
-                    .font(.callout)
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(.bordered)
+                Button(isSaving ? "Saving…" : "Save") {
+                    isSaving = true
+                    Task {
+                        try? await appState.saveMainAgent(agent)
+                        isSaving = false
+                        dismiss()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSaving)
             }
+            .padding(.horizontal, Spacing.xl)
+            .padding(.vertical, Spacing.md)
         }
-    }
-
-    private var instructionsCard: some View {
-        GlassCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Label("~/claude-bot/CLAUDE.md", systemImage: "doc.text")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                TextEditor(text: $agent.instructions)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(minHeight: 360)
-                    .scrollContentBackground(.hidden)
-                    .background(Color.primary.opacity(0.03))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-        }
+        .frame(minWidth: 720, minHeight: 560)
+        .background(Color(.windowBackgroundColor))
     }
 }

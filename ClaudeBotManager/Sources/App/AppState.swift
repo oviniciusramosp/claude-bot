@@ -10,9 +10,9 @@ final class AppState: ObservableObject {
 
     // Data
     @Published var mainAgent: Agent = Agent(id: "main", name: "Main", icon: "🤖",
-        description: "Bot padrão — nenhum agente específico ativo",
+        description: "Default bot — no specific agent active",
         personality: "", model: "sonnet", tags: [], isDefault: true,
-        source: nil, sourceId: nil, instructions: "", created: "", updated: "")
+        source: nil, sourceId: nil, created: "", updated: "")
     @Published var agents: [Agent] = []
     @Published var routines: [Routine] = []
     @Published var skills: [Skill] = []
@@ -126,7 +126,8 @@ final class AppState: ObservableObject {
 
     func loadMainAgent() async {
         guard let vs = vaultService else { return }
-        mainAgent = await vs.loadMainAgent()
+        let loaded = await vs.loadMainAgent()
+        mainAgent = loaded
     }
 
     func saveMainAgent(_ agent: Agent) async throws {

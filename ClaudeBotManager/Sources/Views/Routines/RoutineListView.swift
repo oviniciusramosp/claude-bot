@@ -184,35 +184,20 @@ struct RoutineRow: View {
                                 isDryRunning = false
                             }
                         } label: {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 9))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Run Now")
-                    }
-
-                    if routine.isPipeline {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
-                        } label: {
                             HStack(spacing: 4) {
-                                Image(systemName: "checklist")
+                                Image(systemName: "play.fill")
                                     .font(.system(size: 10))
-                                Text("\(routine.stepCount) steps")
-                                    .font(.system(size: 10))
-                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                                    .font(.system(size: 8, weight: .semibold))
+                                Text("Run")
+                                    .font(.system(size: 10, weight: .medium))
                             }
-                            .foregroundStyle(Color.statusBlue)
+                            .foregroundStyle(.white)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Color.statusBlue.opacity(0.15))
+                            .background(Color.statusGreen)
                             .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
-                    } else {
-                        ModelBadge(model: routine.model)
+                        .help("Run Now")
                     }
 
                     Button { onTap() } label: {
@@ -226,6 +211,7 @@ struct RoutineRow: View {
                     Toggle("", isOn: $isEnabled)
                         .labelsHidden()
                         .toggleStyle(.switch)
+                        .tint(.green)
                         .onChange(of: isEnabled) { _, newValue in
                             var updated = routine
                             updated.enabled = newValue
@@ -233,7 +219,7 @@ struct RoutineRow: View {
                         }
                 }
 
-                // Row 2: Schedule + Agent + Last execution info
+                // Row 2: Schedule + Last execution info
                 HStack(spacing: Spacing.sm) {
                     Text(routine.schedule.times.joined(separator: ", "))
                         .font(.system(size: 10, design: .monospaced))
@@ -242,12 +228,6 @@ struct RoutineRow: View {
                     Text("·").foregroundStyle(.quaternary)
 
                     Text(humanReadableDays(routine.schedule.days))
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
-
-                    Text("·").foregroundStyle(.quaternary)
-
-                    Text("\(agentDisplay.icon) \(agentDisplay.name)")
                         .font(.system(size: 10))
                         .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
 
@@ -272,6 +252,35 @@ struct RoutineRow: View {
                             .font(.system(size: 10))
                             .foregroundStyle(.tertiary)
                     }
+                }
+
+                // Row 3: Model/Steps badge + Agent
+                HStack(spacing: Spacing.sm) {
+                    if routine.isPipeline {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 10))
+                                Text("\(routine.stepCount) steps")
+                                    .font(.system(size: 10))
+                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                            }
+                            .foregroundStyle(Color.statusBlue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.statusBlue.opacity(0.15))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        ModelBadge(model: routine.model)
+                    }
+                    Text("\(agentDisplay.icon) \(agentDisplay.name)")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
                 }
 
                 // Error detail (if last execution failed)

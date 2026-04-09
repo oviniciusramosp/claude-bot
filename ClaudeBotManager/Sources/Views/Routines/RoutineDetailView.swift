@@ -116,6 +116,7 @@ struct RoutineDetailView: View {
             Toggle("", isOn: $routine.enabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
+                .tint(.green)
         }
         .padding(.horizontal, 20)
         .padding(.trailing, 12)

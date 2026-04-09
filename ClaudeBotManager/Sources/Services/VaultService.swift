@@ -29,7 +29,8 @@ actor VaultService {
 
             let content = try String(contentsOf: agentMdURL, encoding: .utf8)
             let (fm_data, _) = FrontmatterParser.parse(content)
-            let instructions = (try? String(contentsOf: claudeMdURL, encoding: .utf8)) ?? ""
+            let rawClaude = (try? String(contentsOf: claudeMdURL, encoding: .utf8)) ?? ""
+            let sections = Agent.parseCLAUDEmd(rawClaude)
 
             let agent = Agent(
                 id: entry,
@@ -42,9 +43,14 @@ actor VaultService {
                 isDefault: fm_data["default"] as? Bool ?? false,
                 source: fm_data["source"] as? String,
                 sourceId: fm_data["source_id"] as? String,
-                instructions: instructions,
                 created: fm_data["created"] as? String ?? today(),
-                updated: fm_data["updated"] as? String ?? today()
+                updated: fm_data["updated"] as? String ?? today(),
+                personalityAndTone: sections.personality,
+                instructions: sections.instructions,
+                specializations: sections.specializations,
+                otherInstructions: sections.other,
+                chatId: fm_data["chat_id"].map { "\($0)" } ?? "",
+                threadId: fm_data["thread_id"].map { "\($0)" } ?? ""
             )
             agents.append(agent)
         }
@@ -74,14 +80,16 @@ actor VaultService {
         ]
         if let src = agent.source { frontmatter["source"] = src }
         if let sid = agent.sourceId { frontmatter["source_id"] = sid }
+        if !agent.chatId.isEmpty { frontmatter["chat_id"] = agent.chatId }
+        if !agent.threadId.isEmpty { frontmatter["thread_id"] = Int(agent.threadId) ?? agent.threadId as Any }
 
         let orderedKeys = ["title", "description", "type", "created", "updated", "tags",
-                           "name", "personality", "model", "icon", "default"]
+                           "name", "personality", "model", "icon", "default", "chat_id", "thread_id"]
         let agentMdContent = FrontmatterParser.serialize(frontmatter, orderedKeys: orderedKeys, body: "\n[[Agents]]\n")
         try agentMdContent.write(to: agentURL.appending(component: "agent.md"), atomically: true, encoding: .utf8)
 
-        // CLAUDE.md — no frontmatter
-        try agent.instructions.write(to: agentURL.appending(component: "CLAUDE.md"), atomically: true, encoding: .utf8)
+        // CLAUDE.md — structured sections, no frontmatter
+        try agent.toCLAUDEmd().write(to: agentURL.appending(component: "CLAUDE.md"), atomically: true, encoding: .utf8)
 
         // {id}.md hub
         let hubContent = "[[\(agent.id)/CLAUDE|CLAUDE]]\n[[agent]]\n[[\(agent.id)/Journal|Journal]]\n"
@@ -454,26 +462,26 @@ actor VaultService {
     }
 
     func loadMainAgent() -> Agent {
-        let instructions = (try? String(contentsOf: projectCLAUDEURL, encoding: .utf8)) ?? ""
+        let raw = (try? String(contentsOf: projectCLAUDEURL, encoding: .utf8)) ?? ""
         return Agent(
             id: "main",
             name: "Main",
             icon: "🤖",
-            description: "Bot padrão — nenhum agente específico ativo",
+            description: "Default bot — no specific agent active",
             personality: "",
             model: "sonnet",
             tags: [],
             isDefault: true,
             source: nil,
             sourceId: nil,
-            instructions: instructions,
             created: "",
-            updated: ""
+            updated: "",
+            otherInstructions: raw  // Main uses raw CLAUDE.md, not structured sections
         )
     }
 
-    func saveMainAgent(instructions: String) throws {
-        try instructions.write(to: projectCLAUDEURL, atomically: true, encoding: .utf8)
+    func saveMainAgent(rawContent: String) throws {
+        try rawContent.write(to: projectCLAUDEURL, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Helpers

@@ -251,11 +251,11 @@ struct SettingsView: View {
                     .tint(.orange)
                 }
                 Spacer()
-                Button("Save") {
+                Button("Apply") {
                     isVaultSaving = true
                     do {
                         try appState.saveVaultEnv(vaultEntries)
-                        vaultSavedMessage = "Saved"
+                        vaultSavedMessage = "Applied"
                         vaultNeedsRestart = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { vaultSavedMessage = "" }
                     } catch {

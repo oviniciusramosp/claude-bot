@@ -53,6 +53,7 @@ struct LogViewerView: View {
                 Toggle("Auto-scroll", isOn: $autoScroll)
                     .font(.caption)
                     .toggleStyle(.switch)
+                    .tint(.green)
                     .controlSize(.mini)
             }
             .padding(.horizontal, 16)

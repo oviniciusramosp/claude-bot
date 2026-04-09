@@ -125,14 +125,21 @@ struct AgentCard: View {
                         .lineLimit(2)
                 }
 
-                if !agent.topicMappings.isEmpty {
-                    HStack(spacing: 4) {
+                HStack(spacing: 4) {
+                    if !agent.chatId.isEmpty {
                         Image(systemName: "paperplane.fill")
                             .font(.system(size: 10))
                             .foregroundStyle(Color.statusBlue)
-                        Text("\(agent.topicMappings.count) topic\(agent.topicMappings.count == 1 ? "" : "s")")
+                        Text(agent.threadId.isEmpty ? "Chat \(agent.chatId)" : "Topic \(agent.threadId)")
                             .font(.system(size: 10))
                             .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+                    } else {
+                        Image(systemName: "paperplane")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
+                        Text("No topic linked")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
                     }
                 }
             }

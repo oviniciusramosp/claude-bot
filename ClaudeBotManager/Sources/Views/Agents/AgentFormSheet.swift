@@ -118,6 +118,8 @@ struct AgentFormSheet: View {
                             let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
                             return f.string(from: Date())
                         }()
+                        // Parse raw CLAUDE.md into structured sections
+                        let sections = Agent.parseCLAUDEmd(instructions)
                         let agent = Agent(
                             id: idPreview.isEmpty ? toKebabCase(name) : idPreview,
                             name: name,
@@ -129,9 +131,12 @@ struct AgentFormSheet: View {
                             isDefault: false,
                             source: nil,
                             sourceId: nil,
-                            instructions: instructions,
                             created: today,
-                            updated: today
+                            updated: today,
+                            personalityAndTone: sections.personality.isEmpty ? personality : sections.personality,
+                            instructions: sections.instructions,
+                            specializations: sections.specializations,
+                            otherInstructions: sections.other
                         )
                         Task {
                             try? await appState.saveAgent(agent)
