@@ -96,6 +96,8 @@ CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 SESSION_MAX_AGE_DAYS = 60
+AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
+AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
@@ -2521,6 +2523,35 @@ class ClaudeTelegramBot:
     def cmd_compact(self) -> None:
         self._run_claude_prompt("/compact")
 
+    def _auto_compact(self, session: Session) -> None:
+        """Run /compact in background to keep session context manageable."""
+        if not session.session_id:
+            return
+        sid = session.session_id
+        ws = session.workspace
+        model = session.model
+
+        def _worker() -> None:
+            try:
+                logger.info("Auto-compact starting for session %s (turns=%d)",
+                            session.name, session.message_count)
+                runner = ClaudeRunner()
+                runner.run(
+                    prompt="/compact",
+                    model=model,
+                    session_id=sid,
+                    workspace=ws,
+                    system_prompt=None,
+                )
+                if runner.captured_session_id:
+                    session.session_id = runner.captured_session_id
+                    self.sessions.save()
+                logger.info("Auto-compact completed for session %s", session.name)
+            except Exception as exc:
+                logger.error("Auto-compact failed: %s", exc)
+
+        threading.Thread(target=_worker, daemon=True, name="auto-compact").start()
+
     def cmd_cost(self) -> None:
         self._run_claude_prompt("/cost")
 
@@ -3528,6 +3559,19 @@ class ClaudeTelegramBot:
         if runner.captured_session_id:
             session.session_id = runner.captured_session_id
             self.sessions.save()
+
+        # Auto session management (interactive sessions only)
+        if not routine_mode and session.session_id and runner.exit_code in (None, 0):
+            if session.message_count >= AUTO_ROTATE_THRESHOLD:
+                logger.info("Auto-rotate: session %s reached %d turns, starting fresh",
+                            session.name, session.message_count)
+                session.session_id = None
+                session.message_count = 0
+                self.sessions.save()
+                self.send_message("🔄 _Sessão rotacionada automaticamente (%d turns)_" % AUTO_ROTATE_THRESHOLD)
+            elif session.message_count > 0 and session.message_count % AUTO_COMPACT_INTERVAL == 0:
+                self.send_message("🔄 _Auto-compact da sessão..._")
+                self._auto_compact(session)
 
         logger.info(
             "Finalizing: result_text=%d chars, accumulated=%d chars, error=%s, stderr=%d chars, exit=%s",
