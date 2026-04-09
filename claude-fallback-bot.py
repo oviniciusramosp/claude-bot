@@ -84,11 +84,20 @@ SAY_VOICE_MAP = {
     "fr-FR": "Thomas", "it-IT": "Alice", "de-DE": "Anna",
     "ja-JP": "Kyoko", "zh-CN": "Tingting", "en-GB": "Daniel",
 }
-TTS_PROMPT_SUFFIX = (
-    "\n\nIMPORTANT: The user is listening to your response as audio. "
-    "Keep your answer SHORT and conversational — max 3-4 sentences, no code blocks, "
-    "no markdown formatting, no bullet lists. Speak naturally as if talking to someone."
-)
+TTS_LOCALE_NAMES = {
+    "pt-BR": "Brazilian Portuguese", "en-US": "English", "es-ES": "Spanish",
+    "fr-FR": "French", "it-IT": "Italian", "de-DE": "German",
+    "ja-JP": "Japanese", "zh-CN": "Chinese", "en-GB": "British English",
+}
+
+def _tts_prompt_suffix() -> str:
+    lang = TTS_LOCALE_NAMES.get(HEAR_LOCALE, "the user's language")
+    return (
+        f"\n\nIMPORTANT: The user is listening to your response as audio. "
+        f"Respond in {lang}. "
+        f"Keep your answer SHORT and conversational — max 3-4 sentences, no code blocks, "
+        f"no markdown formatting, no bullet lists. Speak naturally as if talking to someone."
+    )
 
 DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
@@ -3409,7 +3418,8 @@ class ClaudeTelegramBot:
         effective_sp = system_prompt
         tts_this_request = force_tts or (ctx and ctx.tts_enabled and not routine_mode)
         if tts_this_request:
-            effective_sp = (effective_sp + TTS_PROMPT_SUFFIX) if effective_sp else TTS_PROMPT_SUFFIX
+            suffix = _tts_prompt_suffix()
+            effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
         # Inline #voice uses a fresh session for fast response (no heavy context to load)
         effective_session_id = None if force_tts else session.session_id
