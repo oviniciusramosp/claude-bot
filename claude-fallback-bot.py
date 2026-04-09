@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.13.0"  # feat: standardized session name pattern YYYY-MM-DD-HH-MM-{agent}-{n}
+BOT_VERSION = "2.13.1"  # fix: don't double-escape pre-escaped MDv2 sequences from Claude output
 
 import http.server
 import json
@@ -2781,6 +2781,12 @@ class ClaudeTelegramBot:
 
             # Regular character — escape if special
             ch = text[pos]
+            # Already-escaped MDv2 sequence (\X where X is a special char) — pass through
+            # to avoid double-escaping (e.g. \. → \\. which is invalid)
+            if ch == '\\' and pos + 1 < n and text[pos + 1] in r'_*[]()~`>#+-=|{}.!\\":':
+                result.append(text[pos:pos + 2])
+                pos += 2
+                continue
             if ch in r'_*[]()~>#+-=|{}.!\\":':
                 result.append(f'\\{ch}')
             else:
