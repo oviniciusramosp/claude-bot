@@ -3739,7 +3739,9 @@ class ClaudeTelegramBot:
         ffmpeg = FFMPEG_PATH if Path(FFMPEG_PATH).is_file() else shutil.which("ffmpeg")
         if ffmpeg:
             result["ffmpeg"] = ffmpeg
-        edge = shutil.which("edge-tts")
+        # shutil.which uses the process PATH — launchd may not include ~/.local/bin (pipx default)
+        _pipx_edge = Path.home() / ".local/bin/edge-tts"
+        edge = shutil.which("edge-tts") or (str(_pipx_edge) if _pipx_edge.is_file() else None)
         if edge:
             result["edge_tts"] = edge
         can_edge = bool(result["edge_tts"] and result["ffmpeg"])
