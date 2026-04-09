@@ -392,18 +392,16 @@ struct RoutineFormSheet: View {
             .foregroundStyle(Color(hex: 0x727272))
     }
 
-    /// A picker aligned to the leading edge of its column
+    /// A picker that fills its parent column width
     private func formDropdown<SelectionValue: Hashable, Content: View>(
         selection: Binding<SelectionValue>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        HStack {
-            Picker("", selection: selection) {
-                content()
-            }
-            .labelsHidden()
-            Spacer(minLength: 0)
+        Picker("", selection: selection) {
+            content()
         }
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
     }
 
     private var executionTypeDescription: String {
