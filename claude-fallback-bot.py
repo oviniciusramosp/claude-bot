@@ -112,6 +112,42 @@ TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
 APPROVAL_EXPIRY_SECONDS = 300  # 5 minutes
 
+# Tool name → semantic activity type (for granular status indicators)
+_TOOL_ACTIVITY_MAP = {
+    "WebSearch": "searching_web", "WebFetch": "searching_web",
+    "Grep": "searching_files", "Glob": "searching_files",
+    "Read": "reading", "LSP": "searching_files",
+    "Bash": "running_script",
+    "Write": "editing", "Edit": "editing",
+    "NotebookEdit": "editing", "TodoWrite": "editing",
+}
+
+# Activity type → Telegram sendChatAction value
+_ACTIVITY_CHAT_ACTION = {
+    "thinking": "typing", "text": "typing", "editing": "typing",
+    "searching_web": "typing",
+    "reading": "upload_document",
+    "tool": "upload_document",
+    "searching_files": "upload_document",
+    "running_script": "upload_document",
+    "transcribing": "record_voice",
+    "synthesizing": "upload_voice",
+}
+
+# Activity type → emoji reaction (standard Telegram set only)
+_REACTION_MAP = {
+    "thinking":        "🤔",
+    "text":            "✍️",
+    "tool":            "⚡",
+    "searching_web":   "👀",
+    "searching_files": "👀",
+    "reading":         "👀",
+    "running_script":  "👨‍💻",
+    "editing":         "✍️",
+    "transcribing":    "👀",
+    "synthesizing":    "👀",
+}
+
 # Patterns that trigger an approval prompt before sending to Claude.
 # Each tuple is (regex_pattern, human-readable description).
 DANGEROUS_PATTERNS = [
@@ -1176,7 +1212,6 @@ class ClaudeRunner:
             cmd += [
                 "--disable-slash-commands",
                 "--tools", "",
-                "--no-session-persistence",
                 "--mcp-config", '{"mcpServers":{}}',
                 "--strict-mcp-config",
                 "--setting-sources", "",
@@ -1301,7 +1336,7 @@ class ClaudeRunner:
                     entry = f"🔧 {tool_name}" + (f": `{hint}`" if hint else "")
                     with self._lock:
                         self.tool_log.append(entry)
-                        self.activity_type = "tool"
+                        self.activity_type = _TOOL_ACTIVITY_MAP.get(tool_name, "tool")
                         self.last_activity = time.time()
         elif etype == "result":
             self.result_text = obj.get("result", "")
@@ -3498,10 +3533,10 @@ class ClaudeTelegramBot:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
-        # Inline #voice: fast path — minimal prompt, haiku, low effort, fresh session
+        # Inline #voice: fast path — minimal prompt, haiku, low effort, with session context
         if force_tts:
             effective_sp = _tts_prompt_suffix()
-            effective_session_id = None  # fresh session = fast (~3s vs minutes with --resume)
+            effective_session_id = session.session_id  # resume for context
             effective_model = "haiku"
             effective_effort = "low"
         else:
