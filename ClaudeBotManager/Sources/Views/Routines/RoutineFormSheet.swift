@@ -606,7 +606,13 @@ struct PipelineStepCard: View {
                                             .frame(height: 24)
                                     } else {
                                         let defaultName = effectiveStepId.isEmpty ? "step.md" : "\(effectiveStepId).md"
-                                        TextField(defaultName, text: $step.outputFile)
+                                        TextField(defaultName, text: Binding(
+                                            get: { step.outputFile.isEmpty ? defaultName : step.outputFile },
+                                            set: { newVal in
+                                                // Only store custom value; clear if user restores default
+                                                step.outputFile = (newVal == defaultName) ? "" : newVal
+                                            }
+                                        ))
                                             .font(.system(size: 13, weight: .medium))
                                             .textFieldStyle(.roundedBorder)
                                             .frame(height: 24)
