@@ -183,7 +183,7 @@ struct RoutineFormSheet: View {
                         get: { agentId ?? "__none__" },
                         set: { agentId = $0 == "__none__" ? nil : $0 }
                     )) {
-                        Text("Main (Default)").tag("__none__")
+                        Text("\u{1F916} Main (Default)").tag("__none__")
                         ForEach(appState.agents) { a in
                             Text("\(a.icon) \(a.name)").tag(a.id)
                         }
@@ -397,15 +397,21 @@ struct RoutineFormSheet: View {
         selection: Binding<SelectionValue>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        Picker("", selection: selection) {
-            content()
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.black.opacity(0.05))
+                .frame(height: 24)
+            HStack {
+                Picker("", selection: selection) {
+                    content()
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                Spacer(minLength: 0)
+            }
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .frame(height: 24)
-        .background(Color.black.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private var executionTypeDescription: String {

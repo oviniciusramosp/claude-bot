@@ -250,7 +250,7 @@ struct RoutineDetailView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Agent").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
                     fullWidthPicker(selection: $routine.agentId) {
-                        Text("Main (Default)").tag(String?.none)
+                        Text("\u{1F916} Main (Default)").tag(String?.none)
                         ForEach(appState.agents) { a in
                             Text("\(a.icon) \(a.name)").tag(Optional(a.id))
                         }
@@ -440,15 +440,23 @@ struct RoutineDetailView: View {
         selection: Binding<SelectionValue>,
         @ViewBuilder content: () -> Content
     ) -> some View {
-        Picker("", selection: selection) {
-            content()
+        ZStack {
+            // Full-width background
+            RoundedRectangle(cornerRadius: 6)
+                .fill(Color.black.opacity(0.05))
+                .frame(height: 24)
+            // Picker overlaid, aligned leading
+            HStack {
+                Picker("", selection: selection) {
+                    content()
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                Spacer(minLength: 0)
+            }
         }
-        .labelsHidden()
-        .pickerStyle(.menu)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .frame(height: 24)
-        .background(Color.black.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
     }
 
     private func toggleDay(_ day: String) {
