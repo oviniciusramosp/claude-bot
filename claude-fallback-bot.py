@@ -3498,10 +3498,10 @@ class ClaudeTelegramBot:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
-        # Inline #voice: fast path — minimal system prompt, haiku, fresh session, low effort
+        # Inline #voice: fast path — minimal prompt, haiku, low effort, but keep session context
         if force_tts:
             effective_sp = _tts_prompt_suffix()
-            effective_session_id = None
+            effective_session_id = session.session_id  # resume session for context
             effective_model = "haiku"
             effective_effort = "low"
         else:
