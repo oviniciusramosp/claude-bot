@@ -4250,6 +4250,9 @@ class ClaudeTelegramBot:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # Prevent "nested session" error when bot is started from inside Claude Code
+    os.environ.pop("CLAUDECODE", None)
+
     if "--run" in sys.argv or len(sys.argv) == 1:
         bot = ClaudeTelegramBot()
 
