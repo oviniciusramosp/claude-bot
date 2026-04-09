@@ -76,7 +76,7 @@ struct RoutineFormSheet: View {
                 }
             }
         }
-        .frame(minWidth: 680, minHeight: 560)
+        .frame(minWidth: 720, minHeight: 560)
     }
 
     // MARK: - Name Section

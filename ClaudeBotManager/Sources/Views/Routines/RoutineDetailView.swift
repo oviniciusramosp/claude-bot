@@ -45,7 +45,7 @@ struct RoutineDetailView: View {
             // ── Footer ───────────────────────────────────────────────────
             footerBar
         }
-        .frame(minWidth: 600, minHeight: 560)
+        .frame(minWidth: 720, minHeight: 560)
         .background(Color(.windowBackgroundColor))
         .confirmationDialog("Move to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) {
