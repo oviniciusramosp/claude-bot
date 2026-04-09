@@ -83,30 +83,105 @@ private func runShell(_ cmd: String) -> String {
     return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
 }
 
-// MARK: - Changelog Sheet
+// MARK: - Changelog
 
 struct ChangelogEntry: Identifiable {
     var id: String { hash }
     var hash: String
     var message: String
+    var date: String          // YYYY-MM-DD
+
+    var commitType: String {
+        let msg = message.lowercased()
+        if msg.hasPrefix("feat")     { return "feat" }
+        if msg.hasPrefix("fix")      { return "fix" }
+        if msg.hasPrefix("refactor") { return "refactor" }
+        if msg.hasPrefix("docs")     { return "docs" }
+        if msg.hasPrefix("chore")    { return "chore" }
+        if msg.hasPrefix("test")     { return "test" }
+        if msg.hasPrefix("perf")     { return "perf" }
+        if msg.hasPrefix("style")    { return "style" }
+        if msg.hasPrefix("ci")       { return "ci" }
+        return "other"
+    }
+
+    var typeIcon: String {
+        switch commitType {
+        case "feat":     return "sparkles"
+        case "fix":      return "wrench.fill"
+        case "refactor": return "arrow.triangle.2.circlepath"
+        case "docs":     return "doc.text.fill"
+        case "chore":    return "gearshape.fill"
+        case "test":     return "checkmark.shield.fill"
+        case "perf":     return "bolt.fill"
+        case "style":    return "paintbrush.fill"
+        case "ci":       return "server.rack"
+        default:         return "circle.fill"
+        }
+    }
 
     var typeColor: Color {
-        if message.hasPrefix("feat")     { return .statusBlue }
-        if message.hasPrefix("fix")      { return .statusGreen }
-        if message.hasPrefix("refactor") { return .purple }
-        if message.hasPrefix("chore")    { return .secondary }
-        return .primary
+        switch commitType {
+        case "feat":     return .statusBlue
+        case "fix":      return .statusGreen
+        case "refactor": return .purple
+        case "docs":     return .orange
+        case "chore":    return .secondary
+        case "test":     return .teal
+        case "perf":     return .yellow
+        case "style":    return .pink
+        case "ci":       return .indigo
+        default:         return .primary
+        }
     }
 
     var shortHash: String { String(hash.prefix(7)) }
+
+    /// Message without the conventional commit prefix (e.g. "feat: add X" → "add X")
+    var cleanMessage: String {
+        if let colonRange = message.range(of: ": ") {
+            return String(message[colonRange.upperBound...])
+        }
+        return message
+    }
+
+    /// Conventional commit prefix label (e.g. "feat", "fix")
+    var typeLabel: String {
+        if let colonIdx = message.firstIndex(of: ":") {
+            let prefix = String(message[message.startIndex..<colonIdx])
+            if prefix.count <= 12, !prefix.contains(" ") { return prefix }
+        }
+        return commitType
+    }
 }
 
-// MARK: - Changelog Page View (full tab, not a modal)
+/// Groups entries by date for section display
+struct ChangelogDateGroup: Identifiable {
+    var id: String { date }
+    var date: String                 // YYYY-MM-DD
+    var entries: [ChangelogEntry]
+
+    var displayDate: String {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        guard let d = df.date(from: date) else { return date }
+
+        let cal = Calendar.current
+        if cal.isDateInToday(d)     { return "Today" }
+        if cal.isDateInYesterday(d) { return "Yesterday" }
+
+        let out = DateFormatter()
+        out.dateFormat = "MMM d, yyyy"
+        return out.string(from: d)
+    }
+}
+
+// MARK: - Changelog Page View
 
 struct ChangelogPageView: View {
     @EnvironmentObject var appState: AppState
-    @State private var entries: [ChangelogEntry] = []
-    @State private var updateAvailable = false
+    @State private var groups: [ChangelogDateGroup] = []
+    @State private var pendingCount = 0
     @State private var isUpdating = false
     @State private var showUpdateConfirm = false
 
@@ -120,66 +195,74 @@ struct ChangelogPageView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Toolbar: version + update button
-            HStack {
+            // Header
+            HStack(spacing: Spacing.sm) {
                 Text("v\(appVersion)")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
 
-                if updateAvailable {
-                    Button {
-                        showUpdateConfirm = true
-                    } label: {
-                        Label("Update Available", systemImage: "arrow.down.circle.fill")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
-                    .controlSize(.small)
-                } else if isUpdating {
+                Spacer()
+
+                if isUpdating {
                     ProgressView()
                         .controlSize(.small)
                     Text("Updating…")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
+                } else if pendingCount > 0 {
+                    Button {
+                        showUpdateConfirm = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.down.circle.fill")
+                            Text("\(pendingCount) update\(pendingCount == 1 ? "" : "s")")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.orange)
+                    .controlSize(.small)
                 }
-
-                Spacer()
             }
             .padding(.horizontal, Spacing.xl)
             .padding(.vertical, Spacing.md)
 
             Divider()
 
-            // Commit list
-            if entries.isEmpty {
-                VStack(spacing: Spacing.md) {
-                    Image(systemName: "doc.text.magnifyingglass")
-                        .font(.system(size: 36))
-                        .foregroundStyle(.tertiary)
-                    Text("No git history found")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Grouped commit list
+            if groups.isEmpty {
+                EmptyStateView(
+                    symbol: "doc.text.magnifyingglass",
+                    title: "No git history found",
+                    subtitle: "Could not read git log from the repository"
+                )
             } else {
-                List(entries) { entry in
-                    HStack(alignment: .top, spacing: Spacing.sm) {
-                        Text(entry.shortHash)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 52, alignment: .leading)
-
-                        Text(entry.message)
-                            .font(.caption)
-                            .foregroundStyle(entry.typeColor)
-                            .lineLimit(2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+                        ForEach(groups) { group in
+                            Section {
+                                ForEach(group.entries) { entry in
+                                    ChangelogRow(entry: entry)
+                                    Divider().padding(.leading, 36)
+                                }
+                            } header: {
+                                HStack {
+                                    Text(group.displayDate)
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(.secondary)
+                                        .textCase(.uppercase)
+                                    Spacer()
+                                    Text("\(group.entries.count)")
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .foregroundStyle(.tertiary)
+                                }
+                                .padding(.horizontal, Spacing.xl)
+                                .padding(.vertical, Spacing.sm)
+                                .background(.bar)
+                            }
+                        }
                     }
-                    .listRowSeparator(.visible)
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
             }
         }
         .background(Color(.windowBackgroundColor))
@@ -196,23 +279,41 @@ struct ChangelogPageView: View {
             Button("Pull & Rebuild") { performUpdate() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("The app will restart after pulling the latest changes from git.")
+            Text("Pull \(pendingCount) new commit\(pendingCount == 1 ? "" : "s") and rebuild. The app will restart.")
         }
     }
 
     private func loadChangelog() {
         let path = repoPath
+        // Format: hash<TAB>message<TAB>YYYY-MM-DD
         let raw = runShell(
-            "git -C \"\(path)\" log --oneline --no-decorate -60 2>/dev/null"
+            "git -C \"\(path)\" log --pretty=format:'%h\t%s\t%cs' --no-decorate -80 2>/dev/null"
         )
-        entries = raw
+        let entries = raw
             .components(separatedBy: "\n")
             .filter { !$0.isEmpty }
             .compactMap { line -> ChangelogEntry? in
-                let parts = line.split(separator: " ", maxSplits: 1)
-                guard parts.count == 2 else { return nil }
-                return ChangelogEntry(hash: String(parts[0]), message: String(parts[1]))
+                let parts = line.split(separator: "\t", maxSplits: 2)
+                guard parts.count == 3 else { return nil }
+                return ChangelogEntry(
+                    hash: String(parts[0]),
+                    message: String(parts[1]),
+                    date: String(parts[2])
+                )
             }
+
+        // Group by date, preserving order
+        var seen: [String: Int] = [:]
+        var result: [ChangelogDateGroup] = []
+        for entry in entries {
+            if let idx = seen[entry.date] {
+                result[idx].entries.append(entry)
+            } else {
+                seen[entry.date] = result.count
+                result.append(ChangelogDateGroup(date: entry.date, entries: [entry]))
+            }
+        }
+        groups = result
     }
 
     private func checkForUpdates() {
@@ -223,7 +324,7 @@ struct ChangelogPageView: View {
                 "git -C \"\(path)\" log HEAD..origin/main --oneline 2>/dev/null | wc -l"
             )
             let count = Int(result.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-            await MainActor.run { updateAvailable = count > 0 }
+            await MainActor.run { pendingCount = count }
         }
     }
 
@@ -236,5 +337,46 @@ struct ChangelogPageView: View {
                 "cd \"\(path)\" && git pull --ff-only 2>&1 && bash \"\(buildScript)\" 2>&1"
             )
         }
+    }
+}
+
+// MARK: - Changelog Row
+
+private struct ChangelogRow: View {
+    let entry: ChangelogEntry
+
+    var body: some View {
+        HStack(alignment: .center, spacing: Spacing.sm) {
+            // Type icon
+            Image(systemName: entry.typeIcon)
+                .font(.system(size: 11))
+                .foregroundStyle(entry.typeColor)
+                .frame(width: 20, alignment: .center)
+
+            // Commit content
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.cleanMessage)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+
+                HStack(spacing: Spacing.sm) {
+                    Text(entry.typeLabel)
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(entry.typeColor)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(entry.typeColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+
+                    Text(entry.shortHash)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, Spacing.xl)
+        .padding(.vertical, Spacing.sm)
     }
 }
