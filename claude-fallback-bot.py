@@ -3423,11 +3423,12 @@ class ClaudeTelegramBot:
                 break
             now = time.time()
             has_output = bool(runner.accumulated_text or runner.result_text or runner.tool_log)
+            is_thinking = runner.activity_type == "thinking"
 
-            if has_output and not _notified_first_output:
+            if (has_output or is_thinking) and not _notified_first_output:
                 _notified_first_output = True
 
-            if not has_output:
+            if not has_output and not is_thinking:
                 elapsed_start = now - runner.start_time
                 if elapsed_start > NO_OUTPUT_TIMEOUT:
                     logger.warning("No-output timeout after %.0fs", elapsed_start)
