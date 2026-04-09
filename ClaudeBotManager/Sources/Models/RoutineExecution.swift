@@ -91,6 +91,7 @@ struct StepExecution: Identifiable, Hashable, Sendable {
     var finishedAt: Date?
     var error: String?
     var attempt: Int
+    var outputType: String?     // "none", "file", "telegram", or vault-relative path
     var activity: StepActivity?  // live activity (from sidecar, only while running)
 
     var duration: String? {

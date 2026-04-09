@@ -303,7 +303,14 @@ actor VaultService {
             timeout: Int(dict["timeout"] ?? "1200") ?? 1200,
             inactivityTimeout: Int(dict["inactivity_timeout"] ?? "300") ?? 300,
             retry: Int(dict["retry"] ?? "0") ?? 0,
-            outputToTelegram: dict["output"]?.lowercased() == "telegram"
+            outputToTelegram: dict["output"]?.lowercased() == "telegram",
+            outputType: {
+                let raw = dict["output"]?.trimmingCharacters(in: .whitespaces) ?? ""
+                if raw.isEmpty { return "file" }
+                let lower = raw.lowercased()
+                if lower == "telegram" || lower == "none" { return lower }
+                return raw  // vault path
+            }()
         )
     }
 

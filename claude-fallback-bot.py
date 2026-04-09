@@ -488,6 +488,7 @@ class PipelineStep:
     inactivity_timeout: int = 300  # max seconds without any output (kills idle steps)
     retry: int = 0
     output_to_telegram: bool = False
+    output_type: str = "file"  # "none", "file", "telegram", or vault-relative path
     engine: str = "claude"
 
 
@@ -591,7 +592,7 @@ class RoutineStateManager:
     def set_pipeline_status(self, name: str, time_slot: str, status: str,
                             steps_init: Optional[list] = None, error: Optional[str] = None,
                             workspace: Optional[str] = None) -> None:
-        """Set pipeline-level status. Optionally initialize step statuses from step id list."""
+        """Set pipeline-level status. steps_init can be list of ids or list of dicts with id+output_type."""
         with self._lock:
             data = self._load()
             if name not in data:
@@ -610,7 +611,13 @@ class RoutineStateManager:
             if error:
                 entry["error"] = error
             if steps_init is not None:
-                entry["steps"] = {sid: {"status": "pending", "attempt": 0} for sid in steps_init}
+                steps = {}
+                for item in steps_init:
+                    if isinstance(item, dict):
+                        steps[item["id"]] = {"status": "pending", "attempt": 0, "output_type": item.get("output_type", "file")}
+                    else:
+                        steps[item] = {"status": "pending", "attempt": 0}
+                entry["steps"] = steps
             data[name][time_slot] = entry
             self._save(data)
 
@@ -825,6 +832,16 @@ class RoutineScheduler:
             if isinstance(depends, str):
                 depends = [depends]
 
+            raw_output = str(s.get("output", "")).strip().lower()
+            if raw_output == "telegram":
+                out_type = "telegram"
+            elif raw_output == "none":
+                out_type = "none"
+            elif raw_output:
+                out_type = s.get("output", "").strip()  # preserve original case for paths
+            else:
+                out_type = "file"
+
             steps.append(PipelineStep(
                 id=step_id,
                 name=str(s.get("name", step_id)),
@@ -835,7 +852,8 @@ class RoutineScheduler:
                 timeout=int(s.get("timeout", 1200)),
                 inactivity_timeout=int(s.get("inactivity_timeout", 300)),
                 retry=int(s.get("retry", 1)),
-                output_to_telegram=(str(s.get("output", "")).lower() == "telegram"),
+                output_to_telegram=(raw_output == "telegram"),
+                output_type=out_type,
                 engine=str(s.get("engine", "claude")),
             ))
 
@@ -883,7 +901,8 @@ class RoutineScheduler:
             minimal_context=bool(fm.get("context") == "minimal"),
             voice=bool(fm.get("voice", False)),
         )
-        self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=[s.id for s in steps])
+        steps_info = [{"id": s.id, "output_type": s.output_type} for s in steps]
+        self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=steps_info)
         self._enqueue_pipeline(task)
 
     def list_today_routines(self) -> List[Dict]:
@@ -1519,10 +1538,10 @@ class PipelineExecutor:
         data_dir = self.workspace / "data"
         data_dir.mkdir(exist_ok=True)
 
-        # Initialize pipeline state with all step ids + workspace path
-        step_ids = [s.id for s in self.task.steps]
+        # Initialize pipeline state with all step ids + output types + workspace path
+        steps_info = [{"id": s.id, "output_type": s.output_type} for s in self.task.steps]
         self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
-                                        steps_init=step_ids, workspace=str(self.workspace))
+                                        steps_init=steps_info, workspace=str(self.workspace))
 
         # Send live progress message to Telegram
         self._send_progress_message()
@@ -1833,9 +1852,17 @@ class PipelineExecutor:
                 else:
                     raise RuntimeError(runner.error_text)
 
-            # Write output to shared data directory
+            # Capture output: prefer file written by Claude (via tools), fallback to runner text
             output_file = data_dir / f"{step.id}.md"
-            output_file.write_text(output, encoding="utf-8")
+            if output_file.exists() and output_file.stat().st_size > 0:
+                # Claude wrote the file directly via Write/Edit tool — use that
+                output = output_file.read_text(encoding="utf-8")
+            elif output:
+                # Claude returned text but didn't write the file — save it
+                output_file.write_text(output, encoding="utf-8")
+            else:
+                # No output at all — write empty file as marker
+                output_file.write_text("", encoding="utf-8")
 
             with self._lock:
                 self._step_outputs[step.id] = output

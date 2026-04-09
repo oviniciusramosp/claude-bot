@@ -92,7 +92,8 @@ actor RoutineStateService {
                     startedAt: parseDate(stepData["started_at"] as? String),
                     finishedAt: parseDate(stepData["finished_at"] as? String),
                     error: stepData["error"] as? String,
-                    attempt: stepData["attempt"] as? Int ?? 0
+                    attempt: stepData["attempt"] as? Int ?? 0,
+                    outputType: stepData["output_type"] as? String
                 ))
             }
             // Sort by started_at (pending steps last)

@@ -468,18 +468,77 @@ struct RoutineRow: View {
                                     : Color(red: 0.447, green: 0.447, blue: 0.447))
                         }
 
-                        // Per-step output file link (completed steps only)
-                        if let ws = wsPath, status == .completed,
-                           FileManager.default.fileExists(atPath: "\(ws)/data/\(stepId).md") {
+                        // Output type badge
+                        let outType = step?.outputType ?? (i < defSteps.count ? defSteps[i].outputType : "file")
+                        if outType == "telegram" {
+                            HStack(spacing: 2) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 8))
+                                Text("Telegram")
+                                    .font(.system(size: 8, weight: .medium))
+                            }
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.blue.opacity(0.08))
+                            .clipShape(Capsule())
+                        } else if outType == "none" {
+                            // No output badge
+                        } else if outType != "file" {
+                            // Vault path
                             Button {
-                                NSWorkspace.shared.open(URL(fileURLWithPath: "\(ws)/data/\(stepId).md"))
+                                let vaultPath = (NSHomeDirectory() as NSString).appendingPathComponent("claude-bot/vault/\(outType)")
+                                NSWorkspace.shared.open(URL(fileURLWithPath: vaultPath))
                             } label: {
-                                Image(systemName: "doc.text")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
+                                HStack(spacing: 2) {
+                                    Image(systemName: "folder.fill")
+                                        .font(.system(size: 8))
+                                    Text(outType)
+                                        .font(.system(size: 8, weight: .medium))
+                                        .lineLimit(1)
+                                }
+                                .foregroundStyle(.orange)
                             }
                             .buttonStyle(.plain)
-                            .help("Open \(stepId).md")
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.orange.opacity(0.08))
+                            .clipShape(Capsule())
+                            .help("Open \(outType) in vault")
+                        } else {
+                            // Temp file — show clickable link when completed
+                            if let ws = wsPath, status == .completed,
+                               FileManager.default.fileExists(atPath: "\(ws)/data/\(stepId).md") {
+                                Button {
+                                    NSWorkspace.shared.open(URL(fileURLWithPath: "\(ws)/data/\(stepId).md"))
+                                } label: {
+                                    HStack(spacing: 2) {
+                                        Image(systemName: "doc.text")
+                                            .font(.system(size: 8))
+                                        Text("\(stepId).md")
+                                            .font(.system(size: 8, weight: .medium))
+                                    }
+                                    .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.primary.opacity(0.04))
+                                .clipShape(Capsule())
+                                .help("Open \(stepId).md")
+                            } else {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "doc.text")
+                                        .font(.system(size: 8))
+                                    Text("\(stepId).md")
+                                        .font(.system(size: 8, weight: .medium))
+                                }
+                                .foregroundStyle(.tertiary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.primary.opacity(0.04))
+                                .clipShape(Capsule())
+                            }
                         }
 
                         // Model + timeout badges (from defs)

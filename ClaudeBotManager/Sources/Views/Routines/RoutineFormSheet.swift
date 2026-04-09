@@ -345,11 +345,37 @@ struct PipelineStepRow: View {
                         }
                     }
 
-                    // Telegram toggle
-                    SettingRow("Send output to Telegram") {
-                        Toggle("", isOn: $step.outputToTelegram)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
+                    // Output type
+                    SettingRow("Output") {
+                        Picker("", selection: Binding(
+                            get: {
+                                let ot = step.outputType
+                                if ot == "none" || ot == "file" || ot == "telegram" { return ot }
+                                return "vault"
+                            },
+                            set: { newVal in
+                                step.outputType = newVal
+                                step.outputToTelegram = (newVal == "telegram")
+                                if newVal == "vault" { step.outputType = "Notes/" }
+                            }
+                        )) {
+                            Text("Temp file").tag("file")
+                            Text("Telegram").tag("telegram")
+                            Text("Vault path").tag("vault")
+                            Text("None").tag("none")
+                        }
+                        .labelsHidden()
+                        .frame(width: 120)
+                    }
+
+                    // Vault path field (only when vault output selected)
+                    if step.outputType != "file" && step.outputType != "telegram" && step.outputType != "none" {
+                        SettingRow("Vault path") {
+                            TextField("Notes/report.md", text: $step.outputType)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 200)
+                                .font(.system(.callout, design: .monospaced))
+                        }
                     }
 
                     // Prompt
