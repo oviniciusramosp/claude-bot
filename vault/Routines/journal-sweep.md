@@ -1,16 +1,15 @@
 ---
-title: "Journal Sweep"
-description: "Varredura noturna que consolida sessoes do dia que nao foram registradas no Journal."
+title: Journal Sweep
+description: Varredura noturna que consolida sessoes do dia que nao foram registradas no Journal.
 type: routine
 created: 2026-04-08
-updated: 2026-04-08
+updated: 2026-04-09
 tags: [routine, journal, maintenance, daily]
 schedule:
   days: ["*"]
-  times: ["23:45"]
+  times: [23:45]
 model: sonnet
 enabled: true
-context: minimal
 ---
 
 [[Routines]]

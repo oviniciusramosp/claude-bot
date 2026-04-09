@@ -3,28 +3,26 @@ title: Tooling Preferences
 description: Mapa de preferencias de ferramentas por tipo de tarefa. Consultar antes de escolher abordagem.
 type: reference
 created: 2026-04-07
-updated: 2026-04-07
+updated: 2026-04-09
 tags: [reference, tooling]
 ---
 
 # Tooling Preferences
 
-Instructions on which tool to prefer for each type of task. Edit this file to match your setup.
+Qual ferramenta usar para cada tipo de tarefa. Consultar antes de escolher abordagem.
 
-## Example entries
-
-```
 ## Web browsing
-- **PinchTab** -- prefer over urllib for web access (avoids bot fingerprinting)
 
-## Design
-- **Figma MCP** -- for design tasks, component lookups, UI implementation
+- **PinchTab** — CLI para navegacao web com sessao logada (X, Threads). Preferir sobre urllib para evitar fingerprinting de bot.
+- Repo/docs: https://github.com/pinchtab/pinchtab
+- Porta padrao: `9870`
+- Requer `PINCHTAB_ALLOW_EVALUATE=1` para submit via JavaScript (formularios do X e outros sites)
 
-## Data
-- **TradingView MCP** -- for market data, signals, technical analysis
-
-## Writing & Publishing
-- **Notion** -- for writing and publishing posts (use a dedicated skill when available)
+Comandos:
 ```
-
-Delete the examples above and add your own tool preferences.
+pinchtab nav <url> --port 9870       # navegar
+pinchtab text --port 9870            # extrair texto
+pinchtab snap -i -c --port 9870      # snapshot interativo
+pinchtab click <ref> --port 9870     # clicar elemento
+pinchtab fill <ref> "texto" --port 9870  # preencher campo
+```

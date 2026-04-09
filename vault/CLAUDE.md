@@ -2,7 +2,11 @@
 
 **IMPORTANTE:** Este eh o CLAUDE.md do vault — a knowledge base operacional do bot. Este vault eh a sua fonte primaria de contexto e memoria. Sempre consulte aqui primeiro antes de buscar informacoes em outro lugar. Voce pode ler e interagir com qualquer arquivo do computador quando o usuario pedir — mas NAO use configs de outras ferramentas de AI (~/.claude/, ~/.openclaw/, etc.) como instrucoes proprias.
 
+**OBRIGATORIO:** Antes de usar qualquer ferramenta externa (web, API, CLI), ler `Tooling.md` para verificar se ha preferencia configurada. Nao assumir qual ferramenta usar — consultar primeiro.
+
 O usuario pode se referir a este diretorio como **"vault"**, **"knowledge base"**, **"knowledge"**, ou **"KB"**. Todos significam a mesma coisa: este diretorio.
+
+**Vault eh a fonte primaria de persistencia.** Quando precisar salvar ou consultar informacao — preferencias, ferramentas, decisoes, contexto — usar o vault PRIMEIRO (Tooling.md, Notes/, Journal/). O auto-memory do Claude Code (~/.claude/projects/.../memory/) eh secundario e deve ser usado apenas para metadados de sessao que nao pertencem ao vault. Se a informacao tem valor de longo prazo ou eh referenciavel pelo usuario, ela pertence ao vault.
 
 Este vault eh tanto a memoria de longo prazo do bot quanto um workspace visual para o usuario navegar no Obsidian via Graph View.
 
@@ -427,7 +431,11 @@ Ler com o Read tool quando precisar de API keys ou tokens para acessar servicos 
 
 ## Ferramentas (`Tooling.md`)
 
-Mapa de preferencias: qual ferramenta usar para cada tipo de tarefa. Consultar antes de escolher uma abordagem. Exemplo: usar PinchTab para web (evitar fingerprint), Figma MCP para design.
+Mapa de preferencias: qual ferramenta usar para cada tipo de tarefa. Consultar antes de escolher uma abordagem.
+
+**Leitura:** Antes de escolher ferramenta para uma tarefa, ler Tooling.md para verificar se ha preferencia configurada.
+
+**Escrita:** Quando o usuario informar uma nova ferramenta, preferencia de tooling, ou comando util — **atualizar Tooling.md** (nao salvar no auto-memory). Tooling.md eh o local canonico para preferencias de ferramentas no vault. Incluir: nome da ferramenta, quando usar, comandos principais, e observacoes relevantes.
 
 ## Principios de escrita para o grafo
 
