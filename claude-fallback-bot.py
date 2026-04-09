@@ -1251,6 +1251,10 @@ class ClaudeRunner:
                 text=True,
                 bufsize=1,
             )
+            # Close stdin immediately — prevents Claude CLI from waiting 3s
+            # for input. BTW injection falls back to queue when stdin is closed.
+            if self.process.stdin:
+                self.process.stdin.close()
             self._read_stream()
         except FileNotFoundError:
             self.error_text = f"❌ Claude CLI não encontrado em {CLAUDE_PATH}"
