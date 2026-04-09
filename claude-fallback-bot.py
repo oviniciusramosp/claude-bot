@@ -1562,10 +1562,9 @@ class PipelineExecutor:
 
         # Cleanup workspace
         try:
-            import shutil
             shutil.rmtree(self.workspace, ignore_errors=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Pipeline workspace cleanup failed: %s", exc)
         # Remove pipeline activity sidecar
         self._cleanup_activity()
         return all_completed
@@ -1645,8 +1644,8 @@ class PipelineExecutor:
                         json.dumps(data, ensure_ascii=False), encoding="utf-8")
                 else:
                     PIPELINE_ACTIVITY_FILE.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Pipeline activity cleanup failed: %s", exc)
 
     def _run_dag_loop(self, data_dir: Path) -> None:
         """Execute steps in topological waves until all are terminal."""
@@ -1938,8 +1937,8 @@ class PipelineExecutor:
             text = self._build_progress_text()
             msg_id = self.bot.send_message(text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
             self._progress_msg_id = msg_id
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to send pipeline progress: %s", exc)
 
     def _update_progress(self) -> None:
         """Edit the progress message with current step statuses."""
@@ -1949,8 +1948,8 @@ class PipelineExecutor:
             elapsed = int(time.time() - (self._start_time if hasattr(self, '_start_time') else time.time()))
             text = self._build_progress_text(elapsed)
             self.bot.edit_message(self._progress_msg_id, text)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to update pipeline progress: %s", exc)
 
     def _finalize_progress(self, success: bool, error: str = "", elapsed: int = 0) -> None:
         """Finalize the progress message: delete on success, update with error/cancelled on failure."""
@@ -1979,8 +1978,8 @@ class PipelineExecutor:
                     lines.append(f"\n_Erro: {error[:100]}_")
                 lines.append(f"_Duração: {mins}m{secs:02d}s_")
                 self.bot.edit_message(self._progress_msg_id, "\n".join(lines))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to finalize pipeline progress: %s", exc)
 
     def _notify_progress(self) -> None:
         """Legacy progress notification (for notify=all mode)."""
@@ -2011,21 +2010,21 @@ class PipelineExecutor:
             sent_text = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
             try:
                 self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Pipeline notify_success send failed: %s", exc)
         elif output_text:
             sent_text = output_text
             try:
                 self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Pipeline notify_success send failed: %s", exc)
 
         # TTS: send voice message if pipeline has voice: true
         if self.task.voice and sent_text:
             try:
                 self.bot._maybe_send_tts(sent_text, self.ctx.chat_id, self.ctx.thread_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Pipeline TTS failed: %s", exc)
 
     def _notify_failure(self, error: str) -> None:
         """Always notify on failure, regardless of notify mode. Skip if cancelled (progress msg already updated)."""
@@ -2043,8 +2042,8 @@ class PipelineExecutor:
                f"Steps: {steps_summary}")
         try:
             self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.error("Pipeline notify_failure send failed: %s", exc)
 
 
 class ClaudeTelegramBot:
@@ -2473,8 +2472,8 @@ class ClaudeTelegramBot:
             payload = json.dumps(data).encode("utf-8")
             req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
             urllib.request.urlopen(req, timeout=5)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("set_reaction failed for msg %s: %s", message_id, exc)
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self.tg_request("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
@@ -4431,9 +4430,11 @@ class ClaudeTelegramBot:
             logger.error("Failed to register commands: %s", exc)
         self._notify_startup()
         logger.info("Entering polling loop")
+        _poll_backoff = 0
         while not self._stop_event.is_set():
             try:
                 updates = self._poll_updates()
+                _poll_backoff = 0  # reset on success
                 for update in updates:
                     uid = update.get("update_id", 0)
                     if uid >= self._update_offset:
@@ -4488,8 +4489,10 @@ class ClaudeTelegramBot:
                 logger.info("Keyboard interrupt, shutting down.")
                 break
             except Exception as exc:
-                logger.error("Polling error: %s", exc, exc_info=True)
-                time.sleep(5)
+                _poll_backoff = min(_poll_backoff + 1, 5)
+                wait = min(5 * (2 ** _poll_backoff), 60)
+                logger.error("Polling error (backoff=%ds): %s", wait, exc, exc_info=True)
+                time.sleep(wait)
 
         logger.info("Polling loop exited.")
 
