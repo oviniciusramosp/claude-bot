@@ -14,20 +14,34 @@ enabled: true
 
 [[Routines]]
 
-You are running the nightly Journal sweep. Your task is to ensure that all sessions from the day have a record in the Journal.
+You are running the nightly Journal sweep. Your task is to ensure that all sessions from today have a record in the Journal.
 
 ## Steps
 
-1. Read the file `~/.claude-bot/sessions.json` to see all sessions
-2. Identify sessions with `message_count > 0` and `session_id` != null (sessions that had activity)
-3. For each identified session:
-   - Determine the correct Journal: if the session has an `agent` field, use `vault/Agents/{agent}/Journal/YYYY-MM-DD.md`; otherwise, use `vault/Journal/YYYY-MM-DD.md`
-   - Check whether the day's Journal already exists and already has an entry for that session (search for the session name in the content)
-   - If there is NO entry, use the bash command: `claude --print --session-id <session_id> -p "Briefly summarize this conversation in 3-5 bullets: topics discussed, decisions made, actions taken. Be concise."` to obtain a summary
-   - Append the summary to the correct Journal using the standard format:
+1. Read `~/.claude-bot/sessions.json` to get all sessions.
+
+2. Determine today's date in `YYYY-MM-DD` format.
+
+3. Filter sessions where:
+   - `name` starts with today's date (e.g., `2026-04-09-`)
+   - `message_count > 0`
+   - `session_id` is not null
+
+4. For each filtered session, parse its name directly — the format is `YYYY-MM-DD-HH-MM-{agent}-{n}`:
+   - **Date** → first 10 characters (`YYYY-MM-DD`)
+   - **Time** → characters 11–15 (`HH:MM`, replacing the `-` separator: `HH-MM` → `HH:MM`)
+   - **Agent** → the segment between position 16 and the last `-{n}` (e.g., `main`, `researcher`)
+
+5. For each session:
+   - If agent is `main` → journal path: `vault/Journal/YYYY-MM-DD.md`
+   - Otherwise → journal path: `vault/Agents/{agent}/Journal/YYYY-MM-DD.md`
+   - Check whether the journal already contains an entry for this session (search for the session name in the file content)
+   - If there is NO entry yet:
+     - Run: `claude --print --session-id <session_id> -p "Briefly summarize this conversation in 3-5 bullets: topics discussed, decisions made, actions taken. Be concise."`
+     - Append to the correct journal using the time parsed from the session name:
 
 ```markdown
-## HH:MM — Automatic consolidation: {session-name}
+## HH:MM — {session-name}
 
 - bullet 1
 - bullet 2
@@ -36,7 +50,7 @@ You are running the nightly Journal sweep. Your task is to ensure that all sessi
 ---
 ```
 
-4. If the day's Journal file does not exist, create it with YAML frontmatter:
+6. If the journal file does not exist, create it with YAML frontmatter before appending:
 
 ```yaml
 ---
@@ -53,7 +67,7 @@ tags: [journal]
 
 For agent journals, use `[[{agent-id}/Journal|Journal]]` instead of `[[Journal]]` and add the agent's tag.
 
-5. At the end, record a sweep entry in the main Journal (vault/Journal/YYYY-MM-DD.md):
+7. At the end, record a sweep entry in the main journal (`vault/Journal/YYYY-MM-DD.md`):
 
 ```markdown
 ## 23:45 — Journal Sweep
