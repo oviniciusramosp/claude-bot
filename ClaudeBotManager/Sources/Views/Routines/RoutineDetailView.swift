@@ -227,7 +227,7 @@ struct RoutineDetailView: View {
 
     private var executionSection: some View {
         detailFormSection(icon: "gearshape", title: "Execution") {
-            // Row 1: Type + Agent
+            // Row 1: Type + Agent (equal columns via GeometryReader)
             HStack(alignment: .top, spacing: 40) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Type").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
@@ -241,6 +241,7 @@ struct RoutineDetailView: View {
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
+                    .frame(maxWidth: .infinity)
                     Text(execTypeDescription)
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))
@@ -249,12 +250,14 @@ struct RoutineDetailView: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Agent").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                    fullWidthPicker(selection: $routine.agentId) {
+                    Picker("", selection: $routine.agentId) {
                         Text("\u{1F916} Main (Default)").tag(String?.none)
                         ForEach(appState.agents) { a in
                             Text("\(a.icon) \(a.name)").tag(Optional(a.id))
                         }
                     }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
                     Text(agentDescription)
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))
@@ -267,11 +270,13 @@ struct RoutineDetailView: View {
                 HStack(alignment: .top, spacing: 40) {
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                        fullWidthPicker(selection: $routine.model) {
+                        Picker("", selection: $routine.model) {
                             ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
                                 Text(modelDisplayName(m)).tag(m)
                             }
                         }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
                         Text(modelDescription(routine.model))
                             .font(.system(size: 10))
                             .foregroundStyle(Color(white: 0.45))
@@ -433,18 +438,6 @@ struct RoutineDetailView: View {
         .padding(.leading, 20)
         .padding(.trailing, 32)
         .padding(.vertical, 16)
-    }
-
-    /// A picker that fills its parent column width
-    private func fullWidthPicker<SelectionValue: Hashable, Content: View>(
-        selection: Binding<SelectionValue>,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        Picker("", selection: selection) {
-            content()
-        }
-        .labelsHidden()
-        .frame(maxWidth: .infinity)
     }
 
     private func toggleDay(_ day: String) {

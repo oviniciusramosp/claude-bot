@@ -172,6 +172,8 @@ struct RoutineFormSheet: View {
                         Text("Pipeline").tag("pipeline")
                     }
                     .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
                     fieldLabel(executionTypeDescription)
                 }
                 .frame(maxWidth: .infinity)
@@ -179,7 +181,7 @@ struct RoutineFormSheet: View {
                 // Agent
                 VStack(alignment: .leading, spacing: 5) {
                     fieldLabel("Agent")
-                    formDropdown(selection: Binding(
+                    Picker("", selection: Binding(
                         get: { agentId ?? "__none__" },
                         set: { agentId = $0 == "__none__" ? nil : $0 }
                     )) {
@@ -188,6 +190,8 @@ struct RoutineFormSheet: View {
                             Text("\(a.icon) \(a.name)").tag(a.id)
                         }
                     }
+                    .labelsHidden()
+                    .frame(maxWidth: .infinity)
                     fieldLabel("Send to the Bot's conversation.")
                 }
                 .frame(maxWidth: .infinity)
@@ -198,15 +202,16 @@ struct RoutineFormSheet: View {
                 HStack(alignment: .top, spacing: 40) {
                     VStack(alignment: .leading, spacing: 5) {
                         fieldLabel("Model")
-                        formDropdown(selection: $model) {
+                        Picker("", selection: $model) {
                             Text("Sonnet 4.6").tag("sonnet")
                             Text("Opus 4.6").tag("opus")
                             Text("Haiku 4.5").tag("haiku")
                         }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
                         fieldLabel(modelDescription)
                     }
                     .frame(maxWidth: .infinity)
-                    // Invisible spacer to match two-column layout
                     Spacer().frame(maxWidth: .infinity)
                 }
             }
@@ -390,18 +395,6 @@ struct RoutineFormSheet: View {
         Text(text)
             .font(.system(size: 10))
             .foregroundStyle(Color(hex: 0x727272))
-    }
-
-    /// A picker that fills its parent column width
-    private func formDropdown<SelectionValue: Hashable, Content: View>(
-        selection: Binding<SelectionValue>,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        Picker("", selection: selection) {
-            content()
-        }
-        .labelsHidden()
-        .frame(maxWidth: .infinity)
     }
 
     private var executionTypeDescription: String {
