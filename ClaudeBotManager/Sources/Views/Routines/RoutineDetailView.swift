@@ -89,23 +89,25 @@ struct RoutineDetailView: View {
     // MARK: - Identity Section
 
     private var identitySection: some View {
-        HStack(alignment: .top, spacing: Spacing.md) {
+        HStack(alignment: .top, spacing: 10) {
             Image(systemName: "info.circle")
-                .foregroundStyle(.secondary)
-                .font(.body)
-                .padding(.top, 3)
+                .font(.system(size: 17))
+                .foregroundStyle(Color(white: 0.75))
+                .frame(width: 22)
 
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                TextField("Title", text: $routine.title)
-                    .font(.title2.bold())
-                    .textFieldStyle(.plain)
-                Text("\(routine.id).md")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 0) {
+                    TextField("Title", text: $routine.title)
+                        .font(.system(size: 17, weight: .bold))
+                        .textFieldStyle(.plain)
+                    Text("\(routine.id).md")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(white: 0.45))
+                }
                 TextField("Description", text: $routine.description,
                           prompt: Text("Routine description goes here").foregroundStyle(.quaternary))
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color(white: 0.45))
                     .textFieldStyle(.plain)
             }
 
@@ -114,10 +116,10 @@ struct RoutineDetailView: View {
             Toggle("", isOn: $routine.enabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .padding(.top, 2)
         }
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
+        .padding(.horizontal, 20)
+        .padding(.trailing, 12)
+        .padding(.vertical, 16)
     }
 
     // MARK: - Schedule Section
@@ -126,51 +128,47 @@ struct RoutineDetailView: View {
     private let weekdayLabels = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
     private var scheduleSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            Label("Schedule", systemImage: "calendar.badge.clock")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        detailFormSection(icon: "calendar", title: "Schedule") {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Select the days of the week the routine will repeat")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(white: 0.45))
 
-            Text("Select the days of the week the routine will repeat")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            // Day buttons — equal width, rounded rectangle
-            HStack(spacing: 6) {
-                ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
-                    let isAll      = routine.schedule.days.contains("*")
-                    let isSelected = isAll || routine.schedule.days.contains(day)
-                    Button(label) { toggleDay(day) }
-                        .font(.caption.bold())
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(isSelected ? Color.accentColor : Color.primary.opacity(0.06))
-                        .foregroundStyle(isSelected ? Color.white : Color.primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .buttonStyle(.plain)
+                HStack(spacing: 10) {
+                    ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                        let isAll      = routine.schedule.days.contains("*")
+                        let isSelected = isAll || routine.schedule.days.contains(day)
+                        Button(label) { toggleDay(day) }
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(width: 64, height: 24)
+                            .background(isSelected ? Color(red: 0.05, green: 0.44, blue: 1.0) : Color.black.opacity(0.05))
+                            .foregroundStyle(isSelected ? .white : Color.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .buttonStyle(.plain)
+                    }
                 }
             }
 
-            Text("Time of the day")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Time of the day")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(white: 0.45))
 
-            FlowLayout(spacing: Spacing.sm) {
-                AddTimeButton { time in
-                    if !routine.schedule.times.contains(time) {
-                        routine.schedule.times.append(time)
-                        routine.schedule.times.sort()
+                FlowLayout(spacing: 10) {
+                    AddTimeButton { time in
+                        if !routine.schedule.times.contains(time) {
+                            routine.schedule.times.append(time)
+                            routine.schedule.times.sort()
+                        }
                     }
-                }
-                ForEach(routine.schedule.times, id: \.self) { time in
-                    TimeChip(time: time) {
-                        routine.schedule.times.removeAll { $0 == time }
+                    ForEach(routine.schedule.times, id: \.self) { time in
+                        TimeChip(time: time) {
+                            routine.schedule.times.removeAll { $0 == time }
+                        }
                     }
                 }
             }
         }
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
     }
 
     // MARK: - Execution Section
@@ -228,122 +226,135 @@ struct RoutineDetailView: View {
     }
 
     private var executionSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            Label("Execution", systemImage: "gearshape")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            // Type segmented
-            VStack(alignment: .leading, spacing: Spacing.xs) {
-                Text("Type").font(.caption).foregroundStyle(.secondary)
-                Picker("", selection: Binding(
-                    get: { execType },
-                    set: { setExecType($0) }
-                )) {
-                    Text("Default").tag("default")
-                    Text("Minimal").tag("minimal")
-                    Text("Pipeline").tag("pipeline")
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                Text(execTypeDescription)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            // Model + Agent side by side
-            HStack(alignment: .top, spacing: Spacing.lg) {
-                // Model column
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text("Model").font(.caption).foregroundStyle(.secondary)
-                    Picker("", selection: $routine.model) {
-                        ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                            Text(modelDisplayName(m)).tag(m)
-                        }
+        detailFormSection(icon: "gearshape", title: "Execution") {
+            // Row 1: Type + Agent
+            HStack(alignment: .top, spacing: 40) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Type").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    Picker("", selection: Binding(
+                        get: { execType },
+                        set: { setExecType($0) }
+                    )) {
+                        Text("Default").tag("default")
+                        Text("Minimal").tag("minimal")
+                        Text("Pipeline").tag("pipeline")
                     }
-                    .frame(maxWidth: .infinity)
-                    Text(modelDescription(routine.model))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text(execTypeDescription)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(white: 0.45))
                 }
+                .frame(maxWidth: .infinity)
 
-                // Agent column
-                VStack(alignment: .leading, spacing: Spacing.xs) {
-                    Text("Agent").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Agent").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
                     Picker("", selection: $routine.agentId) {
-                        Text("🤖 Main (Default)").tag(String?.none)
+                        Text("Main (Default)").tag(String?.none)
                         ForEach(appState.agents) { a in
                             Text("\(a.icon) \(a.name)").tag(Optional(a.id))
                         }
                     }
+                    .labelsHidden()
                     .frame(maxWidth: .infinity)
+                    .frame(height: 24)
                     Text(agentDescription)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color(white: 0.45))
+                }
+                .frame(maxWidth: .infinity)
+            }
+
+            // Row 2: Model (hidden when pipeline)
+            if !routine.isPipeline {
+                HStack(alignment: .top, spacing: 40) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                        Picker("", selection: $routine.model) {
+                            ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
+                                Text(modelDisplayName(m)).tag(m)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 24)
+                        Text(modelDescription(routine.model))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(white: 0.45))
+                    }
+                    .frame(maxWidth: .infinity)
+                    Spacer().frame(maxWidth: .infinity)
                 }
             }
         }
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
     }
 
     // MARK: - Prompt Section
 
     private var promptSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            Label("Prompt", systemImage: "text.bubble")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
+        detailFormSection(icon: "text.alignleft", title: "Prompt") {
             TextEditor(text: $routine.promptBody)
-                .font(.system(.callout, design: .default))
-                .frame(minHeight: 180)
+                .font(.system(size: 13, weight: .medium))
+                .frame(minHeight: 181)
+                .padding(8)
                 .scrollContentBackground(.hidden)
-                .padding(Spacing.sm)
-                .background(Color.primary.opacity(0.03))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
                 )
         }
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
     }
 
     // MARK: - Pipeline Section
 
     private var pipelineSection: some View {
-        VStack(alignment: .leading, spacing: Spacing.md) {
-            Label("Pipeline Steps", systemImage: "arrow.triangle.branch")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "arrow.triangle.branch")
+                .font(.system(size: 17))
+                .foregroundStyle(Color(white: 0.75))
+                .frame(width: 22)
 
-            Text("Steps share a workspace. Each reads previous outputs from data/{id}.md.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Pipeline Steps")
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundStyle(Color.primary.opacity(0.5))
 
-            ForEach(Array(routine.pipelineStepDefs.enumerated()), id: \.element.id) { idx, _ in
-                PipelineStepCard(
-                    step: $routine.pipelineStepDefs[idx],
-                    index: idx + 1,
-                    allPreviousSteps: Array(routine.pipelineStepDefs.prefix(idx)),
-                    pipelineName: routine.id,
-                    onDelete: { routine.pipelineStepDefs.remove(at: idx) }
-                )
+                Text("Steps share a workspace. Each reads previous outputs from data/{id}.md.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Color(white: 0.45))
+
+                ForEach(Array(routine.pipelineStepDefs.enumerated()), id: \.element.id) { idx, _ in
+                    PipelineStepCard(
+                        step: $routine.pipelineStepDefs[idx],
+                        index: idx + 1,
+                        allPreviousSteps: Array(routine.pipelineStepDefs.prefix(idx)),
+                        pipelineName: routine.id,
+                        onDelete: { routine.pipelineStepDefs.remove(at: idx) }
+                    )
+                }
+
+                Button {
+                    routine.pipelineStepDefs.append(PipelineStepDef(model: routine.model))
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus").font(.system(size: 13, weight: .bold))
+                        Text("Add Step").font(.system(size: 13, weight: .medium))
+                    }
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Color.accentColor.opacity(0.1))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
             }
-
-            Button {
-                routine.pipelineStepDefs.append(PipelineStepDef(model: routine.model))
-            } label: {
-                Label("Add Step", systemImage: "plus.circle")
-                    .font(.callout)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(Color.accentColor)
         }
-        .padding(.horizontal, Spacing.xl)
-        .padding(.vertical, Spacing.lg)
+        .padding(.leading, 20)
+        .padding(.trailing, 32)
+        .padding(.vertical, 16)
     }
 
     // MARK: - Footer Bar
@@ -407,6 +418,28 @@ struct RoutineDetailView: View {
     }
 
     // MARK: - Helpers
+
+    @ViewBuilder
+    private func detailFormSection<Content: View>(icon: String, title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 17))
+                .foregroundStyle(Color(white: 0.75))
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundStyle(Color.primary.opacity(0.5))
+
+                content()
+            }
+        }
+        .padding(.leading, 20)
+        .padding(.trailing, 32)
+        .padding(.vertical, 16)
+    }
 
     private func toggleDay(_ day: String) {
         if routine.schedule.days.contains("*") {
