@@ -90,7 +90,7 @@ struct RoutineDetailView: View {
 
     private var identitySection: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle")
+            Image(systemName: "info.circle.fill")
                 .font(.system(size: 17))
                 .foregroundStyle(Color(white: 0.75))
                 .frame(width: 22)
@@ -226,7 +226,7 @@ struct RoutineDetailView: View {
     }
 
     private var executionSection: some View {
-        detailFormSection(icon: "gearshape", title: "Execution") {
+        detailFormSection(icon: "gear", title: "Execution") {
             // Row 1: Type + Agent (equal columns via GeometryReader)
             HStack(alignment: .top, spacing: 40) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -294,7 +294,7 @@ struct RoutineDetailView: View {
 
     private var pipelineSection: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "arrow.triangle.branch")
+            Image(systemName: "checklist")
                 .font(.system(size: 17))
                 .foregroundStyle(Color(white: 0.75))
                 .frame(width: 22)
@@ -710,7 +710,7 @@ struct PipelineStepsTab: View {
         GlassCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Image(systemName: "arrow.triangle.branch")
+                    Image(systemName: "checklist")
                         .font(.title3).foregroundStyle(Color.statusBlue)
                     Text("Pipeline").font(.headline)
                     Spacer()
@@ -755,7 +755,7 @@ struct PipelineStepsTab: View {
     private var noStepsCard: some View {
         GlassCard {
             HStack {
-                Image(systemName: "info.circle").foregroundStyle(.secondary)
+                Image(systemName: "info.circle.fill").foregroundStyle(.secondary)
                 Text("No execution data yet. Run the pipeline to see step details.")
                     .font(.caption).foregroundStyle(.secondary)
             }

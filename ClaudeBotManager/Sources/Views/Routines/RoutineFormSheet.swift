@@ -83,7 +83,7 @@ struct RoutineFormSheet: View {
 
     private var nameSection: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle")
+            Image(systemName: "info.circle.fill")
                 .font(.system(size: 17))
                 .foregroundStyle(Color(white: 0.75))
                 .frame(width: 22)
@@ -160,7 +160,7 @@ struct RoutineFormSheet: View {
     // MARK: - Execution Section
 
     private var executionSection: some View {
-        formSection(icon: "gearshape", title: "Execution") {
+        formSection(icon: "gear", title: "Execution") {
             // Row 1: Type + Agent
             HStack(alignment: .top, spacing: 40) {
                 // Type
@@ -226,7 +226,7 @@ struct RoutineFormSheet: View {
     // MARK: - Pipeline Steps Section
 
     private var pipelineStepsSection: some View {
-        formSection(icon: "arrow.triangle.branch", title: "Pipeline Steps") {
+        formSection(icon: "checklist", title: "Pipeline Steps") {
             ForEach(Array(pipelineSteps.enumerated()), id: \.element.id) { idx, _ in
                 PipelineStepCard(
                     step: $pipelineSteps[idx],
