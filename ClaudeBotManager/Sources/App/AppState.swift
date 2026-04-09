@@ -22,8 +22,12 @@ final class AppState: ObservableObject {
 
     // Config
     @Published var botConfig: BotConfig = .defaults
+    @Published var vaultEnvEntries: [VaultEnvEntry] = []
     @Published var vaultPath: String = ""
     @Published var dataDir: String = ""
+
+    // Vault env internals (preserves comments/blanks on save)
+    private var vaultEnvRawLines: [String] = []
 
     // Services
     private var vaultService: VaultService?
@@ -67,8 +71,9 @@ final class AppState: ObservableObject {
         claudeUsageService = ClaudeUsageService()
         contextService = ContextService(dataDir: dataDir)
 
-        // Load config from .env
+        // Load config from .env files
         loadConfig()
+        loadVaultEnv()
 
         // Watch key files for changes
         watchFiles()
@@ -88,6 +93,12 @@ final class AppState: ObservableObject {
         ] {
             fileWatcher.watch(path: path, onChange: refresh)
         }
+
+        // Watch vault .env for external changes
+        let vaultEnvRefresh: @Sendable () -> Void = { [weak self] in
+            Task { @MainActor in self?.loadVaultEnv() }
+        }
+        fileWatcher.watch(path: "\(vaultPath)/.env", onChange: vaultEnvRefresh)
 
         // Watch routines-state directory AND today's state file
         let stateDir = "\(dataDir)/routines-state"
@@ -388,6 +399,8 @@ final class AppState: ObservableObject {
                     config.claudePath = value
                 case "CLAUDE_WORKSPACE" where config.claudeWorkspace == BotConfig.defaults.claudeWorkspace:
                     config.claudeWorkspace = value
+                case "TTS_ENGINE" where config.ttsEngine == BotConfig.defaults.ttsEngine:
+                    config.ttsEngine = value
                 default: break
                 }
             }
@@ -402,11 +415,12 @@ final class AppState: ObservableObject {
             "TELEGRAM_BOT_TOKEN=\(config.telegramBotToken)",
             "TELEGRAM_CHAT_ID=\(config.telegramChatId)",
             "CLAUDE_PATH=\(config.claudePath)",
-            "CLAUDE_WORKSPACE=\(config.claudeWorkspace)"
+            "CLAUDE_WORKSPACE=\(config.claudeWorkspace)",
+            "TTS_ENGINE=\(config.ttsEngine)"
         ]
         // Preserve any extra keys already in the file
         if let existing = try? String(contentsOfFile: envPath, encoding: .utf8) {
-            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE"]
+            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE", "TTS_ENGINE"]
             for line in existing.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("#") { continue }
@@ -418,6 +432,62 @@ final class AppState: ObservableObject {
         }
         try lines.joined(separator: "\n").write(toFile: envPath, atomically: true, encoding: .utf8)
         botConfig = config
+    }
+
+    // MARK: - Vault .env
+
+    private func loadVaultEnv() {
+        let envPath = "\(vaultPath)/.env"
+        guard let content = try? String(contentsOfFile: envPath, encoding: .utf8) else {
+            vaultEnvRawLines = []
+            vaultEnvEntries = []
+            return
+        }
+        let lines = content.components(separatedBy: "\n")
+        vaultEnvRawLines = lines
+        var entries: [VaultEnvEntry] = []
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#"), trimmed.contains("=") else { continue }
+            let parts = trimmed.components(separatedBy: "=")
+            guard parts.count >= 2 else { continue }
+            let key = parts[0].trimmingCharacters(in: .whitespaces)
+            let value = parts[1...].joined(separator: "=").trimmingCharacters(in: .whitespaces)
+            entries.append(VaultEnvEntry(id: key, value: value))
+        }
+        vaultEnvEntries = entries
+    }
+
+    func saveVaultEnv(_ entries: [VaultEnvEntry]) throws {
+        let envPath = "\(vaultPath)/.env"
+        let lookup = Dictionary(entries.map { ($0.id, $0.value) }, uniquingKeysWith: { _, last in last })
+
+        // Reconstruct existing lines with updated values
+        var output: [String] = []
+        var handledKeys = Set<String>()
+        for line in vaultEnvRawLines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty || trimmed.hasPrefix("#") || !trimmed.contains("=") {
+                output.append(line)
+                continue
+            }
+            let key = trimmed.components(separatedBy: "=").first?.trimmingCharacters(in: .whitespaces) ?? ""
+            if let newValue = lookup[key] {
+                output.append("\(key)=\(newValue)")
+                handledKeys.insert(key)
+            } else {
+                output.append(line)
+                handledKeys.insert(key)
+            }
+        }
+
+        // Append new keys that weren't in the original file
+        for entry in entries where !handledKeys.contains(entry.id) {
+            output.append("\(entry.id)=\(entry.value)")
+        }
+
+        try output.joined(separator: "\n").write(toFile: envPath, atomically: true, encoding: .utf8)
+        loadVaultEnv()
     }
 
     private func formatUptime(_ t: TimeInterval) -> String {

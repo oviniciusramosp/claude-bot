@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.11.0"  # telegram: MarkdownV2, reply-to, copy-code button, sendDocument, link preview, silent routines, scoped commands
+BOT_VERSION = "2.12.0"  # feat: edge-tts neural voices as primary TTS engine with say fallback
 
 import http.server
 import json
@@ -56,6 +56,8 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("HEAR_PATH", _v)
             elif _k == "HEAR_LOCALE":
                 os.environ.setdefault("HEAR_LOCALE", _v)
+            elif _k == "TTS_ENGINE":
+                os.environ.setdefault("TTS_ENGINE", _v)
 CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "/opt/homebrew/bin/claude")
 CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent / "vault"))
 
@@ -77,8 +79,14 @@ HEAR_PATH = os.environ.get("HEAR_PATH", "")
 HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 
 # TTS (Text-to-Speech) voice response
+TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge-tts")  # "edge-tts" or "say"
 TTS_VOICE = os.environ.get("TTS_VOICE", "")  # empty = auto-select by locale
 SAY_PATH = "/usr/bin/say"
+EDGE_TTS_VOICE_MAP = {
+    "pt-BR": "pt-BR-AntonioNeural", "en-US": "en-US-GuyNeural", "es-ES": "es-ES-AlvaroNeural",
+    "fr-FR": "fr-FR-HenriNeural", "it-IT": "it-IT-DiegoNeural", "de-DE": "de-DE-ConradNeural",
+    "ja-JP": "ja-JP-KeitaNeural", "zh-CN": "zh-CN-YunxiNeural", "en-GB": "en-GB-RyanNeural",
+}
 SAY_VOICE_MAP = {
     "pt-BR": "Luciana", "en-US": "Samantha", "es-ES": "Mónica",
     "fr-FR": "Thomas", "it-IT": "Alice", "de-DE": "Anna",
@@ -2111,7 +2119,7 @@ class ClaudeTelegramBot:
         self.sessions = SessionManager()
         self.timeout_seconds = DEFAULT_TIMEOUT
         self.effort: Optional[str] = None
-        self._update_offset = 0
+        self._update_offset = self._load_offset()
         self._stop_event = threading.Event()
 
         # Thread contexts: keyed by (chat_id, thread_id)
@@ -2156,14 +2164,33 @@ class ClaudeTelegramBot:
         # TTS synthesis tools
         self._tts_tools = self._check_tts_tools()
         if self._tts_tools["can_synthesize"]:
-            logger.info("TTS synthesis: enabled (say=%s, ffmpeg=%s)",
+            logger.info("TTS synthesis: enabled (engine=%s, edge-tts=%s, say=%s, ffmpeg=%s)",
+                        TTS_ENGINE,
+                        self._tts_tools.get("edge_tts", "not found"),
                         self._tts_tools["say"], self._tts_tools["ffmpeg"])
         else:
-            logger.warning("TTS synthesis: disabled (say=%s, ffmpeg=%s)",
+            logger.warning("TTS synthesis: disabled (edge-tts=%s, say=%s, ffmpeg=%s)",
+                           self._tts_tools.get("edge_tts", "not found"),
                            self._tts_tools.get("say", "not found"),
                            self._tts_tools.get("ffmpeg", "not found"))
 
         logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
+
+    def _load_offset(self) -> int:
+        """Load last persisted Telegram update offset from disk."""
+        f = DATA_DIR / "telegram_offset.json"
+        try:
+            return json.loads(f.read_text()).get("offset", 0)
+        except Exception:
+            return 0
+
+    def _save_offset(self, offset: int) -> None:
+        """Persist Telegram update offset so restarts don't reprocess messages."""
+        f = DATA_DIR / "telegram_offset.json"
+        try:
+            f.write_text(json.dumps({"offset": offset}))
+        except Exception as exc:
+            logger.warning("Failed to persist telegram offset: %s", exc)
 
     def _load_contexts(self) -> None:
         """Restore context→session mappings from disk."""
@@ -2935,7 +2962,7 @@ class ClaudeTelegramBot:
         if not self._tts_tools.get("can_synthesize"):
             self.send_message(
                 "❌ TTS indisponível.\n"
-                "Necessário: `say` (macOS built-in) + `ffmpeg`."
+                "Necessário: `edge-tts` ou `say` (macOS) + `ffmpeg`."
             )
             return
         if arg.lower() in ("on", "1", "sim"):
@@ -2945,9 +2972,14 @@ class ClaudeTelegramBot:
         else:
             ctx.tts_enabled = not ctx.tts_enabled
         self._save_contexts()
-        voice = TTS_VOICE or SAY_VOICE_MAP.get(HEAR_LOCALE, "Samantha")
+        if TTS_ENGINE == "edge-tts" and self._tts_tools.get("edge_tts"):
+            engine = "Edge TTS"
+            voice = TTS_VOICE or EDGE_TTS_VOICE_MAP.get(HEAR_LOCALE, "pt-BR-AntonioNeural")
+        else:
+            engine = "macOS Say"
+            voice = TTS_VOICE or SAY_VOICE_MAP.get(HEAR_LOCALE, "Samantha")
         status = "✅ ativado" if ctx.tts_enabled else "❌ desativado"
-        self.send_message(f"🔊 Resposta por voz: {status}\nVoz: `{voice}`")
+        self.send_message(f"🔊 Resposta por voz: {status}\nEngine: `{engine}` | Voz: `{voice}`")
 
     def cmd_new(self, name: Optional[str]) -> None:
         # Consolidate current session before creating a new one
@@ -3700,14 +3732,19 @@ class ClaudeTelegramBot:
     # -- Voice synthesis (TTS) --
 
     def _check_tts_tools(self) -> Dict[str, Any]:
-        """Check availability of TTS synthesis tools (say + ffmpeg)."""
-        result: Dict[str, Any] = {"can_synthesize": False, "say": None, "ffmpeg": None}
+        """Check availability of TTS synthesis tools (edge-tts, say, ffmpeg)."""
+        result: Dict[str, Any] = {"can_synthesize": False, "say": None, "ffmpeg": None, "edge_tts": None}
         if Path(SAY_PATH).is_file():
             result["say"] = SAY_PATH
         ffmpeg = FFMPEG_PATH if Path(FFMPEG_PATH).is_file() else shutil.which("ffmpeg")
         if ffmpeg:
             result["ffmpeg"] = ffmpeg
-        result["can_synthesize"] = bool(result["say"] and result["ffmpeg"])
+        edge = shutil.which("edge-tts")
+        if edge:
+            result["edge_tts"] = edge
+        can_edge = bool(result["edge_tts"] and result["ffmpeg"])
+        can_say = bool(result["say"] and result["ffmpeg"])
+        result["can_synthesize"] = can_edge or can_say
         return result
 
     @staticmethod
@@ -3750,24 +3787,75 @@ class ClaudeTelegramBot:
             return None
 
         ts = int(time.time() * 1000)
-        aiff_path = TEMP_AUDIO_DIR / f"tts_{ts}.aiff"
         ogg_path = TEMP_AUDIO_DIR / f"tts_{ts}.ogg"
         TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Determine voice
-        voice = TTS_VOICE or SAY_VOICE_MAP.get(HEAR_LOCALE, "Samantha")
+        # Try configured engine first, fallback to the other
+        if TTS_ENGINE == "edge-tts" and self._tts_tools.get("edge_tts"):
+            result = self._tts_edge(clean, ogg_path)
+            if result:
+                return result
+            logger.warning("edge-tts failed, falling back to say")
 
+        if self._tts_tools.get("say") and self._tts_tools.get("ffmpeg"):
+            result = self._tts_say(clean, ogg_path)
+            if result:
+                return result
+
+        # If say is primary but failed, try edge-tts as fallback
+        if TTS_ENGINE == "say" and self._tts_tools.get("edge_tts"):
+            return self._tts_edge(clean, ogg_path)
+
+        return None
+
+    def _tts_edge(self, text: str, ogg_path: Path) -> Optional[Path]:
+        """Generate OGG via edge-tts (neural voices)."""
+        voice = TTS_VOICE or EDGE_TTS_VOICE_MAP.get(HEAR_LOCALE, "pt-BR-AntonioNeural")
+        mp3_path = ogg_path.with_suffix(".mp3")
         try:
-            # Generate AIFF via macOS say
             result = subprocess.run(
-                [SAY_PATH, "-v", voice, "-o", str(aiff_path), clean],
+                [self._tts_tools["edge_tts"], "--voice", voice,
+                 "--text", text, "--write-media", str(mp3_path)],
+                capture_output=True, timeout=60,
+            )
+            if result.returncode != 0 or not mp3_path.exists():
+                logger.error("edge-tts failed: %s", result.stderr.decode(errors="replace"))
+                return None
+
+            # Convert MP3 -> OGG Opus
+            ffmpeg = self._tts_tools["ffmpeg"]
+            result = subprocess.run(
+                [ffmpeg, "-y", "-i", str(mp3_path), "-c:a", "libopus", "-b:a", "48k", str(ogg_path)],
+                capture_output=True, timeout=30,
+            )
+            if result.returncode != 0 or not ogg_path.exists():
+                logger.error("ffmpeg edge-tts conversion failed: %s", result.stderr.decode(errors="replace"))
+                return None
+
+            return ogg_path
+        except Exception as exc:
+            logger.error("edge-tts generation failed: %s", exc)
+            return None
+        finally:
+            try:
+                if mp3_path.exists():
+                    mp3_path.unlink()
+            except OSError:
+                pass
+
+    def _tts_say(self, text: str, ogg_path: Path) -> Optional[Path]:
+        """Generate OGG via macOS say (fallback)."""
+        voice = TTS_VOICE or SAY_VOICE_MAP.get(HEAR_LOCALE, "Samantha")
+        aiff_path = ogg_path.with_suffix(".aiff")
+        try:
+            result = subprocess.run(
+                [SAY_PATH, "-v", voice, "-o", str(aiff_path), text],
                 capture_output=True, timeout=60,
             )
             if result.returncode != 0 or not aiff_path.exists():
                 logger.error("say failed: %s", result.stderr.decode(errors="replace"))
                 return None
 
-            # Convert AIFF to OGG Opus via ffmpeg
             ffmpeg = self._tts_tools["ffmpeg"]
             result = subprocess.run(
                 [ffmpeg, "-y", "-i", str(aiff_path), "-c:a", "libopus", "-b:a", "48k", str(ogg_path)],
@@ -3779,10 +3867,9 @@ class ClaudeTelegramBot:
 
             return ogg_path
         except Exception as exc:
-            logger.error("TTS generation failed: %s", exc)
+            logger.error("say TTS generation failed: %s", exc)
             return None
         finally:
-            # Cleanup intermediate AIFF
             try:
                 if aiff_path.exists():
                     aiff_path.unlink()
@@ -4785,6 +4872,7 @@ class ClaudeTelegramBot:
                     uid = update.get("update_id", 0)
                     if uid >= self._update_offset:
                         self._update_offset = uid + 1
+                        self._save_offset(self._update_offset)
                     try:
                         msg = update.get("message", {})
                         chat_id = str(msg.get("chat", {}).get("id", ""))
