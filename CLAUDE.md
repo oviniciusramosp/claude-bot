@@ -252,6 +252,8 @@ Se o output de uma rotina (nao pipeline) for exatamente `NO_REPLY`, o bot nao en
 | Rotina | Descricao |
 |--------|-----------|
 | `update-check` | Verifica diariamente se ha updates do Claude Code CLI (brew) ou do repo (git). Notifica apenas quando ha algo para atualizar. |
+| `vault-graph-update` | Regenera o knowledge graph lightweight do vault (`vault/.graphs/graph.json`) a partir de frontmatter e wikilinks. Sem custo de LLM. Roda diariamente as 4h. |
+| `journal-sweep` | Varredura noturna (23:45) que consolida sessoes do dia que nao foram registradas no Journal. |
 
 ## Voice / TTS
 
