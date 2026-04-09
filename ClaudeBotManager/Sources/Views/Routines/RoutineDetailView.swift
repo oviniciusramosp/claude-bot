@@ -324,12 +324,11 @@ struct RoutineDetailView: View {
                 .foregroundStyle(.tertiary)
 
             ForEach(Array(routine.pipelineStepDefs.enumerated()), id: \.element.id) { idx, _ in
-                PipelineStepRow(
+                PipelineStepCard(
                     step: $routine.pipelineStepDefs[idx],
                     index: idx + 1,
-                    allStepIds: routine.pipelineStepDefs.enumerated().compactMap { i, s in
-                        i != idx && !s.name.isEmpty ? stepSlug(s.name) : nil
-                    },
+                    allPreviousSteps: Array(routine.pipelineStepDefs.prefix(idx)),
+                    pipelineName: routine.id,
                     onDelete: { routine.pipelineStepDefs.remove(at: idx) }
                 )
             }

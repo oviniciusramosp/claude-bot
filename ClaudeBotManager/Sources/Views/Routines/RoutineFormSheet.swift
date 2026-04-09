@@ -13,11 +13,14 @@ struct RoutineFormSheet: View {
     @State private var agentId: String? = nil
     @State private var promptBody = ""
     @State private var isSaving = false
-    @State private var isPipeline = false
+    @State private var enabled = true
+    @State private var executionType: String = "default" // "default" | "minimal" | "pipeline"
     @State private var pipelineSteps: [PipelineStepDef] = []
 
     private let weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-    private let weekdayLabels = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    private let weekdayLabels = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
+
+    private var isPipeline: Bool { executionType == "pipeline" }
 
     private var canCreate: Bool {
         guard !title.isEmpty && !isSaving else { return false }
@@ -25,151 +28,376 @@ struct RoutineFormSheet: View {
         return !promptBody.isEmpty
     }
 
+    // MARK: - Body
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(spacing: Spacing.lg) {
-                    // Title card
-                    GlassCard {
-                        VStack(spacing: Spacing.md) {
-                            TextField("Routine Title", text: $title)
-                                .font(.title3.bold())
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: title) { _, v in
-                                    name = v.lowercased()
-                                        .replacingOccurrences(of: " ", with: "-")
-                                        .filter { $0.isLetter || $0.isNumber || $0 == "-" }
-                                }
-                            TextField("Description", text: $description, prompt: Text("What does this routine do?"))
-                                .font(.callout)
-                                .textFieldStyle(.roundedBorder)
-                            if !name.isEmpty {
-                                Text("File: \(name).md")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.tertiary)
-                            }
+            VStack(spacing: 0) {
+                ScrollView {
+                    VStack(spacing: 20) {
+                        // Routine Name section
+                        nameSection
+
+                        sectionDivider
+
+                        // Schedule section
+                        scheduleSection
+
+                        sectionDivider
+
+                        // Execution section
+                        executionSection
+
+                        sectionDivider
+
+                        // Prompt (routine) or Pipeline Steps
+                        if isPipeline {
+                            pipelineStepsSection
+                        } else {
+                            promptSection
                         }
                     }
-
-                    // Schedule card
-                    SectionCard(title: "Schedule", symbol: "calendar") {
-                        VStack(alignment: .leading, spacing: Spacing.sm) {
-                            Text("Days").font(.caption).foregroundStyle(.secondary)
-                            HStack(spacing: Spacing.sm) {
-                                let isAll = days.contains("*")
-                                Button("All") { days = ["*"] }
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 10).padding(.vertical, 6)
-                                    .background(isAll ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
-                                    .foregroundStyle(isAll ? Color.statusBlue : Color.secondary)
-                                    .clipShape(Capsule())
-
-                                ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
-                                    let selected = days.contains(day)
-                                    Button(label) { toggleDay(day) }
-                                        .font(.caption.bold())
-                                        .padding(.horizontal, 10).padding(.vertical, 6)
-                                        .background(selected ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
-                                        .foregroundStyle(selected ? Color.statusBlue : Color.secondary)
-                                        .clipShape(Capsule())
-                                }
-                            }
-                        }
-
-                        VStack(alignment: .leading, spacing: Spacing.sm) {
-                            Text("Times (24h)").font(.caption).foregroundStyle(.secondary)
-                            FlowLayout(spacing: Spacing.sm) {
-                                ForEach(times, id: \.self) { time in
-                                    TimeChip(time: time) { times.removeAll { $0 == time } }
-                                }
-                                AddTimeButton { t in
-                                    if !times.contains(t) { times.append(t); times.sort() }
-                                }
-                            }
-                        }
-                    }
-
-                    // Execution settings
-                    SectionCard(title: "Execution", symbol: "gearshape") {
-                        SettingRow("Model") {
-                            Picker("", selection: $model) {
-                                ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                                    Text(m.capitalized).tag(m)
-                                }
-                            }
-                            .pickerStyle(.segmented).frame(width: 200)
-                        }
-
-                        SettingRow("Agent") {
-                            Picker("", selection: $agentId) {
-                                Text("None").tag(String?.none)
-                                ForEach(appState.agents) { a in
-                                    Text("\(a.icon) \(a.name)").tag(Optional(a.id))
-                                }
-                            }
-                            .frame(maxWidth: 200)
-                        }
-
-                        SettingRow("Pipeline") {
-                            Toggle("", isOn: $isPipeline)
-                                .labelsHidden()
-                                .toggleStyle(.switch)
-                        }
-                    }
-
-                    // Prompt (routine) or Steps (pipeline)
-                    if isPipeline {
-                        PipelineStepEditorCard(steps: $pipelineSteps, defaultModel: model)
-                    } else {
-                        SectionCard(title: "Prompt", symbol: "text.alignleft") {
-                            TextEditor(text: $promptBody)
-                                .font(.callout)
-                                .frame(minHeight: 120)
-                                .scrollContentBackground(.hidden)
-                                .background(Color.primary.opacity(0.03))
-                                .clipShape(RoundedRectangle(cornerRadius: 8))
-                        }
-                    }
+                    .padding(.top, 20)
                 }
-                .padding(Spacing.xl)
+
+                // Bottom bar
+                bottomBar
             }
-            .navigationTitle(isPipeline ? "New Pipeline" : "New Routine")
+            .navigationTitle("")
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
-                        isSaving = true
-                        let todayStr = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
-                        for i in pipelineSteps.indices { pipelineSteps[i].autoId() }
-                        let routine = Routine(
-                            id: name,
-                            title: title,
-                            description: description,
-                            schedule: Routine.Schedule(times: times, days: days, until: nil),
-                            model: model,
-                            agentId: agentId,
-                            enabled: true,
-                            promptBody: isPipeline ? "" : promptBody,
-                            created: todayStr,
-                            updated: todayStr,
-                            tags: [isPipeline ? "pipeline" : "routine"],
-                            routineType: isPipeline ? "pipeline" : "routine",
-                            notify: "final",
-                            pipelineStepDefs: isPipeline ? pipelineSteps : []
-                        )
-                        Task {
-                            try? await appState.saveRoutine(routine)
-                            isSaving = false
-                            dismiss()
-                        }
+                ToolbarItem(placement: .principal) {
+                    Picker("", selection: .constant("config")) {
+                        Text("Configuration").tag("config")
+                        Text("History").tag("history")
                     }
-                    .disabled(!canCreate)
+                    .pickerStyle(.segmented)
+                    .frame(width: 254)
                 }
             }
         }
-        .frame(minWidth: 640, minHeight: 520)
+        .frame(minWidth: 680, minHeight: 560)
+    }
+
+    // MARK: - Name Section
+
+    private var nameSection: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "info.circle")
+                .font(.system(size: 17))
+                .foregroundStyle(Color(white: 0.75))
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 0) {
+                    TextField("Routine Name", text: $title)
+                        .font(.system(size: 17, weight: .bold))
+                        .textFieldStyle(.plain)
+                        .onChange(of: title) { _, v in
+                            name = v.lowercased()
+                                .replacingOccurrences(of: " ", with: "-")
+                                .filter { $0.isLetter || $0.isNumber || $0 == "-" }
+                        }
+                    if !name.isEmpty {
+                        Text("\(name).md")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(hex: 0x727272))
+                    }
+                }
+                TextField("Routine description goes here", text: $description)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color(hex: 0x727272))
+                    .textFieldStyle(.plain)
+            }
+
+            Toggle("", isOn: $enabled)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .frame(width: 54)
+        }
+        .padding(.horizontal, 20)
+        .padding(.trailing, 12)
+    }
+
+    // MARK: - Schedule Section
+
+    private var scheduleSection: some View {
+        formSection(icon: "calendar", title: "Schedule") {
+            // Days
+            VStack(alignment: .leading, spacing: 5) {
+                fieldLabel("Select the days of the week the routine will repeat")
+                HStack(spacing: 10) {
+                    ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                        let selected = days.contains(day) || days.contains("*")
+                        Button(label) {
+                            toggleDay(day)
+                        }
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 64, height: 24)
+                        .background(selected ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
+                        .foregroundStyle(selected ? .white : Color.primary)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            // Times
+            VStack(alignment: .leading, spacing: 5) {
+                fieldLabel("Time of the day")
+                FlowLayout(spacing: 10) {
+                    AddTimeButton { t in
+                        if !times.contains(t) { times.append(t); times.sort() }
+                    }
+                    ForEach(times, id: \.self) { time in
+                        TimeChip(time: time) { times.removeAll { $0 == time } }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Execution Section
+
+    private var executionSection: some View {
+        formSection(icon: "gearshape", title: "Execution") {
+            // Row 1: Type + Agent
+            HStack(alignment: .top, spacing: 40) {
+                // Type
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Type")
+                    Picker("", selection: $executionType) {
+                        Text("Default").tag("default")
+                        Text("Minimal").tag("minimal")
+                        Text("Pipeline").tag("pipeline")
+                    }
+                    .pickerStyle(.segmented)
+                    fieldLabel(executionTypeDescription)
+                }
+
+                // Agent
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Agent")
+                    Picker("", selection: $agentId) {
+                        Text("Main (Default)").tag(String?.none)
+                        ForEach(appState.agents) { a in
+                            Text("\(a.icon) \(a.name)").tag(Optional(a.id))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    fieldLabel("Send to the Bot's conversation.")
+                }
+            }
+
+            // Row 2: Model (hidden when pipeline)
+            if !isPipeline {
+                HStack(alignment: .top, spacing: 40) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        fieldLabel("Model")
+                        Picker("", selection: $model) {
+                            Text("Sonnet 4.6").tag("sonnet")
+                            Text("Opus 4.6").tag("opus")
+                            Text("Haiku 4.5").tag("haiku")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        fieldLabel(modelDescription)
+                    }
+                    // Invisible spacer to match two-column layout
+                    Color.clear.frame(maxWidth: .infinity, maxHeight: 0)
+                }
+            }
+        }
+    }
+
+    // MARK: - Prompt Section
+
+    private var promptSection: some View {
+        formSection(icon: "text.alignleft", title: "Prompt") {
+            TextEditor(text: $promptBody)
+                .font(.system(size: 13, weight: .medium))
+                .frame(minHeight: 181)
+                .padding(8)
+                .scrollContentBackground(.hidden)
+                .background(Color.white)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+        }
+    }
+
+    // MARK: - Pipeline Steps Section
+
+    private var pipelineStepsSection: some View {
+        formSection(icon: "arrow.triangle.branch", title: "Pipeline Steps") {
+            ForEach(Array(pipelineSteps.enumerated()), id: \.element.id) { idx, _ in
+                PipelineStepCard(
+                    step: $pipelineSteps[idx],
+                    index: idx + 1,
+                    allPreviousSteps: Array(pipelineSteps.prefix(idx)),
+                    pipelineName: name,
+                    onDelete: { pipelineSteps.remove(at: idx) }
+                )
+            }
+
+            Button {
+                pipelineSteps.append(PipelineStepDef(model: "sonnet"))
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "plus").font(.system(size: 13, weight: .bold))
+                    Text("Add Step").font(.system(size: 13, weight: .medium))
+                }
+                .foregroundStyle(Color(hex: 0x0088FF))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Color(hex: 0x0D6FFF).opacity(0.1))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Bottom Bar
+
+    private var bottomBar: some View {
+        HStack(spacing: 8) {
+            // Run Now
+            Button {
+                // TODO: trigger dry run
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "play.circle.fill").font(.system(size: 13))
+                    Text("Run Now").font(.system(size: 13, weight: .medium))
+                }
+                .padding(.horizontal, 16)
+                .frame(height: 24)
+                .background(Color.black.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+
+            // Delete
+            Button(role: .destructive) {
+                // TODO: delete routine
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "trash").font(.system(size: 13))
+                    Text("Delete").font(.system(size: 13, weight: .medium))
+                }
+                .foregroundStyle(Color(hex: 0xFF383C))
+                .padding(.horizontal, 16)
+                .frame(height: 24)
+                .background(Color(hex: 0xFF383C).opacity(0.25))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            // Cancel
+            Button("Cancel") { dismiss() }
+                .font(.system(size: 13, weight: .medium))
+                .padding(.horizontal, 16)
+                .frame(height: 24)
+                .background(Color.black.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .buttonStyle(.plain)
+
+            // Save
+            Button("Save") {
+                isSaving = true
+                let todayStr = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
+                for i in pipelineSteps.indices { pipelineSteps[i].autoId() }
+                let routine = Routine(
+                    id: name,
+                    title: title,
+                    description: description,
+                    schedule: Routine.Schedule(times: times, days: days, until: nil),
+                    model: model,
+                    agentId: agentId,
+                    enabled: enabled,
+                    promptBody: isPipeline ? "" : promptBody,
+                    created: todayStr,
+                    updated: todayStr,
+                    tags: [isPipeline ? "pipeline" : "routine"],
+                    routineType: isPipeline ? "pipeline" : (executionType == "minimal" ? "routine" : "routine"),
+                    notify: "final",
+                    minimalContext: executionType == "minimal",
+                    pipelineStepDefs: isPipeline ? pipelineSteps : []
+                )
+                Task {
+                    try? await appState.saveRoutine(routine)
+                    isSaving = false
+                    dismiss()
+                }
+            }
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 16)
+            .frame(height: 24)
+            .background(Color(hex: 0x0D6FFF))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .buttonStyle(.plain)
+            .disabled(!canCreate)
+            .opacity(canCreate ? 1 : 0.5)
+        }
+        .padding(.horizontal, 17)
+        .padding(.top, 22)
+        .padding(.bottom, 20)
+        .overlay(alignment: .top) {
+            Color.black.opacity(0.1).frame(height: 1)
+        }
+    }
+
+    // MARK: - Helpers
+
+    @ViewBuilder
+    private func formSection<Content: View>(icon: String, title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 17))
+                .foregroundStyle(Color(white: 0.75))
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundStyle(Color.primary.opacity(0.5))
+
+                content()
+            }
+        }
+        .padding(.leading, 20)
+        .padding(.trailing, 32)
+    }
+
+    private var sectionDivider: some View {
+        Color.black.opacity(0.05)
+            .frame(height: 1)
+            .padding(.horizontal, 20)
+    }
+
+    private func fieldLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundStyle(Color(hex: 0x727272))
+    }
+
+    private var executionTypeDescription: String {
+        switch executionType {
+        case "minimal": return "Minimal context to execute the routine. Agent won't read the vault."
+        case "pipeline": return "Multi-step pipeline with individual agents per step."
+        default: return "Full context. Agent reads the vault for context."
+        }
+    }
+
+    private var modelDescription: String {
+        switch model {
+        case "opus": return "Most capable for ambitious work"
+        case "haiku": return "Fast and lightweight"
+        default: return "Best balance of speed and quality"
+        }
     }
 
     private func toggleDay(_ day: String) {
@@ -183,242 +411,277 @@ struct RoutineFormSheet: View {
     }
 }
 
-// MARK: - Pipeline Step Editor Card
-// (TimeChip, AddTimeButton, FlowLayout are defined in RoutineDetailView.swift)
+// MARK: - Pipeline Step Card
 
-struct PipelineStepEditorCard: View {
-    @Binding var steps: [PipelineStepDef]
-    var defaultModel: String
-
-    var body: some View {
-        SectionCard(title: "Pipeline Steps", symbol: "arrow.triangle.branch") {
-            Text("Steps share a workspace. Each reads previous outputs from data/{id}.md.")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-
-            ForEach(Array(steps.enumerated()), id: \.element.id) { idx, _ in
-                PipelineStepRow(
-                    step: $steps[idx],
-                    index: idx + 1,
-                    allStepIds: steps.enumerated().compactMap { i, s in
-                        guard i != idx else { return nil }
-                        let sid = s.stepId.isEmpty ? stepSlug(s.name) : s.stepId
-                        return sid.isEmpty ? nil : sid
-                    },
-                    onDelete: { steps.remove(at: idx) }
-                )
-            }
-
-            Button {
-                steps.append(PipelineStepDef(model: defaultModel))
-            } label: {
-                Label("Add Step", systemImage: "plus.circle")
-                    .font(.callout)
-            }
-            .buttonStyle(.borderless)
-            .foregroundStyle(Color.statusBlue)
-        }
-    }
-
-    private func stepSlug(_ name: String) -> String {
-        name.lowercased()
-            .replacingOccurrences(of: " ", with: "-")
-            .filter { $0.isLetter || $0.isNumber || $0 == "-" }
-    }
-}
-
-struct PipelineStepRow: View {
+struct PipelineStepCard: View {
     @Binding var step: PipelineStepDef
     var index: Int
-    var allStepIds: [String]
+    var allPreviousSteps: [PipelineStepDef]
+    var pipelineName: String
     var onDelete: () -> Void
 
     @State private var isExpanded = true
+    @State private var showDepPicker = false
+
+    private var effectiveStepId: String {
+        step.stepId.isEmpty
+            ? step.name.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }
+            : step.stepId
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header — always visible
+            // Header
             Button { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } } label: {
-                HStack(spacing: Spacing.sm) {
-                    Text("Step \(index)")
-                        .font(.callout.bold())
-                        .foregroundStyle(Color.statusBlue)
-                    if !step.name.isEmpty {
-                        Text("— \(step.name)")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
+                HStack(spacing: 5) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color(white: 0.75))
+                        .frame(width: 22)
+
+                    Text("Step \(index):")
+                        .font(.system(size: 15, weight: .bold))
+                        .tracking(-0.6)
+                        .foregroundStyle(Color.primary.opacity(0.5))
+
+                    Text(step.name.isEmpty ? "Untitled" : step.name)
+                        .font(.system(size: 15, weight: .bold))
+                        .tracking(-0.6)
+                        .foregroundStyle(step.name.isEmpty ? Color.primary.opacity(0.3) : Color.primary)
+
                     Spacer()
-                    ModelBadge(model: step.model)
-                    Image(systemName: "chevron.right")
-                        .font(.caption.bold())
-                        .foregroundStyle(.tertiary)
-                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(Spacing.lg)
 
-            // Expanded content
+            // Model picker (always visible in header area, right-aligned)
+            HStack {
+                Spacer()
+                Picker("", selection: $step.model) {
+                    Text("Sonnet 4.6").tag("sonnet")
+                    Text("Opus 4.6").tag("opus")
+                    Text("Haiku 4.5").tag("haiku")
+                }
+                .frame(width: 318)
+            }
+            .padding(.top, -22) // overlap with header line
+
             if isExpanded {
-                Divider().padding(.horizontal, Spacing.lg)
+                Color.black.opacity(0.05).frame(height: 1).padding(.top, 10)
 
-                VStack(alignment: .leading, spacing: Spacing.lg) {
-                    // Step name + output file hint
-                    VStack(alignment: .leading, spacing: Spacing.xs) {
-                        Text("Step Name").font(.caption).foregroundStyle(.secondary)
-                        TextField("e.g. Analyze Data", text: $step.name)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.callout)
-                        let effectiveId = step.stepId.isEmpty
-                            ? step.name.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }
-                            : step.stepId
-                        if !effectiveId.isEmpty {
-                            Text("Output: data/\(effectiveId).md")
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.tertiary)
-                        }
+                VStack(alignment: .leading, spacing: 10) {
+                    // Step name (editable)
+                    TextField("Step Name", text: $step.name)
+                        .font(.system(size: 15, weight: .bold))
+                        .tracking(-0.6)
+                        .textFieldStyle(.plain)
+                        .opacity(0) // name edited via header visually, this syncs the binding
+                        .frame(height: 0)
+
+                    // Prompt
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Prompt")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(hex: 0x727272))
+
+                        TextEditor(text: $step.prompt)
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(height: 100)
+                            .padding(8)
+                            .scrollContentBackground(.hidden)
+                            .background(Color.white)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                            )
                     }
 
-                    // Model
-                    SettingRow("Model") {
-                        Picker("", selection: $step.model) {
-                            ForEach(["sonnet", "opus", "haiku"], id: \.self) { m in
-                                Text(m.capitalized).tag(m)
+                    // Settings row: Output + File | Retries + Timeouts
+                    HStack(alignment: .top, spacing: 20) {
+                        // Left half: Output + File name
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Output")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                Picker("", selection: Binding(
+                                    get: {
+                                        let ot = step.outputType
+                                        if ot == "none" || ot == "file" || ot == "telegram" { return ot }
+                                        return "vault"
+                                    },
+                                    set: { val in
+                                        step.outputType = val
+                                        step.outputToTelegram = (val == "telegram")
+                                        if val == "vault" {
+                                            step.outputType = "Routines/\(pipelineName)/"
+                                        }
+                                    }
+                                )) {
+                                    Text("Temp. File").tag("file")
+                                    Text("Vault Path").tag("vault")
+                                    Text("Telegram Message").tag("telegram")
+                                    Text("None").tag("none")
+                                }
+                                .labelsHidden()
+                            }
+
+                            // File name / File path field
+                            if step.outputType == "file" || (step.outputType != "telegram" && step.outputType != "none") {
+                                let isVault = step.outputType != "file" && step.outputType != "telegram" && step.outputType != "none"
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(isVault ? "File path" : "File name")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color(hex: 0x727272))
+
+                                    if isVault {
+                                        TextField("Routines/pipeline/output.md", text: $step.outputType)
+                                            .font(.system(size: 13, weight: .medium))
+                                            .textFieldStyle(.roundedBorder)
+                                            .frame(height: 24)
+                                    } else {
+                                        Text(effectiveStepId.isEmpty ? "step.md" : "\(effectiveStepId).md")
+                                            .font(.system(size: 13, weight: .medium))
+                                            .foregroundStyle(Color.primary.opacity(0.85))
+                                            .frame(height: 24, alignment: .leading)
+                                            .padding(.horizontal, 8)
+                                            .background(Color.white)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.black.opacity(0.08), lineWidth: 1))
+                                    }
+                                }
                             }
                         }
-                        .pickerStyle(.segmented)
-                        .frame(width: 200)
+
+                        // Right half: Retries + Timeout (Idle) + Timeout (Max)
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Retries")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                TextField("0", value: $step.retry, format: .number)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 24)
+                            }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Timeout (Idle)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                TextField("60s", value: $step.inactivityTimeout, format: .number)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 24)
+                            }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Timeout (Max)")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                TextField("600s", value: $step.timeout, format: .number)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 24)
+                            }
+                        }
                     }
 
-                    // Dependencies
-                    if !allStepIds.isEmpty {
-                        VStack(alignment: .leading, spacing: Spacing.sm) {
-                            Text("Depends on").font(.caption).foregroundStyle(.secondary)
-                            FlowLayout(spacing: 6) {
-                                ForEach(allStepIds, id: \.self) { sid in
-                                    let selected = step.dependsOn.contains(sid)
-                                    Button(sid) {
-                                        if selected { step.dependsOn.removeAll { $0 == sid } }
-                                        else { step.dependsOn.append(sid) }
+                    // Dependencies (only for steps after step 1)
+                    if index > 1 && !allPreviousSteps.isEmpty {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Dependencies")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(hex: 0x727272))
+
+                            FlowLayout(spacing: 10) {
+                                // Add Dependency button
+                                Menu {
+                                    ForEach(Array(allPreviousSteps.enumerated()), id: \.element.id) { i, prev in
+                                        let sid = prev.stepId.isEmpty
+                                            ? prev.name.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }
+                                            : prev.stepId
+                                        if !sid.isEmpty {
+                                            let selected = step.dependsOn.contains(sid)
+                                            Button {
+                                                if selected { step.dependsOn.removeAll { $0 == sid } }
+                                                else { step.dependsOn.append(sid) }
+                                            } label: {
+                                                HStack {
+                                                    Text("Step \(i + 1): \(prev.name)")
+                                                    if selected {
+                                                        Image(systemName: "checkmark")
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
-                                    .font(.caption)
-                                    .padding(.horizontal, 10).padding(.vertical, 5)
-                                    .background(selected ? Color.statusBlue.opacity(0.2) : Color.primary.opacity(0.06))
-                                    .foregroundStyle(selected ? Color.statusBlue : .secondary)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "plus").font(.system(size: 13, weight: .bold))
+                                        Text("Add Dependency").font(.system(size: 13, weight: .medium))
+                                    }
+                                    .foregroundStyle(Color(hex: 0x0088FF))
+                                    .padding(.horizontal, 12)
+                                    .frame(height: 24)
+                                    .background(Color(hex: 0x0D6FFF).opacity(0.1))
+                                    .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+
+                                // Dependency chips
+                                ForEach(step.dependsOn, id: \.self) { depId in
+                                    let depIndex = allPreviousSteps.firstIndex { ($0.stepId.isEmpty ? $0.name.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" } : $0.stepId) == depId }
+                                    HStack(spacing: 4) {
+                                        Text("Step \(depIndex.map { $0 + 1 } ?? 0)")
+                                            .font(.system(size: 13, weight: .medium))
+                                        Button {
+                                            step.dependsOn.removeAll { $0 == depId }
+                                        } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(Color(hex: 0x8E8E93))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    .padding(.leading, 10)
+                                    .padding(.trailing, 5)
+                                    .frame(height: 24)
+                                    .background(Color.black.opacity(0.05))
                                     .clipShape(Capsule())
                                 }
                             }
                         }
                     }
 
-                    // Timeouts — vertical layout
-                    VStack(alignment: .leading, spacing: Spacing.sm) {
-                        Text("Timeouts").font(.caption).foregroundStyle(.secondary)
-
-                        HStack(spacing: Spacing.xl) {
-                            HStack(spacing: Spacing.xs) {
-                                Text("Idle")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 40, alignment: .trailing)
-                                TextField("", value: $step.inactivityTimeout, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 70)
-                                    .font(.body.monospacedDigit())
-                                Text("s").font(.callout).foregroundStyle(.tertiary)
-                            }
-                            .help("Kill step after this many seconds without output")
-
-                            HStack(spacing: Spacing.xs) {
-                                Text("Max")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 40, alignment: .trailing)
-                                TextField("", value: $step.timeout, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 70)
-                                    .font(.body.monospacedDigit())
-                                Text("s").font(.callout).foregroundStyle(.tertiary)
-                            }
-                            .help("Hard time limit for this step")
-
-                            HStack(spacing: Spacing.xs) {
-                                Text("Retries")
-                                    .font(.callout)
-                                    .foregroundStyle(.secondary)
-                                TextField("", value: $step.retry, format: .number)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 50)
-                                    .font(.body.monospacedDigit())
-                            }
-                            .help("Number of retry attempts if this step fails")
-                        }
-                    }
-
-                    // Output type
-                    SettingRow("Output") {
-                        Picker("", selection: Binding(
-                            get: {
-                                let ot = step.outputType
-                                if ot == "none" || ot == "file" || ot == "telegram" { return ot }
-                                return "vault"
-                            },
-                            set: { newVal in
-                                step.outputType = newVal
-                                step.outputToTelegram = (newVal == "telegram")
-                                if newVal == "vault" { step.outputType = "Notes/" }
-                            }
-                        )) {
-                            Text("Temp file").tag("file")
-                            Text("Telegram").tag("telegram")
-                            Text("Vault path").tag("vault")
-                            Text("None").tag("none")
-                        }
-                        .labelsHidden()
-                        .frame(width: 120)
-                    }
-
-                    // Vault path field (only when vault output selected)
-                    if step.outputType != "file" && step.outputType != "telegram" && step.outputType != "none" {
-                        SettingRow("Vault path") {
-                            TextField("Notes/report.md", text: $step.outputType)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 200)
-                                .font(.system(.callout, design: .monospaced))
-                        }
-                    }
-
-                    // Prompt
-                    VStack(alignment: .leading, spacing: Spacing.sm) {
-                        Text("Prompt").font(.caption).foregroundStyle(.secondary)
-                        TextEditor(text: $step.prompt)
-                            .font(.system(.callout, design: .monospaced))
-                            .frame(minHeight: 120)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.primary.opacity(0.03))
-                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-
-                    // Delete at bottom
+                    // Delete step
                     HStack {
                         Spacer()
                         Button(role: .destructive, action: onDelete) {
                             Label("Delete Step", systemImage: "trash")
-                                .font(.callout)
+                                .font(.system(size: 13))
                         }
                         .buttonStyle(.borderless)
                     }
                 }
-                .padding(Spacing.lg)
+                .padding(.top, 10)
             }
         }
-        .background(Color.primary.opacity(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.glassBorder, lineWidth: 0.5)
+        .padding(20)
+        .background(Color(red: 0.965, green: 0.965, blue: 0.965, opacity: 0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+// MARK: - Color hex helper
+
+private extension Color {
+    init(hex: UInt, opacity: Double = 1.0) {
+        self.init(
+            red: Double((hex >> 16) & 0xFF) / 255,
+            green: Double((hex >> 8) & 0xFF) / 255,
+            blue: Double(hex & 0xFF) / 255,
+            opacity: opacity
         )
     }
 }
