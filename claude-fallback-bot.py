@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.12.0"  # feat: edge-tts neural voices as primary TTS engine with say fallback
+BOT_VERSION = "2.12.1"  # feat: voice/text response picker during audio transcription
 
 import http.server
 import json
@@ -2150,6 +2150,7 @@ class ClaudeTelegramBot:
 
         # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
         self._pending_approvals: Dict[str, dict] = {}
+        self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
 
         # Voice transcription tools
         self._voice_tools = self._check_voice_tools()
@@ -3669,13 +3670,27 @@ class ClaudeTelegramBot:
             )
             return
 
-        # Status message
+        # Voice/text response picker — show buttons while transcribing
         self.send_typing("record_voice")
-        status_msg = self.send_message(f"🎤 Áudio recebido ({duration}s). Transcrevendo...")
+        ctx = self._ctx
+        current_is_voice = ctx.tts_enabled if ctx else False
+        pick_id = secrets.token_hex(4)
+        self._voice_picks[pick_id] = {"force_tts": current_is_voice, "resolved": False}
+        markup = {"inline_keyboard": [[
+            {"text": f"🔊 Áudio{' ✓' if current_is_voice else ''}",
+             "callback_data": f"voicepick:{pick_id}:audio"},
+            {"text": f"💬 Texto{' ✓' if not current_is_voice else ''}",
+             "callback_data": f"voicepick:{pick_id}:text"},
+        ]]}
+        status_msg = self.send_message(
+            f"🎤 Áudio recebido ({duration}s). Transcrevendo...",
+            reply_markup=markup,
+        )
 
         # Download
         saved = self._download_telegram_file(file_id, save_dir=TEMP_AUDIO_DIR)
         if not saved:
+            self._voice_picks.pop(pick_id, None)
             self._voice_status(status_msg, "❌ Não consegui baixar o áudio.")
             return
 
@@ -3683,12 +3698,14 @@ class ClaudeTelegramBot:
             # Convert OGG → WAV
             wav_path = self._convert_ogg_to_wav(saved)
             if not wav_path:
+                self._voice_picks.pop(pick_id, None)
                 self._voice_status(status_msg, "❌ Falha na conversão do áudio (ffmpeg).")
                 return
 
             # Transcribe
             transcription = self._transcribe_audio(wav_path)
             if not transcription:
+                self._voice_picks.pop(pick_id, None)
                 self._voice_status(
                     status_msg,
                     "❌ Falha na transcrição.\n"
@@ -3696,7 +3713,11 @@ class ClaudeTelegramBot:
                 )
                 return
 
-            # Show transcription preview
+            # Resolve pick: read user's choice and remove buttons
+            pick = self._voice_picks.pop(pick_id, None)
+            force_tts = pick["force_tts"] if pick else current_is_voice
+
+            # Show transcription preview (removes inline keyboard)
             preview = transcription[:500] + ("..." if len(transcription) > 500 else "")
             self._voice_status(status_msg, f"🎤 _{preview}_")
 
@@ -3708,7 +3729,12 @@ class ClaudeTelegramBot:
             else:
                 prompt = f"{prefix}\n\n{reply_ctx}{transcription}"
 
-            self._handle_text(prompt, user_msg_id=user_msg_id)
+            # Send to Claude with the user's response format choice
+            if ctx:
+                ctx.user_msg_id = user_msg_id
+                self.set_reaction(user_msg_id, "👀")
+                ctx.last_reaction = "👀"
+            self._run_claude_prompt(prompt, force_tts=force_tts)
 
         finally:
             # Cleanup temp files
@@ -3794,18 +3820,21 @@ class ClaudeTelegramBot:
 
         # Try configured engine first, fallback to the other
         if TTS_ENGINE == "edge-tts" and self._tts_tools.get("edge_tts"):
+            logger.info("TTS: generating with edge-tts")
             result = self._tts_edge(clean, ogg_path)
             if result:
                 return result
             logger.warning("edge-tts failed, falling back to say")
 
         if self._tts_tools.get("say") and self._tts_tools.get("ffmpeg"):
+            logger.info("TTS: generating with macOS say")
             result = self._tts_say(clean, ogg_path)
             if result:
                 return result
 
         # If say is primary but failed, try edge-tts as fallback
         if TTS_ENGINE == "say" and self._tts_tools.get("edge_tts"):
+            logger.info("TTS: say failed, falling back to edge-tts")
             return self._tts_edge(clean, ogg_path)
 
         return None
@@ -4470,6 +4499,40 @@ class ClaudeTelegramBot:
     def _handle_callback(self, callback: Dict) -> None:
         cb_id = callback.get("id", "")
         data = callback.get("data", "")
+
+        # Voice pick: update selection without removing keyboard
+        if data.startswith("voicepick:"):
+            parts = data.split(":")
+            if len(parts) == 3:
+                pick_id, choice = parts[1], parts[2]
+                entry = self._voice_picks.get(pick_id)
+                if entry and not entry["resolved"]:
+                    entry["force_tts"] = (choice == "audio")
+                    self.answer_callback(cb_id, "🔊 Áudio" if choice == "audio" else "💬 Texto")
+                    # Re-render buttons with updated checkmark
+                    msg = callback.get("message", {})
+                    msg_id = msg.get("message_id")
+                    msg_text = msg.get("text", "")
+                    if msg_id and msg_text:
+                        is_voice = (choice == "audio")
+                        new_markup = {"inline_keyboard": [[
+                            {"text": f"🔊 Áudio{' ✓' if is_voice else ''}",
+                             "callback_data": f"voicepick:{pick_id}:audio"},
+                            {"text": f"💬 Texto{' ✓' if not is_voice else ''}",
+                             "callback_data": f"voicepick:{pick_id}:text"},
+                        ]]}
+                        self.tg_request("editMessageText", {
+                            "chat_id": self._chat_id,
+                            "message_id": msg_id,
+                            "text": self._sanitize_markdown_v2(msg_text),
+                            "parse_mode": "MarkdownV2",
+                            "reply_markup": new_markup,
+                        })
+                else:
+                    self.answer_callback(cb_id)
+            else:
+                self.answer_callback(cb_id)
+            return
 
         self._remove_keyboard(callback)
 
