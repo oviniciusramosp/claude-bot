@@ -9,7 +9,8 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
                           |-- Streaming output (JSON stream -> live edits)
                           |-- Reactions showing processing status
                           |-- Knowledge vault (Obsidian-compatible)
-                          '-- Scheduled routines (cron-like)
+                          |-- Scheduled routines & pipelines
+                          '-- macOS native manager app (SwiftUI)
 ```
 
 **Pure Python stdlib** -- zero pip dependencies for the core bot.
@@ -24,10 +25,11 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Status reactions** -- emoji reactions on your message show what Claude is doing (thinking, coding, writing)
 - **Model switching** -- switch between Sonnet, Opus, and Haiku mid-conversation
 - **Knowledge vault** -- Obsidian-compatible vault with daily journal, notes, skills, and routines
-- **Scheduled routines** -- cron-like system that runs prompts on a schedule
+- **Scheduled routines & pipelines** -- cron-like system that runs prompts on a schedule, with multi-step pipelines
 - **Image analysis** -- send photos from Telegram for Claude to analyze
-- **Voice transcription** -- send voice messages, transcribed via macOS native speech recognition and sent to Claude
-- **macOS service** -- runs as a daemon with auto-start, crash recovery, and menu bar indicator
+- **Voice input & output** -- send voice messages (transcribed via macOS speech recognition), add `#voice` to any message to get an audio response back
+- **Auto session management** -- auto-compact every 25 turns, auto-rotate sessions at 80 turns
+- **macOS native app** -- SwiftUI manager app with dashboard, agent/routine/skill management, logs, and settings
 
 ---
 
@@ -130,8 +132,19 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 |---------|-------------|
 | `/stop` | Cancel running task |
 | `/status` | Session and process info |
+| `/cost` | Token usage and cost for current session |
+| `/doctor` | Check Claude Code installation health |
+| `/btw <msg>` | Inject message to running Claude process |
 | `/timeout <sec>` | Activity timeout (default: 600s) |
 | `/workspace <path>` | Change working directory |
+
+### Routines & Pipelines
+| Command | Description |
+|---------|-------------|
+| `/run [name]` | Manually trigger a routine or pipeline |
+| `/routine` | Create a new scheduled routine (interactive) |
+| `/routine list` | List today's routines |
+| `/routine status` | Execution status of today's routines |
 
 ### Agents
 | Command | Description |
@@ -141,13 +154,10 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/agent new` | Create a new agent (interactive) |
 | `/agent list` | List all agents |
 
-### Journal & Routines
+### Journal
 | Command | Description |
 |---------|-------------|
 | `/important` | Register key points from this session in today's Journal |
-| `/routine` | Create a new scheduled routine (interactive) |
-| `/routine list` | List today's routines |
-| `/routine status` | Execution status of today's routines |
 
 ### Audio
 | Command | Description |
@@ -270,22 +280,22 @@ The vault content (Journal, Notes, Skills, Routines, Images) is gitignored -- yo
 
 ---
 
-## Routines (Scheduled Tasks)
+## Routines & Pipelines (Scheduled Tasks)
 
-Create `.md` files in `vault/Routines/` to run prompts on a schedule:
+Create `.md` files in `vault/Routines/` to run prompts on a schedule.
+
+### Routines
+
+A routine is a single prompt executed on a schedule:
 
 ```yaml
 ---
 title: Morning Report
 description: Generates a daily summary every morning.
 type: routine
-created: 2026-04-07
-updated: 2026-04-07
-tags: [routine, daily]
 schedule:
   times: ["09:00"]
   days: [mon, tue, wed, thu, fri]
-  until: "2026-12-31"
 model: sonnet
 enabled: true
 ---
@@ -293,19 +303,42 @@ enabled: true
 Generate a morning summary of...
 ```
 
+### Pipelines
+
+A pipeline is a multi-step routine where each step runs sequentially:
+
+```yaml
+---
+title: Daily Review
+description: Multi-step daily review pipeline.
+type: pipeline
+schedule:
+  times: ["20:00"]
+model: sonnet
+notify: final
+enabled: true
+---
+```
+
+Steps are separate `.md` files in a `Steps/` subdirectory. The `notify` field controls Telegram notifications: `final` (default), `all`, `summary`, or `none`.
+
+### Common features
+
 - The scheduler checks every 60 seconds
-- Routines run in the bot's session queue (won't block user messages)
+- Routines and pipelines run without blocking user messages
 - Every execution is logged to the Journal
-- Use `/routine` in Telegram to create routines interactively
-- The menu bar shows today's routines with status icons
+- Use `/routine` in Telegram to create routines interactively, or `/run <name>` to trigger manually
+- Optional fields: `agent`, `context` (`full`/`minimal`), `voice` (TTS response), `schedule.until` (expiry date)
 
 ---
 
-## Voice Transcription
+## Voice (Input & Output)
 
-Send voice messages from Telegram and they'll be transcribed to text using macOS native speech recognition (Apple's SFSpeechRecognizer), then sent to Claude as a prompt.
+**Voice input:** Send voice messages from Telegram -- they're transcribed to text using macOS native speech recognition (Apple's SFSpeechRecognizer), then sent to Claude as a prompt.
 
-**Pipeline:** Voice message (OGG/Opus) → ffmpeg (WAV) → `hear` CLI (SFSpeechRecognizer) → text → Claude
+**Voice output:** Add `#voice` to any text message to receive Claude's response as audio (TTS via macOS `say`). The session context is preserved, so the response is contextual. Example: `What's the weather like? #voice`
+
+**Transcription pipeline:** Voice message (OGG/Opus) → ffmpeg (WAV) → `hear` CLI (SFSpeechRecognizer) → text → Claude
 
 ### Dependencies
 
@@ -352,9 +385,23 @@ HEAR_LOCALE=pt-BR
 ./claude-bot.sh uninstall   # Remove launchd service
 ```
 
+### ClaudeBotManager (macOS App)
+
+Native SwiftUI app in `ClaudeBotManager/` for managing the bot from macOS:
+
+- Dashboard with bot status, sessions, and usage stats
+- Agent, routine, skill, and pipeline management
+- Pipeline step editor
+- Log viewer with filters and search
+- Settings editor (`.env`)
+
+```bash
+cd ClaudeBotManager && bash build-app.sh
+```
+
 ### Menu Bar Indicator (Optional)
 
-Shows a green/red dot in the macOS menu bar with bot status, session info, and today's routines.
+Lightweight alternative -- shows a green/red dot in the macOS menu bar with bot status.
 
 ```bash
 pip3 install rumps
@@ -400,7 +447,7 @@ This blocks parent CLAUDE.md files when Claude CLI runs with `cwd=~/claude-bot/`
 | `TELEGRAM_BOT_TOKEN` | Yes | -- | Bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | Yes | -- | Your Telegram chat ID |
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI |
-| `CLAUDE_WORKSPACE` | No | `$HOME` | Default working directory |
+| `CLAUDE_WORKSPACE` | No | `vault/` | Default working directory |
 | `FFMPEG_PATH` | No | `/opt/homebrew/bin/ffmpeg` | Path to ffmpeg (voice) |
 | `HEAR_PATH` | No | *(auto-detected)* | Path to hear CLI (voice) |
 | `HEAR_LOCALE` | No | `pt-BR` | Voice transcription language |
@@ -416,6 +463,7 @@ claude-bot/
 |-- claude-bot.sh                     Service manager
 |-- com.vr.claude-bot.plist           launchd template (bot)
 |-- com.vr.claude-bot-menubar.plist   launchd template (menu bar)
+|-- ClaudeBotManager/                 macOS native manager app (SwiftUI)
 |-- .env.example                      Environment variable template
 |-- CLAUDE.md                         Instructions for Claude Code
 |-- README.md                         This file
