@@ -1157,7 +1157,7 @@ class ClaudeRunner:
         if max_budget:
             cmd += ["--max-budget-usd", str(max_budget)]
         if effort:
-            cmd += ["--reasoning-effort", effort]
+            cmd += ["--effort", effort]
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
         cmd += ["-p", prompt]
