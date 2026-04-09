@@ -171,18 +171,41 @@ struct RoutineRow: View {
                         .buttonStyle(.plain)
                         .disabled(isStopping)
                         .help("Stop routine")
-                    } else if routine.isPipeline {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checklist")
-                                .font(.system(size: 10))
-                            Text("\(routine.stepCount) steps")
-                                .font(.system(size: 10))
+                    } else {
+                        Button {
+                            isDryRunning = true
+                            Task {
+                                try? await appState.dryRunRoutine(routine)
+                                isDryRunning = false
+                            }
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 9))
+                                .foregroundStyle(.secondary)
                         }
-                        .foregroundStyle(Color.statusBlue)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.statusBlue.opacity(0.15))
-                        .clipShape(Capsule())
+                        .buttonStyle(.plain)
+                        .help("Run Now")
+                    }
+
+                    if routine.isPipeline {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 10))
+                                Text("\(routine.stepCount) steps")
+                                    .font(.system(size: 10))
+                                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                    .font(.system(size: 8, weight: .semibold))
+                            }
+                            .foregroundStyle(Color.statusBlue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.statusBlue.opacity(0.15))
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     } else {
                         ModelBadge(model: routine.model)
                     }
@@ -273,22 +296,25 @@ struct RoutineRow: View {
                 if routine.isPipeline {
                     if isExpanded {
                         pipelineExpandedSteps
+
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { isExpanded = false }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.up")
+                                    .font(.system(size: 8, weight: .semibold))
+                                Text("Close")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, Spacing.xs)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     } else if routine.lastExecution?.status != .failed {
                         pipelineTimeline
                     }
-
-                    // Chevron toggle
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() }
-                    } label: {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.tertiary)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 4)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
                 }
             }
         } // GlassCard

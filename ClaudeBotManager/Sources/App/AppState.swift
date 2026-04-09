@@ -235,6 +235,11 @@ final class AppState: ObservableObject {
         await loadRoutines()
     }
 
+    private func controlToken() -> String? {
+        let path = "\(dataDir)/.control-token"
+        return try? String(contentsOfFile: path, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     @discardableResult
     func dryRunRoutine(_ routine: Routine) async throws -> RoutineExecution? {
         // Save first so the bot picks up any edits
@@ -245,6 +250,9 @@ final class AppState: ObservableObject {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = controlToken() {
+            req.setValue(token, forHTTPHeaderField: "X-Bot-Token")
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: ["name": routine.id, "time_slot": "dry-run"])
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = 10
@@ -269,6 +277,9 @@ final class AppState: ObservableObject {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = controlToken() {
+            req.setValue(token, forHTTPHeaderField: "X-Bot-Token")
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: ["name": routine.id])
         let sessionConfig = URLSessionConfiguration.default
         sessionConfig.timeoutIntervalForRequest = 10
