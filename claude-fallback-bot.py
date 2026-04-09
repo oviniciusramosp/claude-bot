@@ -2419,9 +2419,9 @@ class ClaudeTelegramBot:
         resp = self.tg_request("deleteMessage", {"chat_id": chat_id, "message_id": message_id})
         return bool(resp and resp.get("ok"))
 
-    def send_typing(self) -> None:
+    def send_typing(self, action: str = "typing") -> None:
         chat_id = self._chat_id
-        data: Dict[str, Any] = {"chat_id": chat_id, "action": "typing"}
+        data: Dict[str, Any] = {"chat_id": chat_id, "action": action}
         if self._ctx and self._ctx.thread_id:
             data["message_thread_id"] = self._ctx.thread_id
         self.tg_request("sendChatAction", data)
@@ -3284,7 +3284,7 @@ class ClaudeTelegramBot:
             return
 
         # Status message
-        self.send_typing()
+        self.send_typing("record_voice")
         status_msg = self.send_message(f"🎤 Áudio recebido ({duration}s). Transcrevendo...")
 
         # Download
@@ -3452,10 +3452,15 @@ class ClaudeTelegramBot:
     def _tts_worker(self, text: str, chat_id: str, thread_id: Optional[int] = None) -> None:
         """Background: generate TTS audio and send as voice message."""
         try:
+            # Show "generating audio" action during TTS synthesis
+            synth_data: Dict[str, Any] = {"chat_id": chat_id, "action": "record_voice"}
+            if thread_id:
+                synth_data["message_thread_id"] = thread_id
+            self.tg_request("sendChatAction", synth_data)
             ogg_path = self._tts_generate(text)
             if not ogg_path:
                 return
-            # Show "sending audio" action
+            # Show "sending audio" action before upload
             action_data: Dict[str, Any] = {"chat_id": chat_id, "action": "upload_voice"}
             if thread_id:
                 action_data["message_thread_id"] = thread_id
@@ -3533,10 +3538,10 @@ class ClaudeTelegramBot:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
-        # Inline #voice: fast path — minimal prompt, haiku, low effort, with session context
+        # Inline #voice: fast path — minimal prompt, haiku, low effort, no session
         if force_tts:
             effective_sp = _tts_prompt_suffix()
-            effective_session_id = session.session_id  # resume for context
+            effective_session_id = None
             effective_model = "haiku"
             effective_effort = "low"
         else:
@@ -3624,7 +3629,6 @@ class ClaudeTelegramBot:
         ctx = self._ctx
         if not ctx or not ctx.user_msg_id:
             return
-        _REACTION_MAP = {"thinking": "🤔", "tool": "⚡", "text": "✍️"}
         emoji = _REACTION_MAP.get(runner.activity_type, "🤔")
         if emoji != ctx.last_reaction:
             self.set_reaction(ctx.user_msg_id, emoji)
@@ -3644,7 +3648,8 @@ class ClaudeTelegramBot:
 
             if not routine_mode:
                 if ctx and now - ctx.last_typing_time >= TYPING_INTERVAL:
-                    self.send_typing()
+                    action = _ACTIVITY_CHAT_ACTION.get(runner.activity_type, "typing")
+                    self.send_typing(action)
                     ctx.last_typing_time = now
                 self._update_reaction(runner)
 
