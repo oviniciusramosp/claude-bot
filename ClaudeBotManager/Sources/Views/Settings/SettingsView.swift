@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var savedMessage = ""
     @State private var validationError = ""
     @State private var showValidationAlert = false
+    @State private var showSwitchAccountConfirm = false
+    @State private var isSwitching = false
 
     var body: some View {
         ScrollView {
@@ -75,6 +77,57 @@ struct SettingsView: View {
                     }
                 }
 
+                // Account
+                SectionCard(title: "Account", symbol: "person.crop.circle") {
+                    let usage = appState.claudeUsage
+
+                    SettingRow("Email") {
+                        TextField("email@example.com", text: $config.claudeAccountEmail)
+                            .font(.system(.callout, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    SettingRow("Status") {
+                        HStack(spacing: Spacing.sm) {
+                            Circle()
+                                .fill(usage.hasPlanInfo ? Color.statusGreen : Color.statusRed)
+                                .frame(width: 8, height: 8)
+                            Text(usage.hasPlanInfo ? "Logged in" : "Not logged in")
+                                .font(.callout)
+                                .foregroundStyle(usage.hasPlanInfo ? .primary : .secondary)
+                        }
+                    }
+
+                    if let plan = usage.planName {
+                        SettingRow("Plan") {
+                            HStack(spacing: Spacing.sm) {
+                                Text(plan)
+                                    .font(.callout)
+                                if let tier = usage.rateTier {
+                                    Text(tier)
+                                        .font(.caption2.weight(.medium))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(.quaternary)
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                    }
+
+                    HStack {
+                        Spacer()
+                        Button {
+                            showSwitchAccountConfirm = true
+                        } label: {
+                            Label("Switch Account", systemImage: "arrow.triangle.2.circlepath")
+                                .font(.callout)
+                        }
+                        .disabled(isSwitching)
+                    }
+                    .padding(.top, Spacing.xs)
+                }
+
                 // Paths Info
                 SectionCard(title: "Data Paths", symbol: "folder") {
                     PathRow(label: "Vault", path: appState.vaultPath)
@@ -133,6 +186,48 @@ struct SettingsView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(validationError)
+        }
+        .alert("Switch Account", isPresented: $showSwitchAccountConfirm) {
+            Button("Cancel", role: .cancel) {}
+            Button("Switch") {
+                switchAccount()
+            }
+        } message: {
+            Text("This will sign out of the current account and open the browser to sign in with a different one.")
+        }
+    }
+
+    private func switchAccount() {
+        isSwitching = true
+        let claudePath = NSString(string: config.claudePath).expandingTildeInPath
+        let email = config.claudeAccountEmail.trimmingCharacters(in: .whitespaces)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            // Logout
+            let logout = Process()
+            logout.executableURL = URL(fileURLWithPath: claudePath)
+            logout.arguments = ["auth", "logout"]
+            logout.environment = ProcessInfo.processInfo.environment.filter { $0.key != "CLAUDECODE" }
+            logout.standardOutput = Pipe()
+            logout.standardError = Pipe()
+            try? logout.run()
+            logout.waitUntilExit()
+
+            // Login (opens browser)
+            let login = Process()
+            login.executableURL = URL(fileURLWithPath: claudePath)
+            login.arguments = email.isEmpty ? ["auth", "login"] : ["auth", "login", "--email", email]
+            login.environment = ProcessInfo.processInfo.environment.filter { $0.key != "CLAUDECODE" }
+            login.standardOutput = Pipe()
+            login.standardError = Pipe()
+            try? login.run()
+            login.waitUntilExit()
+
+            DispatchQueue.main.async {
+                isSwitching = false
+                // Refresh usage to pick up new account info
+                Task { await appState.refreshUsage() }
+            }
         }
     }
 }

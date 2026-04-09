@@ -377,6 +377,8 @@ final class AppState: ObservableObject {
                     config.claudePath = value
                 case "CLAUDE_WORKSPACE" where config.claudeWorkspace == BotConfig.defaults.claudeWorkspace:
                     config.claudeWorkspace = value
+                case "CLAUDE_ACCOUNT_EMAIL" where config.claudeAccountEmail.isEmpty:
+                    config.claudeAccountEmail = value
                 default: break
                 }
             }
@@ -391,11 +393,12 @@ final class AppState: ObservableObject {
             "TELEGRAM_BOT_TOKEN=\(config.telegramBotToken)",
             "TELEGRAM_CHAT_ID=\(config.telegramChatId)",
             "CLAUDE_PATH=\(config.claudePath)",
-            "CLAUDE_WORKSPACE=\(config.claudeWorkspace)"
+            "CLAUDE_WORKSPACE=\(config.claudeWorkspace)",
+            "CLAUDE_ACCOUNT_EMAIL=\(config.claudeAccountEmail)"
         ]
         // Preserve any extra keys already in the file
         if let existing = try? String(contentsOfFile: envPath, encoding: .utf8) {
-            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE"]
+            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE", "CLAUDE_ACCOUNT_EMAIL"]
             for line in existing.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("#") { continue }
