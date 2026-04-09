@@ -813,6 +813,10 @@ class RoutineScheduler:
                     logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)
             if not prompt_text:
                 prompt_text = str(s.get("prompt", ""))
+            if not prompt_text:
+                logger.error("Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt)",
+                             routine_name, step_id)
+                continue
 
             depends = s.get("depends_on", [])
             if isinstance(depends, str):
@@ -827,7 +831,7 @@ class RoutineScheduler:
                 agent=s.get("agent") or default_agent,
                 timeout=int(s.get("timeout", 1200)),
                 inactivity_timeout=int(s.get("inactivity_timeout", 300)),
-                retry=int(s.get("retry", 0)),
+                retry=int(s.get("retry", 1)),
                 output_to_telegram=(str(s.get("output", "")).lower() == "telegram"),
                 engine=str(s.get("engine", "claude")),
             ))
