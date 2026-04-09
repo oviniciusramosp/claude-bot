@@ -18,5 +18,6 @@ Rotinas agendadas que executam prompts no Claude Code automaticamente.
 - [[crypto-ta-analise]] — Pipeline de análise técnica cripto todo dia as 21:30 (Notion + Telegram)
 
 
+- [[journal-sweep]] — Varredura noturna que consolida sessoes nao registradas no Journal
 - [[teste-routine]] — Ping o usuario para ele saber que a rotina funcionou
 - [[update-check]] — Verifica diariamente se ha updates do Claude Code ou do repo

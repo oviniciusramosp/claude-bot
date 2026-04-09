@@ -153,6 +153,18 @@ Formato de entrada:
 ---
 ```
 
+**Quando registrar (proativamente, DURANTE a conversa):**
+
+Nao espere o fim da conversa. Registre no Journal imediatamente quando:
+- Uma decisao importante for tomada (ex: escolha de arquitetura, trade-off aceito)
+- Uma tarefa for concluida com sucesso (deploy, fix, config, criacao de arquivo)
+- Informacao nova relevante for descoberta (bug root cause, comportamento inesperado)
+- Mudancas em arquivos de configuracao ou ambiente forem feitas
+- O usuario pedir explicitamente para lembrar de algo
+- Uma rotina ou pipeline terminar de executar
+
+Cada registro eh atomico e autocontido. Use `## HH:MM — Resumo curto` como header, bullets com detalhes, e `---` como separador.
+
 **Journal NAO cria wikilinks para entidades mencionadas.** O formato do arquivo e sua localizacao na pasta sao suficientes para o grafo. Isso mantem o chart limpo.
 
 Para journals de agentes, primeira linha: `[[{agent-id}/Journal|Journal]]`

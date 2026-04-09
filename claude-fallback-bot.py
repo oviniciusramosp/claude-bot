@@ -144,11 +144,23 @@ SYSTEM_PROMPT = (
     "\n\n"
     "## Vault\n"
     "Check Journal/ for recent context. "
-    "After significant conversations, append a summary to Journal/YYYY-MM-DD.md (use today's date). "
     "Read Tooling.md for tool preferences. "
     "Read .env for project credentials when needed. "
     "All vault .md files MUST have YAML frontmatter (title, description, type, created/updated, tags). "
     "Use the description field to scan files before reading them fully. "
+    "\n\n"
+    "## Journal — Registro Proativo\n"
+    "You MUST write to the Journal DURING conversations, not just at the end. "
+    "Append to Journal/YYYY-MM-DD.md (today's date) whenever any of these happen:\n"
+    "- A decision is made or a task is completed\n"
+    "- You learn new information about the user's projects, preferences, or environment\n"
+    "- A debugging session reaches a conclusion (root cause found, fix applied)\n"
+    "- Configuration changes are made (files edited, settings changed, tools installed)\n"
+    "- The user explicitly asks you to remember something\n"
+    "- A routine or pipeline finishes executing\n"
+    "Do NOT wait for the conversation to end — write the entry immediately. "
+    "Use the standard format: ## HH:MM — Short summary, followed by bullet points, then ---. "
+    "If an agent is active, use the agent's own Journal/ directory instead. "
     "Journal entries are append-only — never overwrite existing content. "
     "\n\n"
     "## Bot Commands — USE THESE instead of doing things manually\n"
@@ -1494,9 +1506,10 @@ class PipelineExecutor:
             if skipped_steps:
                 parts.append(f"skipped: {', '.join(skipped_steps)}")
             err = f"Steps {'; '.join(parts)}" if parts else "Pipeline did not complete (unknown state)"
-            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=err)
+            status = "cancelled" if self._cancelled.is_set() else "failed"
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, status, error=err)
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
-            logger.warning("Pipeline %s failed: %s", self.task.name, err)
+            logger.warning("Pipeline %s %s: %s", self.task.name, status, err)
 
         # Cleanup workspace
         try:
@@ -1891,15 +1904,20 @@ class PipelineExecutor:
             pass
 
     def _finalize_progress(self, success: bool, error: str = "", elapsed: int = 0) -> None:
-        """Finalize the progress message: delete on success, update with error on failure."""
+        """Finalize the progress message: delete on success, update with error/cancelled on failure."""
         if not self._progress_msg_id:
             return
         try:
             if success:
                 self.bot.delete_message(self._progress_msg_id, chat_id=self.ctx.chat_id)
             else:
+                cancelled = self._cancelled.is_set()
                 icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏳"}
-                lines = [f"❌ *Pipeline: {self.task.title}* — FAILED", ""]
+                if cancelled:
+                    header = f"🛑 *Pipeline: {self.task.title}* — CANCELADO"
+                else:
+                    header = f"❌ *Pipeline: {self.task.title}* — FAILED"
+                lines = [header, ""]
                 for step in self.task.steps:
                     st = self._step_status.get(step.id, "pending")
                     icon = icons.get(st, "⏳")
@@ -1908,7 +1926,8 @@ class PipelineExecutor:
                         err_detail = f" — `{self._step_errors[step.id][:60]}`"
                     lines.append(f"{icon} {step.name}{err_detail}")
                 mins, secs = elapsed // 60, elapsed % 60
-                lines.append(f"\n_Erro: {error[:100]}_")
+                if not cancelled:
+                    lines.append(f"\n_Erro: {error[:100]}_")
                 lines.append(f"_Duração: {mins}m{secs:02d}s_")
                 self.bot.edit_message(self._progress_msg_id, "\n".join(lines))
         except Exception:
@@ -1960,7 +1979,9 @@ class PipelineExecutor:
                 pass
 
     def _notify_failure(self, error: str) -> None:
-        """Always notify on failure, regardless of notify mode."""
+        """Always notify on failure, regardless of notify mode. Skip if cancelled (progress msg already updated)."""
+        if self._cancelled.is_set():
+            return  # Progress message already shows CANCELADO
         icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏰"}
         step_lines = []
         for step in self.task.steps:
@@ -2568,6 +2589,8 @@ class ClaudeTelegramBot:
             self.send_message(f"❌ Sessão `{name}` não encontrada.")
 
     def cmd_clear(self) -> None:
+        # Consolidate before clearing — session_id will be lost
+        self._consolidate_session()
         s = self._get_session()
         if s:
             s.session_id = None
@@ -3685,6 +3708,9 @@ class ClaudeTelegramBot:
             # NO_REPLY means Claude completed via tools with no text to send — silent success
             if final_text.strip() == "NO_REPLY":
                 return
+            # Cancellation in routine mode: skip sending (progress message is updated by caller)
+            if runner.exit_code == 130 and not runner.result_text and not runner.accumulated_text:
+                return
             if stream_msg:
                 self.delete_message(stream_msg)
                 if ctx:
@@ -3757,6 +3783,9 @@ class ClaudeTelegramBot:
                   f"Não adicione cabeçalho, confirmação de execução, nem frase dizendo que a rotina rodou.\n\n"
                   f"{task.prompt}")
 
+        # Send progress message so it can be updated on failure/cancellation
+        progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._")
+
         saved_timeout = self.timeout_seconds
         self.timeout_seconds = 300  # 5 min inactivity for routines
         try:
@@ -3764,15 +3793,29 @@ class ClaudeTelegramBot:
                                     routine_mode=True,
                                     system_prompt=None if task.minimal_context else SYSTEM_PROMPT,
                                     force_tts=task.voice)
-            # Check if there was an error
-            if self.runner.error_text:
-                self.routine_state.set_status(task.name, task.time_slot, "failed", self.runner.error_text[:200])
+            # Check if there was an error or cancellation
+            runner = self.runner
+            if runner.exit_code == 130:
+                # Manually cancelled
+                self.routine_state.set_status(task.name, task.time_slot, "cancelled")
+                if progress_msg_id:
+                    self.edit_message(progress_msg_id, f"🛑 Rotina *{task.name}* cancelada.")
+            elif runner.error_text:
+                self.routine_state.set_status(task.name, task.time_slot, "failed", runner.error_text[:200])
+                if progress_msg_id:
+                    self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {runner.error_text[:200]}")
             else:
                 self.routine_state.set_status(task.name, task.time_slot, "completed")
+                # Success: delete progress message (output was already sent by _finalize_response)
+                if progress_msg_id:
+                    self.delete_message(progress_msg_id)
         except Exception as exc:
             logger.error("Routine %s failed: %s", task.name, exc)
             self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
-            self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+            if progress_msg_id:
+                self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+            else:
+                self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
         finally:
             self.timeout_seconds = saved_timeout
 
@@ -4331,8 +4374,36 @@ class ClaudeTelegramBot:
 
         logger.info("Polling loop exited.")
 
+    def _consolidate_all_sessions(self) -> None:
+        """Best-effort consolidation of all active sessions on shutdown."""
+        with self._contexts_lock:
+            contexts = list(self._contexts.items())
+        for key, ctx in contexts:
+            try:
+                session_name = ctx.session_name
+                if not session_name:
+                    continue
+                session = self.sessions.sessions.get(session_name)
+                if not session or not session.session_id or session.message_count == 0:
+                    continue
+                if ctx.runner and ctx.runner.running:
+                    continue
+                saved_ctx = getattr(self, '_ctx', None)
+                self._ctx = ctx
+                try:
+                    self._consolidate_session()
+                finally:
+                    self._ctx = saved_ctx
+            except Exception as exc:
+                logger.error("Shutdown consolidation failed for %s: %s", key, exc)
+
     def stop(self) -> None:
         logger.info("Stopping bot...")
+        # Consolidate all active sessions before shutdown (best-effort)
+        try:
+            self._consolidate_all_sessions()
+        except Exception as exc:
+            logger.error("Error during shutdown consolidation: %s", exc)
         self._stop_event.set()
         # Stop the routine scheduler
         self.scheduler.stop()
