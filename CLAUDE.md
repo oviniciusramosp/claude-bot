@@ -280,6 +280,16 @@ O **Main Agent** eh o agente padrao do bot (sem workspace proprio). Ele conta co
 
 O diretorio `vault/` eh a knowledge base persistente do bot — um grafo Obsidian com Journal, Notes, Skills, Routines, e Agents. Ver `vault/CLAUDE.md` para documentacao completa da estrutura e regras do vault.
 
+### Setup para novos usuarios
+
+Os index files do vault (`Agents/Agents.md`, `Routines/Routines.md`, `Journal/Journal.md`) sao commitados com conteudo placeholder. Ao configurar o bot pela primeira vez, cada usuario deve:
+
+1. Editar os index files para refletir seus proprios agentes/rotinas
+2. Criar seu `vault/.env` com API keys proprias (gitignored)
+3. Personalizar `vault/Tooling.md` com suas preferencias de ferramentas
+
+O conteudo pessoal dos indexes (lista de agentes, rotinas, entradas de journal) NAO deve ser commitado — manter apenas localmente.
+
 ## Isolamento de contexto
 
 O Claude Code carrega TODOS os CLAUDE.md na hierarquia de diretorios (do cwd ate a raiz + `~/.claude/CLAUDE.md`). Para que o bot use APENAS as instrucoes deste projeto:
