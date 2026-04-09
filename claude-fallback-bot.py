@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.7.0"  # dashboard redesign from Figma, segmented usage bar, bot avatar, timeline
+BOT_VERSION = "2.8.0"  # inline #voice trigger, voice support for routines/pipelines
 
 import http.server
 import json
@@ -218,6 +218,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 🎤 *Áudio*
 • `/audio` — Escolher idioma de transcrição
 • `/voice [on|off]` — Ativar/desativar respostas por voz
+• `#voice` na mensagem — resposta por voz (uma vez só)
 • Envie mensagens de voz — serão transcritas e enviadas ao Claude
 
 💬 Qualquer outra mensagem é enviada como prompt ao Claude.
@@ -413,6 +414,7 @@ class RoutineTask:
     time_slot: str
     agent: Optional[str] = None
     minimal_context: bool = False
+    voice: bool = False
 
 
 @dataclass
@@ -440,6 +442,7 @@ class PipelineTask:
     agent: Optional[str] = None
     notify: str = "final"
     minimal_context: bool = False
+    voice: bool = False
 
 
 class RoutineStateManager:
@@ -713,6 +716,7 @@ class RoutineScheduler:
                                 time_slot=t_str,
                                 agent=fm.get("agent"),
                                 minimal_context=bool(fm.get("context") == "minimal"),
+                                voice=bool(fm.get("voice", False)),
                             )
                             self._enqueue(task)
             except Exception as exc:
@@ -805,6 +809,7 @@ class RoutineScheduler:
             agent=default_agent,
             notify=str(fm.get("notify", "final")),
             minimal_context=bool(fm.get("context") == "minimal"),
+            voice=bool(fm.get("voice", False)),
         )
         self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=[s.id for s in steps])
         self._enqueue_pipeline(task)
@@ -1413,33 +1418,6 @@ class PipelineExecutor:
         self._bot = None  # set by _enqueue_pipeline if available
         self._progress_msg_id: Optional[int] = None  # Telegram message ID for live progress
 
-    def _wait_for_free_slot(self, max_wait: int = 300) -> bool:
-        """Wait up to max_wait seconds for active Claude CLI processes to finish.
-        Returns True if we had to wait, False if slot was already free."""
-        import subprocess as _sp
-        waited = False
-        deadline = time.time() + max_wait
-        while time.time() < deadline and not self._cancelled.is_set():
-            try:
-                result = _sp.run(
-                    ["pgrep", "-f", "claude.*--print.*--dangerously"],
-                    capture_output=True, text=True, timeout=5)
-                if result.returncode != 0:
-                    return waited  # no active Claude CLI processes
-            except Exception:
-                return waited
-            if not waited:
-                logger.info("Pipeline %s: waiting for active Claude session to finish", self.task.name)
-                if self._bot:
-                    try:
-                        self._bot.send_message(
-                            f"⏳ Pipeline `{self.task.name}` aguardando sessão ativa do Claude terminar...")
-                    except Exception:
-                        pass
-            waited = True
-            time.sleep(10)
-        return waited
-
     def execute(self) -> bool:
         """Run the full pipeline. Returns True if all steps completed successfully."""
         # P2-01: Validate that the vault/workspace path exists before running
@@ -1449,9 +1427,6 @@ class PipelineExecutor:
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed",
                                            error=f"Workspace not found: {vault}")
             return False
-        # Wait for any active Claude CLI sessions to finish before starting
-        if self._wait_for_free_slot():
-            logger.info("Pipeline %s: waited for active sessions to clear", self.task.name)
         logger.info("Pipeline %s starting (%d steps)", self.task.name, len(self.task.steps))
         self.workspace.mkdir(parents=True, exist_ok=True)
         data_dir = self.workspace / "data"
@@ -1732,9 +1707,9 @@ class PipelineExecutor:
                 # Detect nested session error — wait and retry once
                 if "cannot be launched inside another" in runner.error_text.lower() or \
                    "nested sessions" in runner.error_text.lower():
-                    logger.warning("Pipeline %s: step %s hit nested session error, waiting...",
+                    logger.warning("Pipeline %s: step %s hit nested session error, retrying after 15s...",
                                    self.task.name, step.id)
-                    self._wait_for_free_slot(max_wait=120)
+                    time.sleep(15)
                     if not self._cancelled.is_set():
                         logger.info("Pipeline %s: retrying step %s after nested session wait", self.task.name, step.id)
                         runner2 = ClaudeRunner()
@@ -1909,17 +1884,26 @@ class PipelineExecutor:
                     output_text = self._step_outputs[step.id]
                     break
 
+        sent_text = None
         if self.task.notify == "summary" or output_text is None:
             mins = elapsed // 60
             secs = elapsed % 60
-            msg = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
+            sent_text = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
             try:
-                self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+                self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
             except Exception:
                 pass
         elif output_text:
+            sent_text = output_text
             try:
-                self.bot.send_message(output_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+                self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+            except Exception:
+                pass
+
+        # TTS: send voice message if pipeline has voice: true
+        if self.task.voice and sent_text:
+            try:
+                self.bot._maybe_send_tts(sent_text, self.ctx.chat_id, self.ctx.thread_id)
             except Exception:
                 pass
 
@@ -2114,18 +2098,22 @@ class ClaudeTelegramBot:
         default_chat = str(TELEGRAM_CHAT_ID) if TELEGRAM_CHAT_ID else "0"
         return self._get_context(default_chat, None)
 
+    def _make_dedicated_context(self, base_ctx: "ThreadContext") -> "ThreadContext":
+        """Create a dedicated ThreadContext for routine/pipeline execution.
+
+        Uses the same chat_id/thread_id as the base context (so Telegram messages
+        go to the right place) but with its own independent runner, allowing
+        concurrent execution with interactive sessions.
+        """
+        return ThreadContext(chat_id=base_ctx.chat_id, thread_id=base_ctx.thread_id)
+
     def _enqueue_routine(self, task: RoutineTask) -> None:
         """Called by the scheduler thread to enqueue a routine for execution."""
-        ctx = self._find_context_for_routine(task)
+        base_ctx = self._find_context_for_routine(task)
+        # Dedicated context so routine runs concurrently with interactive sessions
+        ctx = self._make_dedicated_context(base_ctx)
 
         def _run_routine() -> None:
-            # Wait for any active runner to finish before executing (up to 10 min)
-            deadline = time.time() + 600
-            while time.time() < deadline:
-                runner = ctx.runner
-                if runner is None or not runner.running:
-                    break
-                time.sleep(5)
             with self._routine_contexts_lock:
                 self._routine_contexts[task.name] = ctx
             try:
@@ -2142,17 +2130,11 @@ class ClaudeTelegramBot:
         # Use a dummy RoutineTask to find context (reuses same routing logic)
         dummy = RoutineTask(name=task.name, prompt="", model=task.model,
                             time_slot=task.time_slot, agent=task.agent)
-        ctx = self._find_context_for_routine(dummy)
+        base_ctx = self._find_context_for_routine(dummy)
+        # Dedicated context so pipeline runs concurrently with interactive sessions
+        ctx = self._make_dedicated_context(base_ctx)
 
         def _run_pipeline() -> None:
-            # Wait for any active runner to finish before executing (up to 10 min)
-            deadline = time.time() + 600
-            while time.time() < deadline:
-                runner = ctx.runner
-                if runner is None or not runner.running:
-                    break
-                time.sleep(5)
-
             executor = PipelineExecutor(task, self, ctx, self.routine_state)
             executor._bot = self
             with self._active_pipelines_lock:
@@ -2824,6 +2806,7 @@ class ClaudeTelegramBot:
                 time_slot=time_slot,
                 agent=fm.get("agent"),
                 minimal_context=bool(fm.get("context") == "minimal"),
+                voice=bool(fm.get("voice", False)),
             )
             self._enqueue_routine(task)
             self.send_message(f"🚀 Rotina `{name}` disparada manualmente.")
@@ -3361,7 +3344,8 @@ class ClaudeTelegramBot:
                           no_output_timeout: int = 90,
                           max_total_timeout: int = 600,
                           routine_mode: bool = False,
-                          system_prompt: Optional[str] = SYSTEM_PROMPT) -> None:
+                          system_prompt: Optional[str] = SYSTEM_PROMPT,
+                          force_tts: bool = False) -> None:
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -3391,9 +3375,10 @@ class ClaudeTelegramBot:
             ctx.last_typing_time = time.time()
             ctx.last_snapshot_len = 0
 
-        # Append TTS instruction when voice mode is active
+        # Append TTS instruction when voice mode is active or force_tts
         effective_sp = system_prompt
-        if ctx and ctx.tts_enabled and not routine_mode:
+        tts_this_request = force_tts or (ctx and ctx.tts_enabled and not routine_mode)
+        if tts_this_request:
             effective_sp = (effective_sp + TTS_PROMPT_SUFFIX) if effective_sp else TTS_PROMPT_SUFFIX
 
         # Start runner thread
@@ -3601,9 +3586,12 @@ class ClaudeTelegramBot:
                     self.edit_message(stream_msg, "✅")
                 self.send_message(final_text)
 
-        # TTS: send voice message if enabled (background, non-blocking)
-        if not routine_mode and ctx and ctx.tts_enabled:
-            self._maybe_send_tts(final_text, ctx.chat_id, ctx.thread_id)
+        # TTS: send voice message if enabled or forced (background, non-blocking)
+        if tts_this_request and ctx:
+            # Strip cost line from TTS — not useful as audio
+            tts_text = re.sub(r'\n\n💰 Custo:.*$', '', final_text, flags=re.DOTALL).strip()
+            if tts_text:
+                self._maybe_send_tts(tts_text, ctx.chat_id, ctx.thread_id)
 
         if ctx:
             ctx.stream_msg_id = None
@@ -3661,7 +3649,8 @@ class ClaudeTelegramBot:
         try:
             self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200,
                                     routine_mode=True,
-                                    system_prompt=None if task.minimal_context else SYSTEM_PROMPT)
+                                    system_prompt=None if task.minimal_context else SYSTEM_PROMPT,
+                                    force_tts=task.voice)
             # Check if there was an error
             if self.runner.error_text:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", self.runner.error_text[:200])
@@ -3779,12 +3768,18 @@ class ClaudeTelegramBot:
             )
             return
 
+        # Inline #voice trigger: strip tag and enable TTS for this single message
+        inline_tts = False
+        if re.search(r'(?:^|\s)#voice\b', text, re.IGNORECASE):
+            inline_tts = True
+            text = re.sub(r'(?:^|\s)#voice\b', '', text, flags=re.IGNORECASE).strip()
+
         ctx = self._ctx
         if ctx:
             ctx.user_msg_id = user_msg_id
             self.set_reaction(user_msg_id, "👀")
             ctx.last_reaction = "👀"
-        self._run_claude_prompt(text)
+        self._run_claude_prompt(text, force_tts=inline_tts)
 
     def _remove_keyboard(self, callback: Dict) -> None:
         """Remove inline keyboard from the message that had the buttons."""
