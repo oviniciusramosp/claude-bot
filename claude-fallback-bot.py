@@ -1250,12 +1250,14 @@ class ClaudeRunner:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL if lightweight else subprocess.PIPE,
+                stdin=subprocess.PIPE,
                 cwd=workspace,
                 env=clean_env,
                 text=True,
                 bufsize=1,
             )
+            if lightweight and self.process.stdin:
+                self.process.stdin.close()
             self._read_stream()
         except FileNotFoundError:
             self.error_text = f"❌ Claude CLI não encontrado em {CLAUDE_PATH}"
@@ -1293,7 +1295,8 @@ class ClaudeRunner:
         if etype == "system":
             sid = obj.get("session_id")
             if sid:
-                self.captured_session_id = sid
+                with self._lock:
+                    self.captured_session_id = sid
         elif etype == "error":
             # Capture API-level errors from Claude CLI stream (e.g. overloaded, rate limit)
             err = obj.get("error", {})
@@ -1336,6 +1339,8 @@ class ClaudeRunner:
                     entry = f"🔧 {tool_name}" + (f": `{hint}`" if hint else "")
                     with self._lock:
                         self.tool_log.append(entry)
+                        if len(self.tool_log) > 200:
+                            self.tool_log = self.tool_log[-100:]
                         self.activity_type = _TOOL_ACTIVITY_MAP.get(tool_name, "tool")
                         self.last_activity = time.time()
         elif etype == "result":
@@ -1344,7 +1349,8 @@ class ClaudeRunner:
             self.total_cost_usd = obj.get("total_cost_usd", 0.0)
             sid = obj.get("session_id")
             if sid:
-                self.captured_session_id = sid
+                with self._lock:
+                    self.captured_session_id = sid
 
     def _cleanup(self) -> None:
         self.running = False
@@ -1457,6 +1463,7 @@ class ThreadContext:
     session_name: Optional[str] = None
     pending: list = field(default_factory=list)
     pending_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     stream_msg_id: Optional[int] = None
     user_msg_id: Optional[int] = None
     last_reaction: str = ""
@@ -1485,7 +1492,7 @@ class PipelineExecutor:
         self.bot = bot
         self.ctx = ctx
         self.state = state_mgr
-        self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{int(time.time())}")
+        self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{secrets.token_hex(6)}")
         self._step_status: Dict[str, str] = {s.id: "pending" for s in task.steps}
         self._step_outputs: Dict[str, str] = {}
         self._step_errors: Dict[str, str] = {}
@@ -2278,6 +2285,17 @@ class ClaudeTelegramBot:
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                retry_after = 2
+                try:
+                    err_body = json.loads(exc.read().decode("utf-8"))
+                    retry_after = err_body.get("parameters", {}).get("retry_after", retry_after)
+                except Exception:
+                    pass
+                logger.warning("tg_request %s attempt %d HTTP %s: %s (retry_after=%s)",
+                               method, attempt + 1, exc.code, exc.reason, retry_after)
+                if attempt < 2:
+                    time.sleep(min(retry_after, 30))
             except Exception as exc:
                 logger.warning("tg_request %s attempt %d failed: %s", method, attempt + 1, exc)
                 if attempt < 2:
@@ -2320,6 +2338,17 @@ class ClaudeTelegramBot:
             try:
                 with urllib.request.urlopen(req, timeout=60) as resp:
                     return json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                retry_after = 2
+                try:
+                    err_body = json.loads(exc.read().decode("utf-8"))
+                    retry_after = err_body.get("parameters", {}).get("retry_after", retry_after)
+                except Exception:
+                    pass
+                logger.warning("_tg_upload_file %s attempt %d HTTP %s (retry_after=%s)",
+                               method, attempt + 1, exc.code, retry_after)
+                if attempt < 2:
+                    time.sleep(min(retry_after, 30))
             except Exception as exc:
                 logger.warning("_tg_upload_file %s attempt %d failed: %s", method, attempt + 1, exc)
                 if attempt < 2:
@@ -2343,6 +2372,8 @@ class ClaudeTelegramBot:
                      reply_markup: Optional[Dict] = None,
                      chat_id: Optional[str] = None,
                      thread_id: Optional[str] = None) -> Optional[int]:
+        if parse_mode == "Markdown":
+            text = self._sanitize_markdown(text)
         chunks = self._split_message(text)
         last_msg_id = None
         if chat_id is None:
@@ -2371,6 +2402,8 @@ class ClaudeTelegramBot:
     def edit_message(self, message_id: int, text: str, parse_mode: str = "Markdown") -> bool:
         if not text.strip():
             return False
+        if parse_mode == "Markdown":
+            text = self._sanitize_markdown(text)
         text = text[:MAX_MESSAGE_LENGTH]
         chat_id = self._chat_id
         data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
@@ -2445,6 +2478,38 @@ class ClaudeTelegramBot:
 
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self.tg_request("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+
+    # -- Markdown sanitization --
+
+    @staticmethod
+    def _sanitize_markdown(text: str) -> str:
+        """Fix unbalanced Markdown v1 markers to avoid Telegram parse errors.
+
+        Ensures code blocks (```), inline code (`), bold (*), and italic (_)
+        markers are balanced. Appends closing markers when needed.
+        """
+        # Fix unbalanced triple-backtick code blocks
+        if text.count("```") % 2 != 0:
+            text += "\n```"
+
+        # For inline markers, only fix within non-code-block segments
+        parts = text.split("```")
+        for i in range(0, len(parts), 2):  # even indices = outside code blocks
+            seg = parts[i]
+            # Fix unbalanced inline code
+            if seg.count("`") % 2 != 0:
+                parts[i] = seg + "`"
+            # Fix unbalanced bold (only standalone *, not inside words)
+            seg = parts[i]
+            bold_count = len(re.findall(r'(?<!\w)\*(?!\s)', seg)) + len(re.findall(r'(?<!\s)\*(?!\w)', seg))
+            if seg.count("*") % 2 != 0:
+                parts[i] = seg + "*"
+            # Fix unbalanced italic (only _word_ pattern, skip snake_case)
+            seg = parts[i]
+            if seg.count("_") % 2 != 0:
+                parts[i] = seg + "_"
+
+        return "```".join(parts)
 
     # -- Message splitting --
 
@@ -3538,10 +3603,10 @@ class ClaudeTelegramBot:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
-        # Inline #voice: fast path — minimal prompt, haiku, low effort, no session
+        # Inline #voice: fast path — minimal prompt, haiku, low effort, with session context
         if force_tts:
             effective_sp = _tts_prompt_suffix()
-            effective_session_id = None
+            effective_session_id = session.session_id
             effective_model = "haiku"
             effective_effort = "low"
         else:
@@ -3630,9 +3695,10 @@ class ClaudeTelegramBot:
         if not ctx or not ctx.user_msg_id:
             return
         emoji = _REACTION_MAP.get(runner.activity_type, "🤔")
-        if emoji != ctx.last_reaction:
-            self.set_reaction(ctx.user_msg_id, emoji)
-            ctx.last_reaction = emoji
+        with ctx.lock:
+            if emoji != ctx.last_reaction:
+                self.set_reaction(ctx.user_msg_id, emoji)
+                ctx.last_reaction = emoji
 
     def _stream_updates(self, runner_thread: threading.Thread, runner: ClaudeRunner,
                         routine_mode: bool = False) -> None:
@@ -4484,6 +4550,17 @@ class ClaudeTelegramBot:
 if __name__ == "__main__":
     # Prevent "nested session" error when bot is started from inside Claude Code
     os.environ.pop("CLAUDECODE", None)
+
+    # Validate required configuration before starting
+    _missing = []
+    if not TELEGRAM_BOT_TOKEN:
+        _missing.append("TELEGRAM_BOT_TOKEN")
+    if not TELEGRAM_CHAT_ID:
+        _missing.append("TELEGRAM_CHAT_ID")
+    if _missing:
+        print(f"FATAL: Missing required config: {', '.join(_missing)}", file=sys.stderr)
+        print(f"Set them in environment or in {_env_file}", file=sys.stderr)
+        sys.exit(1)
 
     if "--run" in sys.argv or len(sys.argv) == 1:
         bot = ClaudeTelegramBot()
