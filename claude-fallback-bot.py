@@ -1215,7 +1215,7 @@ class ClaudeRunner:
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL if lightweight else subprocess.PIPE,
                 cwd=workspace,
                 env=clean_env,
                 text=True,
