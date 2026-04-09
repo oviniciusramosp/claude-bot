@@ -61,7 +61,8 @@ README (hub raiz)
 |------|----------|---------|
 | README | indexes + Tooling | nenhum (raiz) |
 | Index | seus filhos diretos | README |
-| Leaf (skill, rotina, nota) | `[[IndexPai]]` na primeira linha + cross-links genuinos | seu index |
+| Leaf (rotina, nota) | `[[IndexPai]]` na primeira linha + cross-links genuinos | seu index |
+| Skill | SEM wikilinks (usar paths). Unica excecao: links para sub-arquivos proprios | Skills index |
 | Agente | `{id}.md` com links internos | Agents index |
 | Journal entry | `[[Journal]]` ou `[[{agent}/Journal\|Journal]]` | Journal index |
 | Tooling | nenhum (terminal) | README |
@@ -99,7 +100,8 @@ tags: [tag1, tag2]
 ```
 
 **2. Primeira linha do body = link para index pai:**
-Skill → `[[Skills]]`, Rotina → `[[Routines]]`, Nota → `[[Notes]]`
+Rotina → `[[Routines]]`, Nota → `[[Notes]]`
+**Excecao: Skills NAO tem link para index pai.** Skills.md linka para as skills (via `[[nome]]`), mas dentro das skills nao ha wikilinks — usar paths (ex: `Skills/create-pipeline.md`). O unico wikilink permitido dentro de uma skill eh para sub-arquivos proprios (arquivos dentro de pastas que a skill possui).
 
 **3. Cross-links somente para dependencias reais.** Na duvida, nao linkar.
 
@@ -191,8 +193,6 @@ trigger: "quando o usuario pedir X"
 tags: [skill, categoria]
 ---
 
-[[Skills]]
-
 ## Objetivo
 ...
 
@@ -203,7 +203,12 @@ tags: [skill, categoria]
 ...
 ```
 
-Cross-links somente para pastas-alvo da skill (ex: `[[Routines]]` se a skill cria rotinas).
+**Regras de linkagem para skills:**
+- Skills NAO tem `[[Skills]]` na primeira linha (diferente de rotinas e notas)
+- Skills.md (index) linka para cada skill com `[[nome-da-skill]]`
+- Dentro de uma skill, NUNCA usar wikilinks `[[...]]` para arquivos externos — usar paths em inline code (ex: `Skills/create-pipeline.md`, `Routines/Routines.md`)
+- O UNICO wikilink permitido dentro de uma skill eh para sub-arquivos proprios (arquivos em pastas que a skill possui, niveis inferiores)
+- Ao criar uma nova skill: adicionar `- [[nome]] — descricao` em Skills.md
 
 ## Routines (`Routines/`)
 
@@ -297,6 +302,7 @@ steps:
 - Steps sem `depends_on` rodam em paralelo
 - Workspace compartilhado em `/tmp/claude-pipeline-{nome}-{ts}/data/` — cada step le outputs anteriores automaticamente
 - Prompts dos steps NAO precisam mencionar arquivos — o orquestrador injeta contexto de workspace
+- Cada step file DEVE terminar com `rotina: [[nome-da-pipeline]]` para conectar ao pipeline no grafo do Obsidian. O bot filtra essa linha automaticamente — ela nao eh enviada ao Claude CLI. O app macOS gerencia isso automaticamente (append no save, strip no load)
 - Dual timeout: `inactivity_timeout` mata steps inativos, `timeout` eh limite hard
 - Falha sem retry cascata SKIPPED para dependentes
 - `notify: final|all|summary|none` controla notificacoes (falhas sempre notificam)

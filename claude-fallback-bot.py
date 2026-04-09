@@ -1179,6 +1179,7 @@ class ClaudeRunner:
                 "--no-session-persistence",
                 "--mcp-config", '{"mcpServers":{}}',
                 "--strict-mcp-config",
+                "--setting-sources", "",
             ]
         if session_id:
             cmd += ["--resume", session_id]

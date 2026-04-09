@@ -10,8 +10,6 @@ tags: [skill, agent, openclaw, import, automation, review]
 
 # Importar ou Revisar Agente Importado
 
-[[Skills]]
-
 ## Modos de operacao
 
 - **Importacao** — importar agente de sistema externo (atualmente OpenClaw) para o vault
@@ -157,7 +155,7 @@ Appendar no journal do dia:
 ```markdown
 ## HH:MM — Agente importado do OpenClaw
 
-- Agente [[{id}]] importado do OpenClaw via [[import-agent]]
+- Agente {id} importado do OpenClaw via skill import-agent
 - Fonte: {workspace path}
 - Modelo mapeado: {OC model} -> {vault model}
 - {N} instruction files processados
@@ -228,7 +226,7 @@ Para cada agente, ler `agent.md`, `CLAUDE.md`, e o Journal. Avaliar com o checkl
 
 #### D. Integracao com o vault
 
-- [ ] O agente tem rotinas associadas? Se nao e deveria → sugerir criar via [[create-routine]]
+- [ ] O agente tem rotinas associadas? Se nao e deveria → sugerir criar via `Skills/create-routine.md`
 - [ ] Skills do OC que este agente usava foram recriadas no vault?
 - [ ] Cron jobs do OC que este agente tinha foram convertidos em rotinas?
 
@@ -246,7 +244,7 @@ Status: OK / Melhorias sugeridas
 
 - **Melhorar CLAUDE.md** → re-sintetizar a partir dos instruction files originais (se acessiveis)
 - **Ajustar modelo** → editar `agent.md`
-- **Criar rotinas** → redirecionar para [[create-routine]] com `agent: {id}`
+- **Criar rotinas** → redirecionar para `Skills/create-routine.md` com `agent: {id}`
 - **Recriar skills do OC** → usar formato vault `Skills/{nome}.md`
 
 ### Passo 5 — Registrar no Journal
@@ -257,9 +255,9 @@ Appendar no journal do dia com as mudancas aplicadas.
 
 ### Caveats
 
-- **Sub-agentes nao migram 1:1.** O OC usa pipelines multi-agente (manager -> writer -> reviewer). O vault consolida em um agente unico. → Se o workflow original era complexo, sugerir criar uma **pipeline** via [[create-pipeline]] para replicar a orquestracao.
+- **Sub-agentes nao migram 1:1.** O OC usa pipelines multi-agente (manager -> writer -> reviewer). O vault consolida em um agente unico. → Se o workflow original era complexo, sugerir criar uma **pipeline** via `Skills/create-pipeline.md` para replicar a orquestracao.
 - **Instruction files com prefixo `_` sao contexto compartilhado** (_globals, _style, _apis, _notion). Devem ser incorporados no CLAUDE.md, nao ignorados.
-- **Cron jobs e schedules do OC nao migram automaticamente.** → Apos importar, perguntar ao usuario se quer criar rotinas para este agente usando [[create-routine]] com `agent: {id}`.
+- **Cron jobs e schedules do OC nao migram automaticamente.** → Apos importar, perguntar ao usuario se quer criar rotinas para este agente usando `Skills/create-routine.md` com `agent: {id}`.
 - **Memory do OC nao eh importada.** Os arquivos em `memory/` sao historicos e nao migram. → Se houver contexto critico em memory/, sugerir criar uma nota em `vault/Notes/` com o conteudo relevante.
 - **Skills do OC devem ser recriadas** como vault skills em `Skills/{nome}.md`. → Listar as skills que o agente usava no OC e perguntar se o usuario quer recriar alguma.
 - **O campo `source_workspace` no agent.md** preserva a referencia ao workspace OC original para consulta futura dos instruction files detalhados.

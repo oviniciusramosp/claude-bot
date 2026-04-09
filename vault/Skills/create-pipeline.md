@@ -8,8 +8,6 @@ trigger: "quando o usuario quiser criar, revisar, melhorar ou otimizar uma pipel
 tags: [skill, pipeline, routine, automation, multi-agent, review, parallelism]
 ---
 
-[[Skills]]
-
 ## Modos de operacao
 
 Esta skill opera em dois modos:
@@ -222,6 +220,7 @@ IMPORTANTE sobre prompts dos steps:
 - Focar apenas na TAREFA do step: "Analise os dados coletados e produza uma analise tecnica"
 - O step recebe automaticamente: lista de arquivos disponiveis, instrucao de onde escrever output
 - Escrever prompts curtos e diretos — o contexto do pipeline ja e injetado pelo orquestrador
+- A ULTIMA LINHA de cada step file DEVE ser `rotina: [[{nome-da-pipeline}]]` — esse wikilink conecta o step ao pipeline no grafo do Obsidian. O bot filtra essa linha automaticamente ao enviar o prompt ao Claude CLI, entao ela nunca chega ao modelo. O app macOS tambem gerencia isso automaticamente (append no save, strip no load)
 
 #### 10. Atualizar o index
 

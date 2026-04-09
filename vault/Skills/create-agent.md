@@ -10,8 +10,6 @@ tags: [skill, agent, automation, review]
 
 # Criar ou Revisar Agente
 
-[[Skills]]
-
 ## Modos de operacao
 
 Esta skill opera em dois modos:
@@ -206,7 +204,7 @@ Apos criar o agente, sugerir proativamente:
 > "Agente criado! Proximo passo: quer criar uma **rotina agendada** para este agente? Rotinas com `agent: {id}` rodam automaticamente no workspace dele.
 > Exemplos: relatorio diario, monitoramento, resumo matinal."
 
-Se o usuario aceitar → redirecionar para a skill [[create-routine]] com o campo `agent` pre-preenchido.
+Se o usuario aceitar → redirecionar para a skill `Skills/create-routine.md` com o campo `agent` pre-preenchido.
 
 ---
 

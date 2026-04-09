@@ -10,8 +10,6 @@ tags: [skill, routine, automation, review]
 
 # Criar ou Revisar Rotina
 
-[[Skills]]
-
 ## Modos de operacao
 
 Esta skill opera em dois modos:
@@ -50,7 +48,7 @@ Sugerir proativamente ao usuario:
 >
 > Posso criar como pipeline? Ou prefere uma rotina simples mesmo?"
 
-Se o usuario aceitar → ler e seguir a skill [[create-pipeline]] para o restante do fluxo.
+Se o usuario aceitar → ler e seguir a skill `Skills/create-pipeline.md` para o restante do fluxo.
 Se preferir rotina simples → continuar com os passos abaixo.
 
 **Exemplos de triagem:**
@@ -243,7 +241,7 @@ Status: ✅ OK / ⚠️ Melhorias sugeridas
 
 Perguntar quais melhorias o usuario quer aplicar. Para cada aprovada:
 
-- Se for conversao para pipeline → ler e seguir a skill [[create-pipeline]]
+- Se for conversao para pipeline → ler e seguir a skill `Skills/create-pipeline.md`
 - Se for mudanca de modelo/contexto/schedule → editar o arquivo diretamente
 - Se for melhoria de prompt → reescrever o prompt e mostrar diff ao usuario
 
@@ -260,4 +258,4 @@ Appendar no journal do dia com as mudancas aplicadas.
 - Rotinas podem ser desabilitadas mudando `enabled: false` no frontmatter
 - O scheduler do bot verifica rotinas a cada 60 segundos
 - Rotinas que falham aparecem com icone vermelho no menu bar
-- **Se o usuario quiser uma rotina com multiplos passos/agentes/steps, usar a skill [[create-pipeline]] em vez desta.** Pipelines tem `type: pipeline` e permitem orquestrar multiplos sub-agentes com dependencias, paralelismo e modelos diferentes por step.
+- **Se o usuario quiser uma rotina com multiplos passos/agentes/steps, usar a skill `Skills/create-pipeline.md` em vez desta.** Pipelines tem `type: pipeline` e permitem orquestrar multiplos sub-agentes com dependencias, paralelismo e modelos diferentes por step.
