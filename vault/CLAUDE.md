@@ -226,6 +226,7 @@ Prompt que sera enviado ao Claude Code...
 - `until` — data limite YYYY-MM-DD (opcional)
 - `model` — modelo a usar (sonnet/opus/haiku)
 - `enabled` — true/false
+- `voice` — true/false (envia resposta tambem como audio TTS)
 
 **Criacao de rotinas:**
 - Via Telegram: comando `/routine` dispara a skill [[create-routine]]

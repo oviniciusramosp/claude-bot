@@ -190,6 +190,7 @@ Formato da mensagem de commit:
 | `agent` | string | — | Agente para rotear a execucao |
 | `enabled` | bool | `true` | Ativa/desativa a rotina |
 | `context` | string | `full` | `minimal` = pula system prompt do vault, usa apenas CLAUDE.md |
+| `voice` | bool | `false` | Envia resposta tambem como audio (TTS) |
 | `notify` | string | `final` | Pipeline only: `final\|all\|summary\|none` |
 
 ### Contexto minimal vs full
