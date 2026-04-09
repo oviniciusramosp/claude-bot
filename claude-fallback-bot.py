@@ -1201,7 +1201,7 @@ class ClaudeRunner:
         max_budget: Optional[float] = None,
         effort: Optional[str] = None,
         system_prompt: Optional[str] = SYSTEM_PROMPT,
-        lightweight: bool = False,
+        lightweight: bool = False,  # unused, kept for API compat
     ) -> None:
         cmd = [
             CLAUDE_PATH,
@@ -1211,15 +1211,6 @@ class ClaudeRunner:
             "--output-format", "stream-json",
             "--verbose",
         ]
-        if lightweight:
-            # Fast path: skip plugins, MCP servers, skills, tools, session persistence
-            cmd += [
-                "--disable-slash-commands",
-                "--tools", "",
-                "--mcp-config", '{"mcpServers":{}}',
-                "--strict-mcp-config",
-                "--setting-sources", "",
-            ]
         if session_id:
             cmd += ["--resume", session_id]
         if max_budget:
@@ -1260,8 +1251,6 @@ class ClaudeRunner:
                 text=True,
                 bufsize=1,
             )
-            if lightweight and self.process.stdin:
-                self.process.stdin.close()
             self._read_stream()
         except FileNotFoundError:
             self.error_text = f"❌ Claude CLI não encontrado em {CLAUDE_PATH}"
@@ -2280,13 +2269,14 @@ class ClaudeTelegramBot:
 
     # -- Telegram helpers --
 
-    def tg_request(self, method: str, data: Optional[Dict] = None) -> Optional[Dict]:
+    def tg_request(self, method: str, data: Optional[Dict] = None,
+                   timeout: int = 15) -> Optional[Dict]:
         url = f"{self.base_url}/{method}"
         payload = json.dumps(data or {}).encode("utf-8")
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 retry_after = 2
@@ -2339,7 +2329,7 @@ class ClaudeTelegramBot:
         )
         for attempt in range(3):
             try:
-                with urllib.request.urlopen(req, timeout=60) as resp:
+                with urllib.request.urlopen(req, timeout=15) as resp:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 retry_after = 2
@@ -3589,15 +3579,6 @@ class ClaudeTelegramBot:
             session.message_count += 1
             session.total_turns += 1
             self.sessions.cumulative_turns += 1
-            self.sessions.save()
-
-        if not _retry and not routine_mode:
-            if ctx:
-                ctx.stream_msg_id = self.send_message("⏳ _Processando..._")
-        if ctx:
-            ctx.last_edit_time = time.time()
-            ctx.last_typing_time = time.time()
-            ctx.last_snapshot_len = 0
 
         # Append TTS instruction when voice mode is active or force_tts
         effective_sp = system_prompt
@@ -3606,25 +3587,19 @@ class ClaudeTelegramBot:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
 
-        # Inline #voice: fast path — minimal prompt, haiku, low effort, with session context
-        if force_tts:
-            effective_sp = _tts_prompt_suffix()
-            effective_session_id = session.session_id
-            effective_model = "haiku"
-            effective_effort = "low"
-        else:
-            effective_session_id = session.session_id
-            effective_model = session.model
-            effective_effort = self.effort
+        # All paths use the same session/model/effort
+        effective_session_id = session.session_id
+        effective_model = session.model
+        effective_effort = self.effort
 
-        # Start runner thread
+        # Start runner thread FIRST — before any blocking network I/O
         runner_thread = threading.Thread(
             target=runner.run,
             kwargs={
                 "prompt": prompt,
                 "model": effective_model,
                 "session_id": effective_session_id,
-                "workspace": "/tmp" if force_tts else session.workspace,
+                "workspace": session.workspace,
                 "effort": effective_effort,
                 "system_prompt": effective_sp,
                 "lightweight": force_tts,
@@ -3632,6 +3607,13 @@ class ClaudeTelegramBot:
             daemon=True,
         )
         runner_thread.start()
+
+        # Now send status message and save session (non-blocking for subprocess)
+        if not _retry:
+            self.sessions.save()
+        if not _retry and not routine_mode:
+            if ctx:
+                ctx.stream_msg_id = self.send_message("⏳ _Processando..._")
 
         # Start watchdog thread
         watchdog_thread = threading.Thread(
@@ -4254,7 +4236,7 @@ class ClaudeTelegramBot:
             "timeout": 30,
             "allowed_updates": ["message", "callback_query"],
         }
-        resp = self.tg_request("getUpdates", data)
+        resp = self.tg_request("getUpdates", data, timeout=45)
         if resp and resp.get("ok"):
             results = resp.get("result", [])
             if results:
