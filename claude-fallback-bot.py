@@ -96,7 +96,7 @@ def _tts_prompt_suffix() -> str:
         f"\n\nIMPORTANT: The user is listening to your response as audio. "
         f"Respond in {lang}. "
         f"Keep your answer SHORT and conversational — max 3-4 sentences, no code blocks, "
-        f"no markdown formatting, no bullet lists. Speak naturally as if talking to someone."
+        f"no markdown formatting, no bullet lists, no emojis. Speak naturally as if talking to someone."
     )
 
 DEFAULT_TIMEOUT = 600
@@ -3437,6 +3437,10 @@ class ClaudeTelegramBot:
         text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
         # Remove cost line (appended by bot)
         text = re.sub(r"\n*💰.*$", "", text)
+        # Remove emojis (macOS say reads them aloud as descriptions)
+        text = re.sub(
+            r"[\U0001F300-\U0001FAFF\U00002702-\U000027B0\U0000FE00-\U0000FE0F"
+            r"\U0000200D\U00002600-\U000026FF\U00002B50\U00002B55]+", "", text)
         # Collapse whitespace
         text = re.sub(r"\n{2,}", "\n", text).strip()
         return text
