@@ -679,7 +679,9 @@ struct PipelineStepsTab: View {
                     .font(.caption.bold()).foregroundStyle(.secondary)
                     .padding(.bottom, 8)
                 ForEach(Array(steps.enumerated()), id: \.element.id) { idx, step in
-                    StepRow(step: step, index: idx + 1, total: steps.count)
+                    let def = routine.pipelineStepDefs.first { $0.stepId == step.id }
+                    StepRow(step: step, stepDef: def, index: idx + 1, total: steps.count,
+                            workspace: routine.lastExecution?.workspace)
                     if idx < steps.count - 1 { Divider().padding(.vertical, 4) }
                 }
             }
@@ -699,8 +701,10 @@ struct PipelineStepsTab: View {
 
 struct StepRow: View {
     var step: StepExecution
+    var stepDef: PipelineStepDef?
     var index: Int
     var total: Int
+    var workspace: String?
 
     private var statusColor: Color {
         switch step.status {
@@ -711,34 +715,108 @@ struct StepRow: View {
         }
     }
 
+    private var effectiveOutputType: String {
+        step.outputType ?? stepDef?.outputType ?? "file"
+    }
+
     var body: some View {
-        HStack(spacing: 10) {
-            Text("\(index)")
-                .font(.caption2.monospacedDigit().bold())
-                .foregroundStyle(.secondary).frame(width: 18)
-            Group {
-                if step.status == .running {
-                    ProgressView().scaleEffect(0.5)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Text("\(index)")
+                    .font(.caption2.monospacedDigit().bold())
+                    .foregroundStyle(.secondary).frame(width: 18)
+                Group {
+                    if step.status == .running {
+                        ProgressView().scaleEffect(0.5)
+                    } else {
+                        Image(systemName: step.status.symbol).foregroundStyle(statusColor)
+                    }
+                }
+                .frame(width: 16, height: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stepDef?.name ?? step.id).font(.callout)
+                    if let err = step.error {
+                        Text(err).font(.caption2).foregroundStyle(Color.statusRed).lineLimit(1)
+                    }
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let dur = step.duration {
+                        Text(dur).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    if step.attempt > 1 {
+                        Text("attempt \(step.attempt)").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+
+            // Details row: dependencies + output type
+            HStack(spacing: 8) {
+                // Dependencies
+                if let def = stepDef, !def.dependsOn.isEmpty {
+                    HStack(spacing: 3) {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.system(size: 8))
+                        Text(def.dependsOn.joined(separator: ", "))
+                            .font(.system(size: 9))
+                    }
+                    .foregroundStyle(.tertiary)
+                }
+
+                // Output type badge
+                let ot = effectiveOutputType
+                if ot == "telegram" {
+                    HStack(spacing: 2) {
+                        Image(systemName: "paperplane.fill").font(.system(size: 8))
+                        Text("Telegram").font(.system(size: 9, weight: .medium))
+                    }
+                    .foregroundStyle(.blue)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Color.blue.opacity(0.08))
+                    .clipShape(Capsule())
+                } else if ot == "none" {
+                    // nothing
+                } else if ot != "file" {
+                    // Vault path
+                    HStack(spacing: 2) {
+                        Image(systemName: "folder.fill").font(.system(size: 8))
+                        Text(ot).font(.system(size: 9, weight: .medium)).lineLimit(1)
+                    }
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 5).padding(.vertical, 1)
+                    .background(Color.orange.opacity(0.08))
+                    .clipShape(Capsule())
                 } else {
-                    Image(systemName: step.status.symbol).foregroundStyle(statusColor)
+                    // Temp file
+                    let filePath = workspace.map { "\($0)/data/\(step.id).md" }
+                    let fileExists = filePath.map { FileManager.default.fileExists(atPath: $0) } ?? false
+                    if step.status == .completed && fileExists, let fp = filePath {
+                        Button {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: fp))
+                        } label: {
+                            HStack(spacing: 2) {
+                                Image(systemName: "doc.text").font(.system(size: 8))
+                                Text("data/\(step.id).md").font(.system(size: 9, weight: .medium))
+                            }
+                            .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(Capsule())
+                    } else {
+                        HStack(spacing: 2) {
+                            Image(systemName: "doc.text").font(.system(size: 8))
+                            Text("data/\(step.id).md").font(.system(size: 9, weight: .medium))
+                        }
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(Capsule())
+                    }
                 }
             }
-            .frame(width: 16, height: 16)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(step.id).font(.callout)
-                if let err = step.error {
-                    Text(err).font(.caption2).foregroundStyle(Color.statusRed).lineLimit(1)
-                }
-            }
-            Spacer()
-            VStack(alignment: .trailing, spacing: 2) {
-                if let dur = step.duration {
-                    Text(dur).font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
-                }
-                if step.attempt > 1 {
-                    Text("attempt \(step.attempt)").font(.caption2).foregroundStyle(.tertiary)
-                }
-            }
+            .padding(.leading, 44) // align with step name (18 + 10 + 16)
         }
         .padding(.vertical, 2)
     }
