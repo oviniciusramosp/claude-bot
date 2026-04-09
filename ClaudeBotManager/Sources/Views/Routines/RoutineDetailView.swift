@@ -231,17 +231,10 @@ struct RoutineDetailView: View {
             HStack(alignment: .top, spacing: 40) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Type").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                    Picker("", selection: Binding(
-                        get: { execType },
-                        set: { setExecType($0) }
-                    )) {
-                        Text("Default").tag("default")
-                        Text("Minimal").tag("minimal")
-                        Text("Pipeline").tag("pipeline")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    CustomSegmentedControl(
+                        selection: Binding(get: { execType }, set: { setExecType($0) }),
+                        options: [("default", "Default"), ("minimal", "Minimal"), ("pipeline", "Pipeline")]
+                    )
                     Text(execTypeDescription)
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))

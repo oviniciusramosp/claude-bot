@@ -166,14 +166,10 @@ struct RoutineFormSheet: View {
                 // Type
                 VStack(alignment: .leading, spacing: 5) {
                     fieldLabel("Type")
-                    Picker("", selection: $executionType) {
-                        Text("Default").tag("default")
-                        Text("Minimal").tag("minimal")
-                        Text("Pipeline").tag("pipeline")
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    CustomSegmentedControl(
+                        selection: $executionType,
+                        options: [("default", "Default"), ("minimal", "Minimal"), ("pipeline", "Pipeline")]
+                    )
                     fieldLabel(executionTypeDescription)
                 }
                 .frame(maxWidth: .infinity)

@@ -322,3 +322,47 @@ struct EmptyStateView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
+
+// MARK: - Custom Segmented Control (full-width)
+
+struct CustomSegmentedControl: View {
+    @Binding var selection: String
+    var options: [(String, String)] // (value, label)
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(options.enumerated()), id: \.element.0) { idx, option in
+                let isSelected = selection == option.0
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        selection = option.0
+                    }
+                } label: {
+                    Text(option.1)
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 22)
+                        .foregroundStyle(isSelected ? .white : .primary)
+                        .background(
+                            Group {
+                                if isSelected {
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .fill(Color(red: 0.05, green: 0.44, blue: 1.0))
+                                }
+                            }
+                        )
+                }
+                .buttonStyle(.plain)
+
+                // Separator between non-selected segments
+                if idx < options.count - 1 && selection != option.0 && selection != options[idx + 1].0 {
+                    Color(white: 0.85).frame(width: 1, height: 14)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: 24)
+        .background(Color.black.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
