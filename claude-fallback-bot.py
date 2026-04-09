@@ -601,13 +601,15 @@ class RoutineStateManager:
             entry["type"] = "pipeline"
             if workspace:
                 entry["workspace"] = workspace
-            if status == "running" and "started_at" not in entry:
+            if status == "running":
                 entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                entry.pop("finished_at", None)
+                entry.pop("error", None)
             elif status in ("completed", "failed"):
                 entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             if error:
                 entry["error"] = error
-            if steps_init is not None and "steps" not in entry:
+            if steps_init is not None:
                 entry["steps"] = {sid: {"status": "pending", "attempt": 0} for sid in steps_init}
             data[name][time_slot] = entry
             self._save(data)
