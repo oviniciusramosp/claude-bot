@@ -15,6 +15,11 @@ actor ClaudeUsageService {
             usage.isAvailable     = true
         }
 
+        // Fetch organization name
+        if let orgName = await fetchOrganizationName(oauthToken: keychainOAuthToken()) {
+            usage.organizationName = orgName
+        }
+
         // Scan local project JSONL files for real token counts (shown as supplemental info)
         let (thisWeek, reference) = scanWeeklyTokens()
         usage.weeklyTokensUsed = thisWeek
@@ -91,6 +96,29 @@ actor ClaudeUsageService {
         else { return nil }
 
         return token
+    }
+
+    // MARK: - Organization info
+
+    private func fetchOrganizationName(oauthToken: String?) async -> String? {
+        guard let token = oauthToken, !token.isEmpty else { return nil }
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/claude_cli/roles") else { return nil }
+
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 10)
+        request.httpMethod = "GET"
+        request.setValue("Bearer \(token)",         forHTTPHeaderField: "Authorization")
+        request.setValue("claude_cli_macos",        forHTTPHeaderField: "anthropic-client-platform")
+        request.setValue("2023-06-01",              forHTTPHeaderField: "anthropic-version")
+        request.setValue("oauth-2025-04-20",        forHTTPHeaderField: "anthropic-beta")
+        request.setValue("application/json",        forHTTPHeaderField: "Accept")
+
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let orgName = json["organization_name"] as? String
+        else { return nil }
+
+        return orgName
     }
 
     // MARK: - Keychain (plan / credentials)

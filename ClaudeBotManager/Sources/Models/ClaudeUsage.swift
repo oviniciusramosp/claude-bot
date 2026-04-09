@@ -12,6 +12,9 @@ struct ClaudeUsage: Sendable {
     var rateTier: String?
     var credentialsExpireAt: Date?
 
+    // Account info from API
+    var organizationName: String?
+
     // Token accounting from local project JSONL files
     var weeklyTokensUsed: Int64  = 0   // tokens consumed this week (Mon–now)
     var weeklyTokensRef:  Int64  = 0   // reference for 100% (max of past 4 weeks)

@@ -81,12 +81,6 @@ struct SettingsView: View {
                 SectionCard(title: "Account", symbol: "person.crop.circle") {
                     let usage = appState.claudeUsage
 
-                    SettingRow("Email") {
-                        TextField("email@example.com", text: $config.claudeAccountEmail)
-                            .font(.system(.callout, design: .monospaced))
-                            .textFieldStyle(.roundedBorder)
-                    }
-
                     SettingRow("Status") {
                         HStack(spacing: Spacing.sm) {
                             Circle()
@@ -95,6 +89,13 @@ struct SettingsView: View {
                             Text(usage.hasPlanInfo ? "Logged in" : "Not logged in")
                                 .font(.callout)
                                 .foregroundStyle(usage.hasPlanInfo ? .primary : .secondary)
+                        }
+                    }
+
+                    if let org = usage.organizationName {
+                        SettingRow("Organization") {
+                            Text(org)
+                                .font(.callout)
                         }
                     }
 
@@ -200,7 +201,6 @@ struct SettingsView: View {
     private func switchAccount() {
         isSwitching = true
         let claudePath = NSString(string: config.claudePath).expandingTildeInPath
-        let email = config.claudeAccountEmail.trimmingCharacters(in: .whitespaces)
 
         DispatchQueue.global(qos: .userInitiated).async {
             // Logout
@@ -216,7 +216,7 @@ struct SettingsView: View {
             // Login (opens browser)
             let login = Process()
             login.executableURL = URL(fileURLWithPath: claudePath)
-            login.arguments = email.isEmpty ? ["auth", "login"] : ["auth", "login", "--email", email]
+            login.arguments = ["auth", "login"]
             login.environment = ProcessInfo.processInfo.environment.filter { $0.key != "CLAUDECODE" }
             login.standardOutput = Pipe()
             login.standardError = Pipe()
