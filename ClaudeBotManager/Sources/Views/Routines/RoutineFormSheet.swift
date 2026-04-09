@@ -16,6 +16,7 @@ struct RoutineFormSheet: View {
     @State private var enabled = true
     @State private var executionType: String = "default" // "default" | "minimal" | "pipeline"
     @State private var pipelineSteps: [PipelineStepDef] = []
+    @State private var lastAddedStepId: UUID?
 
     private let weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     private let weekdayLabels = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
@@ -173,19 +174,23 @@ struct RoutineFormSheet: View {
                     .pickerStyle(.segmented)
                     fieldLabel(executionTypeDescription)
                 }
+                .frame(maxWidth: .infinity)
 
                 // Agent
                 VStack(alignment: .leading, spacing: 5) {
                     fieldLabel("Agent")
-                    Picker("", selection: $agentId) {
-                        Text("Main (Default)").tag(String?.none)
+                    formDropdown(selection: Binding(
+                        get: { agentId ?? "__none__" },
+                        set: { agentId = $0 == "__none__" ? nil : $0 }
+                    )) {
+                        Text("Main (Default)").tag("__none__")
                         ForEach(appState.agents) { a in
-                            Text("\(a.icon) \(a.name)").tag(Optional(a.id))
+                            Text("\(a.icon) \(a.name)").tag(a.id)
                         }
                     }
-                    .frame(maxWidth: .infinity)
                     fieldLabel("Send to the Bot's conversation.")
                 }
+                .frame(maxWidth: .infinity)
             }
 
             // Row 2: Model (hidden when pipeline)
@@ -193,16 +198,16 @@ struct RoutineFormSheet: View {
                 HStack(alignment: .top, spacing: 40) {
                     VStack(alignment: .leading, spacing: 5) {
                         fieldLabel("Model")
-                        Picker("", selection: $model) {
+                        formDropdown(selection: $model) {
                             Text("Sonnet 4.6").tag("sonnet")
                             Text("Opus 4.6").tag("opus")
                             Text("Haiku 4.5").tag("haiku")
                         }
-                        .frame(maxWidth: .infinity, alignment: .leading)
                         fieldLabel(modelDescription)
                     }
+                    .frame(maxWidth: .infinity)
                     // Invisible spacer to match two-column layout
-                    Color.clear.frame(maxWidth: .infinity, maxHeight: 0)
+                    Spacer().frame(maxWidth: .infinity)
                 }
             }
         }
@@ -236,12 +241,15 @@ struct RoutineFormSheet: View {
                     index: idx + 1,
                     allPreviousSteps: Array(pipelineSteps.prefix(idx)),
                     pipelineName: name,
-                    onDelete: { pipelineSteps.remove(at: idx) }
+                    onDelete: { pipelineSteps.remove(at: idx) },
+                    startExpanded: pipelineSteps[idx].id == lastAddedStepId
                 )
             }
 
             Button {
-                pipelineSteps.append(PipelineStepDef(model: "sonnet"))
+                let newStep = PipelineStepDef(model: "sonnet")
+                lastAddedStepId = newStep.id
+                pipelineSteps.append(newStep)
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: "plus").font(.system(size: 13, weight: .bold))
@@ -384,6 +392,19 @@ struct RoutineFormSheet: View {
             .foregroundStyle(Color(hex: 0x727272))
     }
 
+    /// Full-width popup dropdown matching Figma design (h=24, rounded 6, black 5% bg)
+    private func formDropdown<SelectionValue: Hashable, Content: View>(
+        selection: Binding<SelectionValue>,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        Picker("", selection: selection) {
+            content()
+        }
+        .labelsHidden()
+        .frame(maxWidth: .infinity)
+        .frame(height: 24)
+    }
+
     private var executionTypeDescription: String {
         switch executionType {
         case "minimal": return "Minimal context to execute the routine. Agent won't read the vault."
@@ -420,8 +441,17 @@ struct PipelineStepCard: View {
     var pipelineName: String
     var onDelete: () -> Void
 
-    @State private var isExpanded = true
+    @State private var isExpanded: Bool
     @State private var showDepPicker = false
+
+    init(step: Binding<PipelineStepDef>, index: Int, allPreviousSteps: [PipelineStepDef], pipelineName: String, onDelete: @escaping () -> Void, startExpanded: Bool = false) {
+        self._step = step
+        self.index = index
+        self.allPreviousSteps = allPreviousSteps
+        self.pipelineName = pipelineName
+        self.onDelete = onDelete
+        self._isExpanded = State(initialValue: startExpanded)
+    }
 
     private var effectiveStepId: String {
         step.stepId.isEmpty
@@ -431,53 +461,50 @@ struct PipelineStepCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            Button { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } } label: {
-                HStack(spacing: 5) {
+            // Header: chevron + step label + name + model picker
+            HStack(spacing: 5) {
+                Button { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } } label: {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 17))
                         .foregroundStyle(Color(white: 0.75))
                         .frame(width: 22)
-
-                    Text("Step \(index):")
-                        .font(.system(size: 15, weight: .bold))
-                        .tracking(-0.6)
-                        .foregroundStyle(Color.primary.opacity(0.5))
-
-                    Text(step.name.isEmpty ? "Untitled" : step.name)
-                        .font(.system(size: 15, weight: .bold))
-                        .tracking(-0.6)
-                        .foregroundStyle(step.name.isEmpty ? Color.primary.opacity(0.3) : Color.primary)
-
-                    Spacer()
                 }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+                .buttonStyle(.plain)
 
-            // Model picker (always visible in header area, right-aligned)
-            HStack {
-                Spacer()
+                Text("Step \(index):")
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundStyle(Color.primary.opacity(0.5))
+
+                Text(step.name.isEmpty ? "Untitled" : step.name)
+                    .font(.system(size: 15, weight: .bold))
+                    .tracking(-0.6)
+                    .foregroundStyle(step.name.isEmpty ? Color.primary.opacity(0.3) : Color.primary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
                 Picker("", selection: $step.model) {
                     Text("Sonnet 4.6").tag("sonnet")
                     Text("Opus 4.6").tag("opus")
                     Text("Haiku 4.5").tag("haiku")
                 }
-                .frame(width: 318)
+                .fixedSize()
             }
-            .padding(.top, -22) // overlap with header line
 
             if isExpanded {
                 Color.black.opacity(0.05).frame(height: 1).padding(.top, 10)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    // Step name (editable)
-                    TextField("Step Name", text: $step.name)
-                        .font(.system(size: 15, weight: .bold))
-                        .tracking(-0.6)
-                        .textFieldStyle(.plain)
-                        .opacity(0) // name edited via header visually, this syncs the binding
-                        .frame(height: 0)
+                    // Step name (editable inline)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Step Name")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(hex: 0x727272))
+                        TextField("e.g. Collect Data", text: $step.name)
+                            .font(.system(size: 13, weight: .medium))
+                            .textFieldStyle(.roundedBorder)
+                    }
 
                     // Prompt
                     VStack(alignment: .leading, spacing: 5) {
