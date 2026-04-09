@@ -13,6 +13,7 @@ Rotinas agendadas que executam prompts no Claude Code automaticamente.
 
 ## Rotinas ativas
 
+- [[palmeiras-feed]] — Pipeline de posts Palmeiras → Notion + Telegram (6x/dia: 08h, 11h, 15h, 17h, 21h, 23h)
 - [[crypto-ta-analise]] — Pipeline de análise técnica cripto todo dia as 21:30 (Notion + Telegram)
 
 
