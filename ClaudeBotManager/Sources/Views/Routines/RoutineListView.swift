@@ -79,6 +79,7 @@ struct RoutineRow: View {
     @State private var isDryRunning = false
     @State private var isStopping = false
     @State private var isExpanded = false
+    @State private var hoveredStepId: String?
 
     init(routine: Routine, onTap: @escaping () -> Void = {}) {
         self.routine = routine
@@ -326,8 +327,34 @@ struct RoutineRow: View {
     private var pipelineExpandedSteps: some View {
         let steps = routine.lastExecution?.pipelineSteps ?? []
         let defSteps = routine.pipelineStepDefs
+        let execStatus = routine.lastExecution?.status
+        let wsPath = routine.lastExecution?.workspace
 
         VStack(spacing: 0) {
+            // Open Workspace button (only during running or after failure)
+            if let ws = wsPath,
+               (execStatus == .running || execStatus == .failed),
+               FileManager.default.fileExists(atPath: ws) {
+                Button {
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: ws)
+                } label: {
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 10))
+                        Text("Open Workspace")
+                            .font(.system(size: 10))
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.04))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, Spacing.xs)
+            }
+
             ForEach(0..<max(steps.count, defSteps.count, routine.stepCount), id: \.self) { i in
                 let step = i < steps.count ? steps[i] : nil
                 let defName = i < defSteps.count ? defSteps[i].name : nil
@@ -343,81 +370,119 @@ struct RoutineRow: View {
                     default: return "circle"
                     }
                 }()
+                let stepId = step?.id ?? (i < defSteps.count ? defSteps[i].stepId : "step-\(i)")
 
-                HStack(spacing: Spacing.sm) {
-                    // Step number
-                    Text("\(i + 1)")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.tertiary)
-                        .frame(width: 14)
-
-                    // Status icon (spinner for running)
-                    if status == .running {
-                        ProgressView()
-                            .scaleEffect(0.45)
-                            .frame(width: 14, height: 14)
-                    } else {
-                        Image(systemName: icon)
-                            .font(.system(size: 10))
-                            .foregroundStyle(color)
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack(spacing: Spacing.sm) {
+                        // Step number
+                        Text("\(i + 1)")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.tertiary)
                             .frame(width: 14)
-                    }
 
-                    // Step name
-                    Text(name)
-                        .font(.system(size: 11))
-                        .foregroundStyle(status == nil || status == .pending ? .tertiary : .primary)
-                        .lineLimit(1)
-
-                    Spacer()
-
-                    // Duration
-                    if let step, let dur = step.liveDuration {
-                        Text(dur)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(status == .running
-                                ? Color(red: 0.25, green: 0.56, blue: 0.98)
-                                : Color(red: 0.447, green: 0.447, blue: 0.447))
-                    }
-
-                    // Model + timeout badges (from defs)
-                    if i < defSteps.count {
-                        let def = defSteps[i]
-                        HStack(spacing: 3) {
-                            Text(def.model)
-                                .font(.system(size: 8, weight: .medium))
-                            Text("·")
-                                .font(.system(size: 8))
-                            Text("\(def.timeout / 60)m")
-                                .font(.system(size: 8, design: .monospaced))
+                        // Status icon (spinner for running)
+                        if status == .running {
+                            ProgressView()
+                                .scaleEffect(0.45)
+                                .frame(width: 14, height: 14)
+                        } else {
+                            Image(systemName: icon)
+                                .font(.system(size: 10))
+                                .foregroundStyle(color)
+                                .frame(width: 14)
                         }
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1)
-                        .background(Color.primary.opacity(0.04))
-                        .clipShape(Capsule())
-                    }
-                }
-                .padding(.vertical, 4)
 
-                // Error detail for failed steps
-                if let step, step.status == .failed, let err = step.error {
-                    Text(err)
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Color(red: 1.0, green: 0.220, blue: 0.235))
-                        .lineLimit(2)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, Spacing.sm)
-                        .padding(.vertical, 3)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(red: 1.0, green: 0.220, blue: 0.235).opacity(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 4))
-                        .contextMenu {
-                            Button("Copy Error") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(err, forType: .string)
+                        // Step name
+                        Text(name)
+                            .font(.system(size: 11))
+                            .foregroundStyle(status == nil || status == .pending ? .tertiary : .primary)
+                            .lineLimit(1)
+
+                        Spacer()
+
+                        // Duration
+                        if let step, let dur = step.liveDuration {
+                            Text(dur)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(status == .running
+                                    ? Color(red: 0.25, green: 0.56, blue: 0.98)
+                                    : Color(red: 0.447, green: 0.447, blue: 0.447))
+                        }
+
+                        // Per-step output file link (completed steps only)
+                        if let ws = wsPath, status == .completed,
+                           FileManager.default.fileExists(atPath: "\(ws)/data/\(stepId).md") {
+                            Button {
+                                NSWorkspace.shared.open(URL(fileURLWithPath: "\(ws)/data/\(stepId).md"))
+                            } label: {
+                                Image(systemName: "doc.text")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
                             }
+                            .buttonStyle(.plain)
+                            .help("Open \(stepId).md")
                         }
+
+                        // Model + timeout badges (from defs)
+                        if i < defSteps.count {
+                            let def = defSteps[i]
+                            HStack(spacing: 3) {
+                                Text(def.model)
+                                    .font(.system(size: 8, weight: .medium))
+                                Text("·")
+                                    .font(.system(size: 8))
+                                Text("\(def.timeout / 60)m")
+                                    .font(.system(size: 8, design: .monospaced))
+                            }
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.04))
+                            .clipShape(Capsule())
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .onHover { isHovered in
+                        hoveredStepId = isHovered ? stepId : nil
+                    }
+
+                    // Live activity tooltip (running steps, on hover)
+                    if status == .running, hoveredStepId == stepId,
+                       let activity = step?.activity {
+                        HStack(spacing: Spacing.xs) {
+                            Text(activityIcon(activity.activityType))
+                                .font(.system(size: 10))
+                            Text(activity.detail.isEmpty
+                                 ? activityLabel(activity.activityType)
+                                 : activity.detail)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                        .padding(.leading, 30)
+                        .padding(.bottom, 4)
+                        .transition(.opacity)
+                    }
+
+                    // Error detail for failed steps
+                    if let step, step.status == .failed, let err = step.error {
+                        Text(err)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundStyle(Color(red: 1.0, green: 0.220, blue: 0.235))
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, Spacing.sm)
+                            .padding(.vertical, 3)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color(red: 1.0, green: 0.220, blue: 0.235).opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .contextMenu {
+                                Button("Copy Error") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(err, forType: .string)
+                                }
+                            }
+                    }
                 }
 
                 if i < max(steps.count, defSteps.count, routine.stepCount) - 1 {
@@ -426,6 +491,25 @@ struct RoutineRow: View {
             }
         }
         .padding(.vertical, 2)
+        .animation(.easeInOut(duration: 0.2), value: hoveredStepId)
+    }
+
+    private func activityIcon(_ type: String) -> String {
+        switch type {
+        case "thinking": return "💭"
+        case "tool":     return "🔧"
+        case "text":     return "📝"
+        default:         return "💭"
+        }
+    }
+
+    private func activityLabel(_ type: String) -> String {
+        switch type {
+        case "thinking": return "Thinking..."
+        case "tool":     return "Using tool..."
+        case "text":     return "Writing..."
+        default:         return "Thinking..."
+        }
     }
 
     // MARK: - Pipeline Horizontal Timeline

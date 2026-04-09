@@ -94,6 +94,12 @@ final class AppState: ObservableObject {
         fileWatcher.watch(path: stateDir, onChange: refresh)
         let todayFile = "\(stateDir)/\(todayDateString()).json"
         fileWatcher.watch(path: todayFile, onChange: refresh)
+
+        // Watch pipeline activity sidecar (ephemeral, created during pipeline runs)
+        let activityFile = "\(dataDir)/pipeline-activity.json"
+        fileWatcher.watch(path: activityFile, onChange: refresh)
+        // Also watch dataDir itself to detect activity file creation
+        fileWatcher.watch(path: dataDir, onChange: refresh)
     }
 
     func loadAll() async {
@@ -130,11 +136,24 @@ final class AppState: ObservableObject {
         do {
             var loaded = try await vs.loadRoutines()
             let todayState = await rs.loadTodayState()
+            // Load live activity sidecar for running pipelines
+            let pipelineActivity = await rs.loadPipelineActivity()
             for i in loaded.indices {
                 let name = loaded[i].id
                 let slots = todayState[name] ?? [:]
                 loaded[i].todayExecutions = slots.values.sorted {
                     ($0.startedAt ?? .distantPast) < ($1.startedAt ?? .distantPast)
+                }
+                // Merge live activity into running pipeline steps
+                if let activity = pipelineActivity[name],
+                   let lastExecIdx = loaded[i].todayExecutions.indices.last,
+                   loaded[i].todayExecutions[lastExecIdx].status == .running {
+                    for j in loaded[i].todayExecutions[lastExecIdx].pipelineSteps.indices {
+                        let stepId = loaded[i].todayExecutions[lastExecIdx].pipelineSteps[j].id
+                        if let stepActivity = activity[stepId] {
+                            loaded[i].todayExecutions[lastExecIdx].pipelineSteps[j].activity = stepActivity
+                        }
+                    }
                 }
                 // Load pipeline step definitions for expanded view
                 if loaded[i].isPipeline && loaded[i].pipelineStepDefs.isEmpty {
