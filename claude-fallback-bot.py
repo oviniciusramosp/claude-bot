@@ -3380,13 +3380,16 @@ class ClaudeTelegramBot:
         if tts_this_request:
             effective_sp = (effective_sp + TTS_PROMPT_SUFFIX) if effective_sp else TTS_PROMPT_SUFFIX
 
+        # Inline #voice uses a fresh session for fast response (no heavy context to load)
+        effective_session_id = None if force_tts else session.session_id
+
         # Start runner thread
         runner_thread = threading.Thread(
             target=runner.run,
             kwargs={
                 "prompt": prompt,
                 "model": session.model,
-                "session_id": session.session_id,
+                "session_id": effective_session_id,
                 "workspace": session.workspace,
                 "effort": self.effort,
                 "system_prompt": effective_sp,
@@ -3405,7 +3408,7 @@ class ClaudeTelegramBot:
 
         # Finalize
         self._finalize_response(session, runner, prompt=prompt if not _retry else None,
-                                routine_mode=routine_mode)
+                                routine_mode=routine_mode, force_tts=tts_this_request)
 
         # Process queued messages for this context
         self._process_pending()
@@ -3519,7 +3522,7 @@ class ClaudeTelegramBot:
                     self.edit_message(stream_msg, display)
 
     def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None,
-                           routine_mode: bool = False) -> None:
+                           routine_mode: bool = False, force_tts: bool = False) -> None:
         ctx = self._ctx
 
         if runner.captured_session_id:
@@ -3587,7 +3590,7 @@ class ClaudeTelegramBot:
                 self.send_message(final_text)
 
         # TTS: send voice message if enabled or forced (background, non-blocking)
-        if tts_this_request and ctx:
+        if force_tts and ctx:
             # Strip cost line from TTS — not useful as audio
             tts_text = re.sub(r'\n\n💰 Custo:.*$', '', final_text, flags=re.DOTALL).strip()
             if tts_text:
