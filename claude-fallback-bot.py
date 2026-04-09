@@ -3723,6 +3723,12 @@ class ClaudeTelegramBot:
                 if ctx:
                     ctx.stream_msg_id = None
             self.send_message(final_text)
+        elif force_tts:
+            # Inline #voice: send only audio, suppress text message
+            if stream_msg:
+                self.delete_message(stream_msg)
+                if ctx:
+                    ctx.stream_msg_id = None
         else:
             sent = False
             if stream_msg and len(final_text) <= MAX_MESSAGE_LENGTH:
