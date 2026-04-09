@@ -200,7 +200,11 @@ struct PipelineStepEditorCard: View {
                 PipelineStepRow(
                     step: $steps[idx],
                     index: idx + 1,
-                    allStepIds: steps.enumerated().compactMap { i, s in i != idx && !s.name.isEmpty ? stepSlug(s.name) : nil },
+                    allStepIds: steps.enumerated().compactMap { i, s in
+                        guard i != idx else { return nil }
+                        let sid = s.stepId.isEmpty ? stepSlug(s.name) : s.stepId
+                        return sid.isEmpty ? nil : sid
+                    },
                     onDelete: { steps.remove(at: idx) }
                 )
             }
@@ -261,12 +265,20 @@ struct PipelineStepRow: View {
                 Divider().padding(.horizontal, Spacing.lg)
 
                 VStack(alignment: .leading, spacing: Spacing.lg) {
-                    // Step name
+                    // Step name + output file hint
                     VStack(alignment: .leading, spacing: Spacing.xs) {
                         Text("Step Name").font(.caption).foregroundStyle(.secondary)
                         TextField("e.g. Analyze Data", text: $step.name)
                             .textFieldStyle(.roundedBorder)
                             .font(.callout)
+                        let effectiveId = step.stepId.isEmpty
+                            ? step.name.lowercased().replacingOccurrences(of: " ", with: "-").filter { $0.isLetter || $0.isNumber || $0 == "-" }
+                            : step.stepId
+                        if !effectiveId.isEmpty {
+                            Text("Output: data/\(effectiveId).md")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.tertiary)
+                        }
                     }
 
                     // Model
