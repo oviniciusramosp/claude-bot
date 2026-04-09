@@ -1,176 +1,176 @@
 ---
-title: Criar ou Revisar Pipeline Multi-Agente
-description: Skill para criar ou revisar pipelines com multiplos steps paralelos. Analisa proativamente oportunidades de paralelismo e anti-patterns em pipelines existentes.
+title: Create or Review Multi-Agent Pipeline
+description: Skill for creating or reviewing pipelines with multiple parallel steps. Proactively analyzes parallelism opportunities and anti-patterns in existing pipelines.
 type: skill
 created: 2026-04-08
 updated: 2026-04-09
-trigger: "quando o usuario quiser criar, revisar, melhorar ou otimizar uma pipeline, rotina com multiplos passos, rotina com sub-agentes, ou workflow multi-step"
+trigger: "when the user wants to create, review, improve, or optimize a pipeline, routine with multiple steps, routine with sub-agents, or multi-step workflow"
 tags: [skill, pipeline, routine, automation, multi-agent, review, parallelism]
 ---
 
-## Modos de operacao
+## Modes of operation
 
-Esta skill opera em dois modos:
+This skill operates in two modes:
 
-1. **Criacao** — quando o usuario quer criar uma nova pipeline
-2. **Revisao** — quando o usuario quer revisar, melhorar ou otimizar pipelines existentes
+1. **Creation** — when the user wants to create a new pipeline
+2. **Review** — when the user wants to review, improve, or optimize existing pipelines
 
-Detectar o modo pelo contexto da conversa. Se ambiguo, perguntar.
+Detect the mode from the conversation context. If ambiguous, ask.
 
 ---
 
-## Modo Criacao
+## Creation Mode
 
-### O que e uma pipeline
+### What is a pipeline
 
-Uma pipeline e uma rotina do tipo `type: pipeline` que orquestra multiplos steps (sub-agentes). Diferente de uma rotina simples (um prompt → um Claude → um output), a pipeline:
+A pipeline is a routine of type `type: pipeline` that orchestrates multiple steps (sub-agents). Unlike a simple routine (one prompt → one Claude → one output), a pipeline:
 
-- Tem multiplos steps, cada um com seu proprio modelo (haiku/sonnet/opus)
-- Steps podem depender de outros (`depends_on`) — respeitando uma DAG
-- Steps sem dependencias rodam em paralelo automaticamente
-- Todos os steps compartilham um workspace temporario (`data/`) — cada step le outputs dos anteriores e escreve o seu
-- O orquestrador Python gerencia a execucao, retries e timeouts
-- Apenas o step marcado com `output: telegram` envia o resultado final
+- Has multiple steps, each with its own model (haiku/sonnet/opus)
+- Steps can depend on others (`depends_on`) — respecting a DAG
+- Steps without dependencies run in parallel automatically
+- All steps share a temporary workspace (`data/`) — each step reads outputs from previous steps and writes its own
+- The Python orchestrator manages execution, retries, and timeouts
+- Only the step marked with `output: telegram` sends the final result
 
-### Estrutura de arquivos
+### File structure
 
 ```
 vault/Routines/
-  {nome-da-pipeline}.md              ← definicao (frontmatter + bloco ```pipeline)
-  {nome-da-pipeline}/                ← pasta com prompts dos steps
+  {pipeline-name}.md              ← definition (frontmatter + ```pipeline block)
+  {pipeline-name}/                ← folder with step prompts
     steps/
-      {step-1-id}.md                 ← prompt do step 1
-      {step-2-id}.md                 ← prompt do step 2
+      {step-1-id}.md              ← step 1 prompt
+      {step-2-id}.md              ← step 2 prompt
       ...
 ```
 
-### Passos para criar
+### Steps to create
 
-#### 1. Entender o objetivo
+#### 1. Understand the objective
 
-O que a pipeline deve produzir no final? Quais etapas intermediarias sao necessarias?
+What should the pipeline produce at the end? What intermediate steps are needed?
 
-#### 2. Decompor em steps com paralelismo maximo
+#### 2. Decompose into steps with maximum parallelism
 
-Esta e a etapa mais importante. O objetivo e maximizar paralelismo e minimizar tempo total.
+This is the most important step. The goal is to maximize parallelism and minimize total time.
 
-**Principio: se dois steps nao dependem do output um do outro, eles DEVEM rodar em paralelo.**
+**Principle: if two steps do not depend on each other's output, they MUST run in parallel.**
 
-Para cada step, determinar:
-- `id`: slug em kebab-case (ex: `coletar-dados`, `analisar`, `escrever`)
-- `name`: nome legivel (ex: "Coletar dados de mercado")
-- `model`: haiku (rapido/barato), sonnet (equilibrado), opus (complexo)
-- `depends_on`: lista de step ids que devem completar antes deste rodar
-- `timeout`: limite total em segundos (default: 1200 = 20min)
-- `inactivity_timeout`: limite de inatividade em segundos (default: 300 = 5min)
-- `retry`: numero de tentativas em caso de falha (default: 0)
-- `output: telegram`: marcar NO ULTIMO step que produz o output final
+For each step, determine:
+- `id`: kebab-case slug (e.g., `collect-data`, `analyze`, `write`)
+- `name`: human-readable name (e.g., "Collect market data")
+- `model`: haiku (fast/cheap), sonnet (balanced), opus (complex)
+- `depends_on`: list of step ids that must complete before this one runs
+- `timeout`: total time limit in seconds (default: 1200 = 20min)
+- `inactivity_timeout`: inactivity time limit in seconds (default: 300 = 5min)
+- `retry`: number of attempts on failure (default: 0)
+- `output: telegram`: mark on the LAST step that produces the final output
 
-**Regras de modelo por tipo de step:**
-- Coleta de dados → `haiku` (rapido, barato, bom para APIs e scraping)
-- Analise / escrita criativa → `opus` (melhor raciocinio, mais caro)
-- Revisao / validacao → `sonnet` ou `opus` (depende da complexidade)
-- Publicacao / API calls → `sonnet` ou `haiku` (tarefas mecanicas)
+**Model rules by step type:**
+- Data collection → `haiku` (fast, cheap, good for APIs and scraping)
+- Analysis / creative writing → `opus` (best reasoning, more expensive)
+- Review / validation → `sonnet` or `opus` (depends on complexity)
+- Publishing / API calls → `sonnet` or `haiku` (mechanical tasks)
 
-#### 3. Aplicar regras de paralelismo (CRITICO)
+#### 3. Apply parallelism rules (CRITICAL)
 
-Analisar os steps propostos e aplicar estas regras proativamente:
+Analyze the proposed steps and proactively apply these rules:
 
-**Regra 1 — Coletor atômico: nunca criar um collector monolítico.**
-Se um step precisa buscar dados de 3+ fontes independentes (APIs, sites, bancos de dados), quebre em sub-steps paralelos — um por fonte ou grupo de fontes relacionadas.
+**Rule 1 — Atomic collector: never create a monolithic collector.**
+If a step needs to fetch data from 3+ independent sources (APIs, websites, databases), split it into parallel sub-steps — one per source or group of related sources.
 
-Exemplo RUIM:
+BAD example:
 ```
-[collector: busca Binance + CoinGecko + Yahoo + GitHub] → [analyst]
+[collector: fetches Binance + CoinGecko + Yahoo + GitHub] → [analyst]
 ```
-Tempo: soma de todas as buscas (sequencial).
+Time: sum of all fetches (sequential).
 
-Exemplo BOM:
+GOOD example:
 ```
 [collect-binance] ──┐
 [collect-coingecko]─┤
 [collect-yahoo] ────┼→ [analyst]
 [collect-github] ───┘
 ```
-Tempo: max de uma busca (paralelo). Ate 4x mais rapido.
+Time: max of one fetch (parallel). Up to 4x faster.
 
-**Regra 2 — Assets paralelos com analise.**
-Se a pipeline gera assets (capa, graficos, imagens) que nao dependem da analise completa, rodar em paralelo com a analise — nao depois.
+**Rule 2 — Parallel assets with analysis.**
+If the pipeline generates assets (cover, charts, images) that don't depend on the full analysis, run them in parallel with the analysis — not after.
 
-Exemplo RUIM:
+BAD example:
 ```
 [collect] → [analyst] → [cover] → [writer]
 ```
 
-Exemplo BOM:
+GOOD example:
 ```
 [collect] → [analyst] → [writer]
 [collect] → [cover] ─────────────→ [publisher]
 ```
-Cover e analyst rodam em paralelo porque ambos dependem apenas do collect.
+Cover and analyst run in parallel because both depend only on collect.
 
-**Regra 3 — Dependencia minima.**
-Cada step deve depender apenas dos steps cujo output ele realmente precisa ler. Nunca depender de um step "por seguranca" se nao vai usar seu output.
+**Rule 3 — Minimum dependency.**
+Each step should only depend on the steps whose output it actually needs to read. Never depend on a step "for safety" if you won't use its output.
 
-**Regra 4 — Retry em collectors.**
-Steps que fazem chamadas externas (APIs, scraping, webhooks) devem ter `retry: 1` no minimo. Falhas transitorias sao comuns e nao devem matar o pipeline inteiro.
+**Rule 4 — Retry on collectors.**
+Steps that make external calls (APIs, scraping, webhooks) should have `retry: 1` at minimum. Transient failures are common and should not kill the entire pipeline.
 
-**Regra 5 — Timeouts proporcionais.**
+**Rule 5 — Proportional timeouts.**
 - Collectors (curl/API): 120-300s timeout, 120s inactivity
-- Analise (opus pensando): 600-900s timeout, 300s inactivity
-- Escrita (opus gerando texto longo): 600-900s timeout, 300s inactivity
-- Revisao: 300-600s timeout, 180s inactivity
-- Publicacao (API calls): 120-180s timeout, 60s inactivity
+- Analysis (opus thinking): 600-900s timeout, 300s inactivity
+- Writing (opus generating long text): 600-900s timeout, 300s inactivity
+- Review: 300-600s timeout, 180s inactivity
+- Publishing (API calls): 120-180s timeout, 60s inactivity
 
-#### 4. Apresentar DAG visual ao usuario
+#### 4. Present visual DAG to the user
 
-Antes de criar os arquivos, mostrar a DAG proposta em formato visual:
+Before creating the files, show the proposed DAG in visual format:
 
 ```
-Wave 1 (paralelo):
-  collect-fonte-a  ──┐  haiku, ~30s
-  collect-fonte-b  ──┤  haiku, ~30s
-  collect-fonte-c  ──┘  haiku, ~30s
+Wave 1 (parallel):
+  collect-source-a  ──┐  haiku, ~30s
+  collect-source-b  ──┤  haiku, ~30s
+  collect-source-c  ──┘  haiku, ~30s
 
-Wave 2 (paralelo):
-  analyst  ←── todos os collectors    opus, ~3min
-  cover    ←── collect-fonte-a        sonnet, ~1min
+Wave 2 (parallel):
+  analyst  ←── all collectors    opus, ~3min
+  cover    ←── collect-source-a  sonnet, ~1min
 
 Wave 3:  writer    ←── analyst           opus, ~5min
 Wave 4:  reviewer  ←── writer            opus, ~3min
 Wave 5:  publisher ←── reviewer + cover  sonnet, ~1min
 
-Tempo total estimado: ~13min (vs ~25min sequencial)
+Estimated total time: ~13min (vs ~25min sequential)
 ```
 
-Perguntar se o usuario aprova ou quer ajustar.
+Ask if the user approves or wants to adjust.
 
-#### 5. Perguntar schedule
+#### 5. Ask for schedule
 
-Mesmas opcoes de rotina: horarios (HH:MM), dias, data limite.
+Same options as a routine: times (HH:MM), days, end date.
 
-#### 6. Gerar nome
+#### 6. Generate name
 
-Converter o objetivo em kebab-case.
+Convert the objective to kebab-case.
 
-#### 7. Criar o arquivo principal
+#### 7. Create the main file
 
-`vault/Routines/{nome}.md`:
+`vault/Routines/{name}.md`:
 
 ```yaml
 ---
-title: "{titulo descritivo}"
-description: "{frase curta sobre o pipeline}"
+title: "{descriptive title}"
+description: "{short phrase about the pipeline}"
 type: pipeline
 created: {YYYY-MM-DD}
 updated: {YYYY-MM-DD}
-tags: [pipeline, {categorias}]
+tags: [pipeline, {categories}]
 schedule:
   times: ["{HH:MM}"]
-  days: [{dias}]
-model: {modelo default}
+  days: [{days}]
+model: {default model}
 enabled: true
-agent: {agente se aplicavel}
+agent: {agent if applicable}
 notify: final
 ---
 
@@ -180,7 +180,7 @@ notify: final
 steps:
   - id: {step-1-id}
     name: "{Step 1 Name}"
-    model: {modelo}
+    model: {model}
     prompt_file: steps/{step-1-id}.md
     timeout: {timeout}
     inactivity_timeout: {inactivity}
@@ -188,64 +188,64 @@ steps:
 
   - id: {step-2-id}
     name: "{Step 2 Name}"
-    model: {modelo}
+    model: {model}
     depends_on: [{step-1-id}]
     prompt_file: steps/{step-2-id}.md
 
-  - id: {step-final-id}
-    name: "{Step Final Name}"
-    model: {modelo}
-    depends_on: [{step-anterior-id}]
-    prompt_file: steps/{step-final-id}.md
+  - id: {final-step-id}
+    name: "{Final Step Name}"
+    model: {model}
+    depends_on: [{previous-step-id}]
+    prompt_file: steps/{final-step-id}.md
     output: telegram
 ```
 ```
 
-**Campos opcionais adicionais no frontmatter:**
+**Additional optional fields in frontmatter:**
 
-- `context: minimal` — pula o system prompt do vault (Tooling, Journal, etc.). Util quando os steps da pipeline nao precisam de conhecimento do vault e voce quer economizar tokens e ganhar velocidade. Ideal para pipelines puramente tecnicas (coleta de dados, transformacao, envio).
-- `voice: true` — alem de enviar o output final como texto no Telegram, tambem envia como audio (TTS). Util para newsletters, briefings matinais, ou qualquer output que o usuario queira ouvir em vez de ler.
+- `context: minimal` — skips the vault system prompt (Tooling, Journal, etc.). Useful when pipeline steps don't need vault knowledge and you want to save tokens and gain speed. Ideal for purely technical pipelines (data collection, transformation, delivery).
+- `voice: true` — in addition to sending the final output as text on Telegram, also sends it as audio (TTS). Useful for newsletters, morning briefings, or any output the user wants to hear rather than read.
 
-#### 8. Criar pasta de steps
+#### 8. Create the steps folder
 
-`vault/Routines/{nome}/steps/`
+`vault/Routines/{name}/steps/`
 
-#### 9. Criar arquivo de prompt para cada step
+#### 9. Create a prompt file for each step
 
-`vault/Routines/{nome}/steps/{step-id}.md`
+`vault/Routines/{name}/steps/{step-id}.md`
 
-IMPORTANTE sobre prompts dos steps:
-- NAO mencionar compartilhamento de arquivos — o orquestrador ja injeta instrucoes sobre o workspace automaticamente
-- NAO instruir o step a ler ou escrever em `data/` — isso e automatico
-- Focar apenas na TAREFA do step: "Analise os dados coletados e produza uma analise tecnica"
-- O step recebe automaticamente: lista de arquivos disponiveis, instrucao de onde escrever output
-- Escrever prompts curtos e diretos — o contexto do pipeline ja e injetado pelo orquestrador
-- A ULTIMA LINHA de cada step file DEVE ser `rotina: [[{nome-da-pipeline}]]` — esse wikilink conecta o step ao pipeline no grafo do Obsidian. O bot filtra essa linha automaticamente ao enviar o prompt ao Claude CLI, entao ela nunca chega ao modelo. O app macOS tambem gerencia isso automaticamente (append no save, strip no load)
+IMPORTANT about step prompts:
+- DO NOT mention file sharing — the orchestrator already injects workspace instructions automatically
+- DO NOT instruct the step to read or write to `data/` — this is automatic
+- Focus only on the step's TASK: "Analyze the collected data and produce a technical analysis"
+- The step automatically receives: list of available files, instruction on where to write output
+- Write short and direct prompts — the pipeline context is already injected by the orchestrator
+- The LAST LINE of each step file MUST be `routine: [[{pipeline-name}]]` — this wikilink connects the step to the pipeline in the Obsidian graph. The bot automatically filters this line when sending the prompt to the Claude CLI, so it never reaches the model. The macOS app also manages this automatically (append on save, strip on load)
 
-#### 10. Atualizar o index
+#### 10. Update the index
 
-Editar `vault/Routines/Routines.md` e adicionar: `- [[{nome}]] — descricao`
+Edit `vault/Routines/Routines.md` and add: `- [[{name}]] — description`
 
-#### 11. Registrar no Journal
+#### 11. Record in the Journal
 
-Appendar no journal do dia com detalhes da pipeline criada.
+Append to today's journal with details of the created pipeline.
 
-#### 12. Confirmar
+#### 12. Confirm
 
-Informar ao usuario a pipeline criada, quantos steps, quais rodam em paralelo, e quando sera a proxima execucao.
+Inform the user of the created pipeline, how many steps it has, which ones run in parallel, and when the next execution will be.
 
 ---
 
-## Exemplo completo: Newsletter Semanal
+## Full example: Weekly Newsletter
 
-Objetivo: pipeline que toda segunda-feira pesquisa 3 fontes (blog, Reddit, Hacker News), escreve uma newsletter, revisa e envia por email.
+Objective: pipeline that every Monday researches 3 sources (blog, Reddit, Hacker News), writes a newsletter, reviews it, and sends it by email.
 
-### Arquivo principal: `vault/Routines/newsletter-semanal.md`
+### Main file: `vault/Routines/weekly-newsletter.md`
 
 ```yaml
 ---
-title: "Newsletter Semanal de Tech"
-description: "Pipeline semanal que pesquisa 3 fontes, redige newsletter e envia por email"
+title: "Weekly Tech Newsletter"
+description: "Weekly pipeline that researches 3 sources, drafts a newsletter, and sends it by email"
 type: pipeline
 created: 2026-04-09
 updated: 2026-04-09
@@ -263,7 +263,7 @@ notify: final
 ```pipeline
 steps:
   - id: collect-blogs
-    name: "Coletar posts de blogs"
+    name: "Collect blog posts"
     model: haiku
     prompt_file: steps/collect-blogs.md
     timeout: 180
@@ -271,7 +271,7 @@ steps:
     retry: 1
 
   - id: collect-reddit
-    name: "Coletar posts do Reddit"
+    name: "Collect Reddit posts"
     model: haiku
     prompt_file: steps/collect-reddit.md
     timeout: 180
@@ -279,7 +279,7 @@ steps:
     retry: 1
 
   - id: collect-hn
-    name: "Coletar posts do Hacker News"
+    name: "Collect Hacker News posts"
     model: haiku
     prompt_file: steps/collect-hn.md
     timeout: 180
@@ -287,7 +287,7 @@ steps:
     retry: 1
 
   - id: write-newsletter
-    name: "Redigir newsletter"
+    name: "Draft newsletter"
     model: opus
     depends_on: [collect-blogs, collect-reddit, collect-hn]
     prompt_file: steps/write-newsletter.md
@@ -295,7 +295,7 @@ steps:
     inactivity_timeout: 300
 
   - id: review
-    name: "Revisar newsletter"
+    name: "Review newsletter"
     model: opus
     depends_on: [write-newsletter]
     prompt_file: steps/review.md
@@ -303,7 +303,7 @@ steps:
     inactivity_timeout: 180
 
   - id: send-email
-    name: "Enviar por email"
+    name: "Send by email"
     model: haiku
     depends_on: [review]
     prompt_file: steps/send-email.md
@@ -313,156 +313,156 @@ steps:
 ```
 ```
 
-### DAG visual
+### Visual DAG
 
 ```
-Wave 1 (paralelo):
+Wave 1 (parallel):
   collect-blogs  ──┐  haiku, ~30s
   collect-reddit ──┤  haiku, ~30s
   collect-hn     ──┘  haiku, ~30s
 
-Wave 2:  write-newsletter ←── todos os collectors   opus, ~5min
-Wave 3:  review           ←── write-newsletter       opus, ~2min
-Wave 4:  send-email       ←── review                 haiku, ~30s
+Wave 2:  write-newsletter ←── all collectors   opus, ~5min
+Wave 3:  review           ←── write-newsletter  opus, ~2min
+Wave 4:  send-email       ←── review            haiku, ~30s
 
-Tempo total estimado: ~8min (vs ~15min sequencial)
+Estimated total time: ~8min (vs ~15min sequential)
 ```
 
-### Exemplo de prompt de step: `steps/write-newsletter.md`
+### Step prompt example: `steps/write-newsletter.md`
 
 ```markdown
-Voce eh um redator de newsletters de tecnologia.
+You are a technology newsletter writer.
 
-Leia os dados coletados das 3 fontes e escreva uma newsletter concisa com:
-- 5-7 destaques da semana, priorizando por relevancia e novidade
-- Para cada destaque: titulo, resumo de 2-3 frases, e link original
-- Tom: informativo mas acessivel, sem jargao desnecessario
-- Formato: Markdown com headers e bullet points
+Read the data collected from the 3 sources and write a concise newsletter with:
+- 5-7 highlights of the week, prioritized by relevance and novelty
+- For each highlight: title, 2-3 sentence summary, and original link
+- Tone: informative but accessible, without unnecessary jargon
+- Format: Markdown with headers and bullet points
 
-Salve o resultado como newsletter.md
+Save the result as newsletter.md
 ```
 
-Note que o prompt NAO menciona `data/`, caminhos de arquivos de input, nem instrui sobre workspace — tudo isso eh injetado automaticamente pelo orquestrador.
+Note that the prompt does NOT mention `data/`, input file paths, or instruct about the workspace — all of that is injected automatically by the orchestrator.
 
 ---
 
-## Modo Revisao
+## Review Mode
 
-Acionado quando o usuario pede para revisar, melhorar ou otimizar pipelines existentes.
+Triggered when the user asks to review, improve, or optimize existing pipelines.
 
-### Passo 1 — Identificar escopo
+### Step 1 — Identify scope
 
-- Se o usuario mencionou uma pipeline especifica → revisar apenas essa
-- Se pediu revisao geral → listar todas em `vault/Routines/` com `type: pipeline`
+- If the user mentioned a specific pipeline → review only that one
+- If they asked for a general review → list all files in `vault/Routines/` with `type: pipeline`
 
-### Passo 2 — Analisar cada pipeline
+### Step 2 — Analyze each pipeline
 
-Para cada pipeline, ler o arquivo principal e todos os step prompts. Avaliar com o checklist abaixo.
+For each pipeline, read the main file and all step prompts. Evaluate using the checklist below.
 
-**Checklist de revisao:**
+**Review checklist:**
 
-#### A. Paralelismo
+#### A. Parallelism
 
-- [ ] **Collector monolitico?** — Um step coleta dados de 3+ fontes? Sugerir split em sub-collectors paralelos.
-- [ ] **Cadeia 100% sequencial?** — Todos os steps dependem do anterior? Verificar se algum poderia rodar em paralelo (ex: cover em paralelo com analise).
-- [ ] **Dependencias excessivas?** — Algum step depende de outro sem usar seu output? Remover dependencia.
-- [ ] **Assets em serie?** — Geracao de imagem/capa/grafico espera analise terminar? Se nao precisa do output da analise, paralelizar.
+- [ ] **Monolithic collector?** — Does one step collect data from 3+ sources? Suggest splitting into parallel sub-collectors.
+- [ ] **100% sequential chain?** — Do all steps depend on the previous one? Check if any could run in parallel (e.g., cover in parallel with analysis).
+- [ ] **Excessive dependencies?** — Does any step depend on another without using its output? Remove the dependency.
+- [ ] **Assets in series?** — Does image/cover/chart generation wait for analysis to finish? If it doesn't need the analysis output, parallelize.
 
-#### B. Modelos
+#### B. Models
 
-- [ ] **Haiku para coleta?** — Steps que apenas fazem curl/API calls devem usar `haiku`, nunca `opus`.
-- [ ] **Opus para analise/escrita?** — Steps que requerem raciocinio profundo ou criatividade devem usar `opus`.
-- [ ] **Modelo caro em tarefa simples?** — Steps mecanicos (publicar, enviar, formatar) nao precisam de `opus`.
+- [ ] **Haiku for collection?** — Steps that only do curl/API calls should use `haiku`, never `opus`.
+- [ ] **Opus for analysis/writing?** — Steps that require deep reasoning or creativity should use `opus`.
+- [ ] **Expensive model on a simple task?** — Mechanical steps (publish, send, format) don't need `opus`.
 
-#### C. Resiliencia
+#### C. Resilience
 
-- [ ] **Retry em collectors?** — Steps com chamadas externas devem ter `retry: 1` no minimo.
-- [ ] **Timeout adequado?** — Collectors com >300s e excessivo? Steps opus com <300s e insuficiente?
-- [ ] **Inactivity timeout?** — Steps sem `inactivity_timeout` explicito usam default (300s). Collectors devem ter 120s. Publicacao 60s.
+- [ ] **Retry on collectors?** — Steps with external calls should have `retry: 1` at minimum.
+- [ ] **Adequate timeout?** — Is >300s excessive for collectors? Is <300s insufficient for opus steps?
+- [ ] **Inactivity timeout?** — Steps without explicit `inactivity_timeout` use the default (300s). Collectors should have 120s. Publishing 60s.
 
 #### D. Prompts
 
-- [ ] **Prompt do step menciona `data/`?** — Remover. O orquestrador injeta isso automaticamente.
-- [ ] **Prompt generico demais?** — Instrucoes vagas como "analise os dados" sem especificar O QUE analisar.
-- [ ] **Prompt muito longo?** — Se >500 palavras, considerar se tudo e necessario.
+- [ ] **Step prompt mentions `data/`?** — Remove it. The orchestrator injects this automatically.
+- [ ] **Too generic a prompt?** — Vague instructions like "analyze the data" without specifying WHAT to analyze.
+- [ ] **Prompt too long?** — If >500 words, consider whether everything is necessary.
 
-#### E. Historico de execucao
+#### E. Execution history
 
-- Ler `~/.claude-bot/routines-state/YYYY-MM-DD.json` (ultimos 2-3 dias)
-- Verificar se ha falhas recorrentes, quais steps falham, com que erro
-- Timeouts reais vs configurados — se o step esta sendo morto pelo timeout, ajustar
-- Se o collector demora muito, e candidato a split paralelo
+- Read `~/.claude-bot/routines-state/YYYY-MM-DD.json` (last 2-3 days)
+- Check for recurring failures, which steps fail, and with what error
+- Actual timeouts vs configured — if the step is being killed by the timeout, adjust it
+- If a collector is taking too long, it's a candidate for parallel split
 
-### Passo 3 — Apresentar recomendacoes
+### Step 3 — Present recommendations
 
-Para cada pipeline analisada, apresentar:
+For each analyzed pipeline, present:
 
 ```
-### {nome-da-pipeline}
+### {pipeline-name}
 
-**Estrutura atual:**
+**Current structure:**
 [step1] → [step2] → [step3] → [step4]
-Tempo estimado: ~Xmin (sequencial)
+Estimated time: ~Xmin (sequential)
 
-**Melhorias sugeridas:**
+**Suggested improvements:**
 
-1. ⚡ **Paralelizar coleta** — split [step1] em 3 sub-collectors paralelos
-   Ganho: coleta de ~5min para ~1min
+1. ⚡ **Parallelize collection** — split [step1] into 3 parallel sub-collectors
+   Gain: collection from ~5min to ~1min
 
-2. 🔄 **Adicionar retry** — [step1] e [step3] fazem chamadas externas sem retry
-   Ganho: resiliencia a falhas transitorias
+2. 🔄 **Add retry** — [step1] and [step3] make external calls without retry
+   Gain: resilience against transient failures
 
-3. 🧠 **Ajustar modelo** — [step3] usa opus mas so formata texto (sonnet basta)
-   Ganho: ~40% mais rapido e mais barato
+3. 🧠 **Adjust model** — [step3] uses opus but only formats text (sonnet is enough)
+   Gain: ~40% faster and cheaper
 
-**Estrutura proposta:**
+**Proposed structure:**
 [sub-collect-a] ──┐
 [sub-collect-b] ──┼→ [analyst] → [writer] → [publisher]
 [sub-collect-c] ──┘
-Tempo estimado: ~Ymin (Zx mais rapido)
+Estimated time: ~Ymin (Zx faster)
 ```
 
-### Passo 4 — Executar melhorias aprovadas
+### Step 4 — Apply approved improvements
 
-Perguntar quais melhorias o usuario quer aplicar. Para cada aprovada:
+Ask which improvements the user wants to apply. For each approved one:
 
-- **Split de collector** → criar novos step files, atualizar pipeline definition, remover step antigo
-- **Mudanca de modelo/timeout/retry** → editar o pipeline definition
-- **Rewrite de prompt** → editar o step file, mostrar diff ao usuario
-- **Reorganizacao de DAG** → atualizar `depends_on` nos steps afetados
+- **Collector split** → create new step files, update pipeline definition, remove old step
+- **Model/timeout/retry change** → edit the pipeline definition
+- **Prompt rewrite** → edit the step file, show diff to the user
+- **DAG reorganization** → update `depends_on` on the affected steps
 
-Ao modificar uma pipeline:
-1. Atualizar campo `updated` no frontmatter
-2. Manter step files antigos ate confirmar que os novos funcionam (ou deletar se usuario aprovar)
-3. Registrar mudancas no Journal
+When modifying a pipeline:
+1. Update the `updated` field in frontmatter
+2. Keep old step files until confirming the new ones work (or delete if the user approves)
+3. Record changes in the Journal
 
-### Passo 5 — Registrar no Journal
+### Step 5 — Record in the Journal
 
-Appendar no journal do dia com as mudancas aplicadas.
-
----
-
-## Anti-patterns (referencia rapida)
-
-| Anti-pattern | Problema | Solucao |
-|-------------|----------|---------|
-| Collector monolitico | Um step busca 10 APIs sequencialmente | Split em N sub-collectors paralelos |
-| Cadeia totalmente linear | A → B → C → D → E sem nenhum paralelismo | Identificar steps independentes e paralelisar |
-| Opus para curl | Modelo caro fazendo chamadas HTTP triviais | Usar haiku para coleta |
-| Sem retry em API calls | Falha transitorias matam o pipeline | retry: 1 em steps com chamadas externas |
-| Timeout uniforme | Todos os steps com 1200s | Ajustar por tipo: collectors curtos, analise longos |
-| Cover sequencial | Geracao de capa espera analise inteira | Paralelizar se cover depende apenas dos dados brutos |
-| Prompt com `data/` | Step menciona workspace | Remover — orquestrador injeta automaticamente |
+Append to today's journal with the applied changes.
 
 ---
 
-## Notas
+## Anti-patterns (quick reference)
 
-- O scheduler detecta `type: pipeline` automaticamente e usa o PipelineExecutor
-- Pipelines usam workspace compartilhado em /tmp/claude-pipeline-{nome}-{timestamp}/data/
-- Cada step e um subprocess Claude CLI independente (nao compartilham sessao)
-- Se um step falha e tem `retry > 0`, ele e re-executado
-- Se um step falha sem retry, todos os steps dependentes sao marcados como SKIPPED
-- Timeouts: `inactivity_timeout` mata steps inativos (sem output), `timeout` e o limite hard total
-- O campo `notify` controla notificacoes Telegram: `final` (so output), `all` (cada step), `summary`, `none`
-- Falhas SEMPRE notificam no Telegram independente do modo
+| Anti-pattern | Problem | Solution |
+|-------------|---------|---------|
+| Monolithic collector | One step fetches 10 APIs sequentially | Split into N parallel sub-collectors |
+| Fully linear chain | A → B → C → D → E with no parallelism | Identify independent steps and parallelize |
+| Opus for curl | Expensive model making trivial HTTP calls | Use haiku for collection |
+| No retry on API calls | Transient failures kill the pipeline | retry: 1 on steps with external calls |
+| Uniform timeout | All steps with 1200s | Adjust by type: short for collectors, long for analysis |
+| Sequential cover | Cover generation waits for entire analysis | Parallelize if cover only depends on raw data |
+| Prompt with `data/` | Step mentions workspace | Remove — orchestrator injects automatically |
+
+---
+
+## Notes
+
+- The scheduler automatically detects `type: pipeline` and uses the PipelineExecutor
+- Pipelines use a shared workspace at /tmp/claude-pipeline-{name}-{timestamp}/data/
+- Each step is an independent Claude CLI subprocess (they don't share a session)
+- If a step fails and has `retry > 0`, it is re-executed
+- If a step fails without retry, all dependent steps are marked as SKIPPED
+- Timeouts: `inactivity_timeout` kills idle steps (no output), `timeout` is the hard total limit
+- The `notify` field controls Telegram notifications: `final` (output only), `all` (each step), `summary`, `none`
+- Failures ALWAYS notify on Telegram regardless of the mode

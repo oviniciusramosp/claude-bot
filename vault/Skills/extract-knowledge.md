@@ -1,92 +1,92 @@
 ---
 title: Extract Knowledge
-description: Extrai conceitos duráveis de outputs de pipelines ou conversas e cria/atualiza notas em Notes/. Automatiza a população da knowledge base.
+description: Extracts durable concepts from pipeline outputs or conversations and creates/updates notes in Notes/. Automates knowledge base population.
 type: skill
-trigger: "ao final de um pipeline ou quando o usuario pedir para registrar conhecimento aprendido"
+trigger: "at the end of a pipeline or when the user asks to record learned knowledge"
 created: 2026-04-09
 updated: 2026-04-09
 tags: [skill, knowledge, extraction, notes]
 ---
 
-## Objetivo
+## Objective
 
-Transformar outputs brutos (de pipelines, conversas, ou análises) em notas duráveis na pasta `Notes/`. Cada nota captura um conceito atômico com frontmatter completo, links corretos, e campo `related` para relacionamentos semânticos.
+Transform raw outputs (from pipelines, conversations, or analyses) into durable notes in the `Notes/` folder. Each note captures an atomic concept with complete frontmatter, correct links, and a `related` field for semantic relationships.
 
-## Quando usar
+## When to use
 
-- Ao final de pipelines que geram análises (ex: `crypto-ta-analise`)
-- Quando o usuário menciona algo que deveria virar conhecimento durável
-- Quando um padrão ou insight se repete em múltiplas conversas
-- Manualmente via `/extract` ou "extraia conhecimento de X"
+- At the end of pipelines that generate analyses (e.g., `crypto-ta-analise`)
+- When the user mentions something that should become durable knowledge
+- When a pattern or insight recurs across multiple conversations
+- Manually via `/extract` or "extract knowledge from X"
 
-## Passos
+## Steps
 
-1. **Identificar conceitos extraíveis** — Leia o material fonte (output de pipeline em `/tmp/claude-pipeline-*/data/`, mensagem do usuário, ou arquivo indicado). Identifique conceitos que são:
-   - Duráveis (não efêmeros — válidos além de hoje)
-   - Atômicos (um conceito por nota)
-   - Não redundantes (verifique se já existe nota similar em `Notes/`)
+1. **Identify extractable concepts** — Read the source material (pipeline output in `/tmp/claude-pipeline-*/data/`, user message, or indicated file). Identify concepts that are:
+   - Durable (not ephemeral — valid beyond today)
+   - Atomic (one concept per note)
+   - Non-redundant (check if a similar note already exists in `Notes/`)
 
-2. **Verificar duplicatas** — Glob `Notes/*.md`, ler frontmatters. Se já existir nota sobre o mesmo conceito, ATUALIZAR em vez de criar nova. Adicionar seção `## Atualização YYYY-MM-DD` ao final.
+2. **Check for duplicates** — Glob `Notes/*.md`, read frontmatters. If a note about the same concept already exists, UPDATE it instead of creating a new one. Add a `## Update YYYY-MM-DD` section at the end.
 
-3. **Criar nota** — Para cada conceito novo:
+3. **Create note** — For each new concept:
 
    ```yaml
    ---
-   title: Nome do Conceito
-   description: Frase que explica o conceito e quando é relevante consultá-lo.
+   title: Concept Name
+   description: Sentence explaining the concept and when it is relevant to consult it.
    type: note
    created: YYYY-MM-DD
    updated: YYYY-MM-DD
-   tags: [dominio, subtopico]
-   source: "pipeline:crypto-ta-analise" | "conversa" | "manual"
+   tags: [domain, subtopic]
+   source: "pipeline:crypto-ta-analise" | "conversation" | "manual"
    confidence: extracted | inferred
    related:
-     - file: "arquivo-relacionado"
+     - file: "related-file"
        type: extracted | inferred
-       reason: "motivo da relação"
+       reason: "reason for the relationship"
    ---
 
    [[Notes]]
 
-   ## Conteúdo
+   ## Content
 
-   [Explicação concisa do conceito — máximo 3 parágrafos]
+   [Concise explanation of the concept — maximum 3 paragraphs]
 
-   ## Contexto
+   ## Context
 
-   - Fonte: [de onde veio este conhecimento]
-   - Data da observação: YYYY-MM-DD
-   - Condições: [em que contexto isso é verdade]
+   - Source: [where this knowledge came from]
+   - Date of observation: YYYY-MM-DD
+   - Conditions: [in what context this is true]
    ```
 
-4. **Atualizar index** — Adicionar `- [[nome-da-nota]] — descrição` em `Notes/Notes.md`
+4. **Update index** — Add `- [[note-name]] — description` to `Notes/Notes.md`
 
-5. **Registrar no Journal** — Entrada: `Nota criada/atualizada: nome-da-nota (fonte: X)`
+5. **Record in Journal** — Entry: `Note created/updated: note-name (source: X)`
 
-## Critérios de qualidade
+## Quality criteria
 
-- `description` deve ser suficiente para decidir se a nota merece leitura sem abri-la
-- Tags devem permitir filtragem eficiente (domínio + subtópico)
-- Campo `related` conecta semanticamente sem poluir o Graph View
-- `confidence: extracted` = fato direto da fonte; `inferred` = conclusão derivada
-- Notas NÃO devem conter dados efêmeros (preços do dia, valores pontuais)
+- `description` must be sufficient to decide whether the note is worth reading without opening it
+- Tags must allow efficient filtering (domain + subtopic)
+- `related` field connects semantically without polluting the Graph View
+- `confidence: extracted` = fact directly from the source; `inferred` = derived conclusion
+- Notes MUST NOT contain ephemeral data (today's prices, one-off values)
 
-## Exemplos de extração
+## Extraction examples
 
-**De pipeline crypto-ta-analise:**
-- ✅ "BTC historicamente respeita EMA 200w como suporte em bear markets" → nota durável
-- ✅ "Funding rate negativo prolongado precede reversões de alta em 70% dos casos" → nota durável
-- ❌ "BTC está a $84,500 hoje" → efêmero, não extrair
-- ❌ "Fear & Greed está em 45" → efêmero, não extrair
+**From crypto-ta-analise pipeline:**
+- ✅ "BTC historically respects the 200w EMA as support in bear markets" → durable note
+- ✅ "Prolonged negative funding rate precedes bullish reversals in 70% of cases" → durable note
+- ❌ "BTC is at $84,500 today" → ephemeral, do not extract
+- ❌ "Fear & Greed is at 45" → ephemeral, do not extract
 
-**De conversa:**
-- ✅ "O usuário prefere análises com gráficos embutidos" → nota sobre preferências
-- ✅ "A API do Binance tem rate limit de 1200 req/min" → nota de referência técnica
-- ❌ "O usuário perguntou sobre o preço do ETH" → não durável
+**From conversation:**
+- ✅ "The user prefers analyses with embedded charts" → note about preferences
+- ✅ "The Binance API has a rate limit of 1200 req/min" → technical reference note
+- ❌ "The user asked about the ETH price" → not durable
 
-## Notas
+## Notes
 
-- Priorize qualidade sobre quantidade — 1 nota boa > 5 notas fracas
-- Se não há conceito durável a extrair, não force. Retorne "Nenhum conceito durável identificado."
-- O campo `source` permite rastrear a proveniência do conhecimento
-- Ao atualizar nota existente, incrementar `updated` e adicionar seção de atualização ao final
+- Prioritize quality over quantity — 1 good note > 5 weak notes
+- If there is no durable concept to extract, don't force it. Return "No durable concept identified."
+- The `source` field allows tracing the provenance of the knowledge
+- When updating an existing note, increment `updated` and add an update section at the end

@@ -1,17 +1,17 @@
 ---
 title: Journal
-description: Indice do diario. Hub temporal que conecta os registros diarios ao grafo principal.
+description: Journal index. Temporal hub connecting daily logs to the main graph.
 type: index
 created: 2026-04-07
-updated: 2026-04-07
+updated: 2026-04-09
 tags: [index, journal]
 ---
 
 # Journal
 
-Registro diario de conversas, decisoes e acoes. Um arquivo por dia, append-only.
+Daily log of conversations, decisions, and actions. One file per day, append-only.
 
-## Entradas recentes
+## Recent entries
 
 - [[2026-04-07]] — Setup do vault, rotinas, agentes, isolamento de contexto
 

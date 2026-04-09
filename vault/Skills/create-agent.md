@@ -1,177 +1,177 @@
 ---
-title: Criar ou Revisar Agente
-description: Skill consultiva para criar agentes especializados ou revisar agentes existentes. Ajuda a decidir se o caso requer um agente dedicado ou se o Main Agent eh suficiente. Gera os 3 arquivos (agent.md, CLAUDE.md, {id}.md) + Journal.
+title: Create or Review Agent
+description: Consultative skill for creating specialized agents or reviewing existing ones. Helps decide whether a case requires a dedicated agent or if the Main Agent is sufficient. Generates the 3 files (agent.md, CLAUDE.md, {id}.md) + Journal.
 type: skill
 created: 2026-04-07
 updated: 2026-04-09
-trigger: "quando o usuario quiser criar, revisar, melhorar um agente, quiser um assistente especializado, precisar de um bot para algo, ou usar /agent new"
+trigger: "when the user wants to create, review, or improve an agent, wants a specialized assistant, needs a bot for something, or uses /agent new"
 tags: [skill, agent, automation, review]
 ---
 
-# Criar ou Revisar Agente
+# Create or Review Agent
 
-## Modos de operacao
+## Modes of operation
 
-Esta skill opera em dois modos:
+This skill operates in two modes:
 
-1. **Criacao** — quando o usuario quer criar um novo agente
-2. **Revisao** — quando o usuario quer revisar, melhorar ou avaliar agentes existentes
+1. **Creation** — when the user wants to create a new agent
+2. **Review** — when the user wants to review, improve, or evaluate existing agents
 
-Detectar o modo pelo contexto da conversa. Se ambiguo, perguntar.
+Detect the mode from the conversation context. If ambiguous, ask.
 
 ---
 
-## Modo Criacao
+## Creation Mode
 
-### Passo 0 — Triagem: agente dedicado ou Main Agent?
+### Step 0 — Triage: dedicated agent or Main Agent?
 
-ANTES de criar qualquer coisa, analisar se o usuario realmente precisa de um agente dedicado ou se o Main Agent com o prompt certo resolve.
+BEFORE creating anything, analyze whether the user truly needs a dedicated agent or whether the Main Agent with the right prompt would do the job.
 
-**Sinais de que um agente dedicado FAZ sentido:**
+**Signs that a dedicated agent MAKES sense:**
 
-- O caso requer uma **personalidade distinta** (tom, estilo, linguagem propria)
-- O agente tera um **workspace isolado** com arquivos especificos
-- O uso sera **recorrente** (nao eh uma tarefa pontual)
-- Precisa de **Journal proprio** para manter historico separado do Main
-- Ha **rotinas agendadas** que devem rodar com essa persona
-- O dominio eh **especializado** (cripto, fitness, escrita criativa) e se beneficia de instrucoes permanentes
+- The case requires a **distinct personality** (tone, style, own voice)
+- The agent will have an **isolated workspace** with specific files
+- Usage will be **recurring** (not a one-off task)
+- Needs its **own Journal** to maintain a history separate from Main
+- There are **scheduled routines** that should run under this persona
+- The domain is **specialized** (crypto, fitness, creative writing) and benefits from permanent instructions
 
-**Sinais de que o Main Agent eh suficiente:**
+**Signs that the Main Agent is sufficient:**
 
-- Tarefa pontual ou de curta duracao
-- Nao precisa de personalidade ou tom especial
-- Nao precisa de workspace separado
-- As instrucoes cabem em um prompt de sessao normal
-- O usuario so quer um output, nao uma "entidade" recorrente
+- One-off or short-lived task
+- No need for a special personality or tone
+- No need for a separate workspace
+- The instructions fit in a normal session prompt
+- The user just wants output, not a recurring "entity"
 
-**Se detectar que Main basta:**
+**If you detect that Main is enough:**
 
-Sugerir proativamente ao usuario:
+Proactively suggest to the user:
 
-> "Pelo que voce descreveu, isso nao precisa de um agente dedicado. O Main Agent pode fazer isso com um prompt direto. Agentes dedicados sao melhores quando voce quer uma personalidade especifica, workspace isolado, e uso recorrente.
+> "From what you described, this doesn't need a dedicated agent. The Main Agent can handle it with a direct prompt. Dedicated agents are better when you want a specific personality, isolated workspace, and recurring use.
 >
-> Posso ajudar a formular o prompt certo para o Main. Ou se prefere criar o agente mesmo assim, sigo em frente."
+> I can help formulate the right prompt for Main. Or if you'd prefer to create the agent anyway, I'll proceed."
 
-Se o usuario aceitar → formular o prompt e encerrar.
-Se preferir criar o agente → continuar com os passos abaixo.
+If the user agrees → formulate the prompt and close.
+If they prefer to create the agent → continue with the steps below.
 
-**Exemplos de triagem:**
+**Triage examples:**
 
-| Objetivo do usuario | Recomendacao | Motivo |
-|---------------------|--------------|--------|
-| "Quero um assistente de cripto que acompanhe meu portfolio todo dia" | Agente dedicado | Recorrente, dominio especifico, precisa de Journal proprio |
-| "Me ajuda a escrever um email formal" | Main Agent | Tarefa pontual, sem necessidade de persona |
-| "Quero um bot com personalidade de coach que me cobre habitos" | Agente dedicado | Personalidade distinta, uso recorrente, precisa manter historico |
-| "Analisa esse CSV e me da insights" | Main Agent | Tarefa unica, sem personalidade especial |
-| "Preciso de um revisor de texto tecnico que siga meu style guide" | Agente dedicado | Instrucoes permanentes, personalidade definida, uso recorrente |
-| "Resume esse artigo pra mim" | Main Agent | Tarefa pontual, qualquer modelo resolve |
+| User's goal | Recommendation | Reason |
+|-------------|---------------|--------|
+| "I want a crypto assistant that tracks my portfolio every day" | Dedicated agent | Recurring, specific domain, needs own Journal |
+| "Help me write a formal email" | Main Agent | One-off task, no persona needed |
+| "I want a bot with a coach personality that keeps me accountable for habits" | Dedicated agent | Distinct personality, recurring use, needs to maintain history |
+| "Analyze this CSV and give me insights" | Main Agent | Single task, no special personality |
+| "I need a technical text reviewer that follows my style guide" | Dedicated agent | Permanent instructions, defined personality, recurring use |
+| "Summarize this article for me" | Main Agent | One-off task, any model handles it |
 
-### Passo 1 — Perguntar o nome
+### Step 1 — Ask for the name
 
-Nome legivel do agente. Ex: "CryptoAnalyst", "FitnessCoach", "TechWriter".
+Human-readable name for the agent. E.g.: "CryptoAnalyst", "FitnessCoach", "TechWriter".
 
-### Passo 2 — Definir a personalidade
+### Step 2 — Define the personality
 
-Tom de voz, estilo de comunicacao, tracos de carater.
+Tone of voice, communication style, character traits.
 
-#### Heuristicas de personalidade
+#### Personality heuristics
 
-Ajudar o usuario a definir uma personalidade que realmente diferencie o agente. Se a personalidade fornecida for generica, sugerir melhorias antes de prosseguir.
+Help the user define a personality that truly differentiates the agent. If the provided personality is generic, suggest improvements before proceeding.
 
-**Boas personalidades:**
+**Good personalities:**
 
-| Exemplo | Por que funciona |
-|---------|-----------------|
-| "Analista tecnico direto e quantitativo, prefere dados a opiniao. Usa bullet points, evita jargao vago." | Tom claro, estilo de output definido, preferencias explicitas |
-| "Coach motivacional firme mas empatico. Faz perguntas antes de dar conselhos. Celebra progresso, confronta desculpas." | Personalidade com nuance, comportamento condicional |
-| "Redator criativo com humor sutil. Escreve em paragrafos curtos, usa analogias inesperadas, evita cliches corporativos." | Estilo literario definido, anti-patterns explicitos |
+| Example | Why it works |
+|---------|-------------|
+| "Direct and quantitative technical analyst, prefers data over opinion. Uses bullet points, avoids vague jargon." | Clear tone, defined output style, explicit preferences |
+| "Firm but empathetic motivational coach. Asks questions before giving advice. Celebrates progress, confronts excuses." | Nuanced personality, conditional behavior |
+| "Creative writer with subtle humor. Writes in short paragraphs, uses unexpected analogies, avoids corporate clichés." | Defined literary style, explicit anti-patterns |
 
-**Personalidades problematicas (e como melhorar):**
+**Problematic personalities (and how to improve them):**
 
-| Personalidade ruim | Problema | Versao melhorada |
-|-------------------|----------|-----------------|
-| "Seja util e informativo" | Generico — todo modelo ja faz isso | "Especialista em X que prioriza clareza sobre completude. Responde com exemplos concretos antes de teoria." |
-| "Seja amigavel" | Vago, nao diferencia de nada | "Tom casual e bem-humorado, usa analogias do dia-a-dia. Trata o usuario como colega, nao como cliente." |
-| "Responda bem" | Nao eh personalidade | "Formalista tecnico. Estrutura respostas com headers. Sempre cita fonte ou motivo de cada afirmacao." |
+| Bad personality | Problem | Improved version |
+|----------------|---------|-----------------|
+| "Be helpful and informative" | Generic — every model already does that | "Expert in X who prioritizes clarity over completeness. Answers with concrete examples before theory." |
+| "Be friendly" | Vague, indistinguishable from anything | "Casual and humorous tone, uses everyday analogies. Treats the user as a colleague, not a client." |
+| "Answer well" | Not a personality | "Technical formalist. Structures responses with headers. Always cites a source or reason for each statement." |
 
-**Checklist de uma boa personalidade:**
-- [ ] Tom de voz definido (formal, casual, tecnico, humorado?)
-- [ ] Estilo de output claro (bullets, paragrafos, tabelas, conversacional?)
-- [ ] Pelo menos um anti-pattern (o que o agente NAO faz)
-- [ ] Comportamento que o Main Agent nao teria naturalmente
+**Good personality checklist:**
+- [ ] Defined tone of voice (formal, casual, technical, humorous?)
+- [ ] Clear output style (bullets, paragraphs, tables, conversational?)
+- [ ] At least one anti-pattern (what the agent does NOT do)
+- [ ] Behavior that the Main Agent would not naturally have
 
-### Passo 3 — Perguntar a descricao
+### Step 3 — Ask for the description
 
-Frase curta que vai no frontmatter `description`. Deve explicar o que o agente faz em uma linha.
+Short sentence that goes in the frontmatter `description`. Should explain what the agent does in one line.
 
-### Passo 4 — Perguntar especializacoes
+### Step 4 — Ask for specializations
 
-Areas de foco do agente. Virao como lista em `## Especializacoes` no CLAUDE.md e como tags no frontmatter.
+Agent's focus areas. These will appear as a list under `## Specializations` in CLAUDE.md and as tags in the frontmatter.
 
-### Passo 5 — Escolher o modelo
+### Step 5 — Choose the model
 
-#### Orientacao de modelo por tipo de agente
+#### Model guidance by agent type
 
-Nao apenas perguntar — recomendar baseado no uso previsto:
+Don't just ask — recommend based on the intended use:
 
-| Tipo de agente | Modelo recomendado | Motivo |
-|---------------|-------------------|--------|
-| Coleta de dados, monitoramento, alertas simples | `haiku` | Rapido e barato, ideal para tarefas mecanicas |
-| Maioria dos agentes (analise, escrita, assistencia geral) | `sonnet` | Equilibrio entre qualidade e velocidade |
-| Analise profunda, escrita criativa, raciocinio complexo | `opus` | Melhor raciocinio, mais caro e mais lento |
-| Agente com rotinas frequentes (varias vezes ao dia) | `haiku` ou `sonnet` | Custo acumula rapido com opus |
-| Agente para decisoes criticas (financeiro, estrategia) | `opus` | Vale o custo extra pela qualidade |
+| Agent type | Recommended model | Reason |
+|-----------|------------------|--------|
+| Data collection, monitoring, simple alerts | `haiku` | Fast and cheap, ideal for mechanical tasks |
+| Most agents (analysis, writing, general assistance) | `sonnet` | Balance between quality and speed |
+| Deep analysis, creative writing, complex reasoning | `opus` | Best reasoning, more expensive and slower |
+| Agent with frequent routines (multiple times per day) | `haiku` or `sonnet` | Costs accumulate fast with opus |
+| Agent for critical decisions (financial, strategy) | `opus` | The extra cost is worth the quality |
 
-Default: `sonnet`. Sugerir mudanca se o caso pedir.
+Default: `sonnet`. Suggest a change if the case calls for it.
 
-### Passo 6 — Perguntar o icone
+### Step 6 — Ask for the icon
 
-Emoji que representa o agente. Sugerir opcoes se o usuario nao tiver preferencia.
+Emoji that represents the agent. Suggest options if the user has no preference.
 
-### Passo 7 — Gerar ID
+### Step 7 — Generate ID
 
-kebab-case do nome. Ex: "CryptoAnalyst" -> `crypto-analyst`
+kebab-case of the name. E.g.: "CryptoAnalyst" -> `crypto-analyst`
 
-### Passo 8 — Criar 4 itens em `vault/Agents/{id}/`
+### Step 8 — Create 4 items in `vault/Agents/{id}/`
 
-**agent.md** — metadados para o bot (body vazio):
+**agent.md** — metadata for the bot (empty body):
 ```yaml
 ---
-title: {nome}
-description: {descricao curta}
+title: {name}
+description: {short description}
 type: agent
 created: {YYYY-MM-DD}
 updated: {YYYY-MM-DD}
-tags: [agent, {especializacoes}]
-name: {nome}
-personality: {personalidade em uma frase}
-model: {modelo}
+tags: [agent, {specializations}]
+name: {name}
+personality: {personality in one sentence}
+model: {model}
 icon: "{emoji}"
 default: false
 ---
 ```
 
-**CLAUDE.md** — instrucoes para Claude Code (SEM frontmatter):
+**CLAUDE.md** — instructions for Claude Code (NO frontmatter):
 ```markdown
-# {nome} {emoji}
+# {name} {emoji}
 
-## Personalidade
-{descricao detalhada do tom e estilo}
+## Personality
+{detailed description of tone and style}
 
-## Instrucoes
-- Registrar conversas no Journal proprio: `Journal/YYYY-MM-DD.md`
-- IMPORTANTE: registrar no Journal DURANTE a conversa, nao apenas no final. Registre sempre que: uma decisao for tomada, uma tarefa for concluida, informacao nova for descoberta, ou o usuario pedir para lembrar algo.
-- {instrucoes especificas}
+## Instructions
+- Record conversations in own Journal: `Journal/YYYY-MM-DD.md`
+- IMPORTANT: record in the Journal DURING the conversation, not only at the end. Record whenever: a decision is made, a task is completed, new information is discovered, or the user asks to remember something.
+- {specific instructions}
 
-## Especializacoes
-- {lista}
+## Specializations
+- {list}
 ```
 
-**{id}.md** — hub de links no grafo Obsidian:
+**{id}.md** — link hub in the Obsidian graph:
 ```markdown
 ---
-title: {nome}
-description: Hub do agente {nome} no grafo.
+title: {name}
+description: Hub for agent {name} in the graph.
 type: agent
 created: {YYYY-MM-DD}
 updated: {YYYY-MM-DD}
@@ -183,182 +183,182 @@ tags: [agent]
 [[CLAUDE]]
 ```
 
-**Journal/** — criar o diretorio vazio
+**Journal/** — create the empty directory
 
-### Passo 9 — Atualizar Agents.md
+### Step 9 — Update Agents.md
 
-Adicionar `- [[{id}]] — {descricao}` no index.
+Add `- [[{id}]] — {description}` to the index.
 
-### Passo 10 — Registrar no Journal global
+### Step 10 — Record in the global Journal
 
-Appendar no journal do dia — mencionar em texto plano (sem wikilink para o agente).
+Append to the day's journal — mention in plain text (no wikilink to the agent).
 
-### Passo 11 — Confirmar
+### Step 11 — Confirm
 
-Informar como ativar: `/agent {nome}`
+Inform how to activate: `/agent {name}`
 
-### Passo 12 — Sugerir proximos passos
+### Step 12 — Suggest next steps
 
-Apos criar o agente, sugerir proativamente:
+After creating the agent, proactively suggest:
 
-> "Agente criado! Proximo passo: quer criar uma **rotina agendada** para este agente? Rotinas com `agent: {id}` rodam automaticamente no workspace dele.
-> Exemplos: relatorio diario, monitoramento, resumo matinal."
+> "Agent created! Next step: would you like to create a **scheduled routine** for this agent? Routines with `agent: {id}` run automatically in its workspace.
+> Examples: daily report, monitoring, morning summary."
 
-Se o usuario aceitar → redirecionar para a skill `Skills/create-routine.md` com o campo `agent` pre-preenchido.
+If the user agrees → redirect to the skill `Skills/create-routine.md` with the `agent` field pre-filled.
 
 ---
 
-## Exemplo completo: Agente CryptoBro
+## Full example: CryptoBro Agent
 
-Objetivo: agente especializado em mercado cripto, com personalidade de analista tecnico.
+Goal: agent specialized in the crypto market, with a technical analyst personality.
 
-**Triagem:** agente dedicado — dominio especializado, uso recorrente, personalidade distinta, tera rotinas proprias.
+**Triage:** dedicated agent — specialized domain, recurring use, distinct personality, will have its own routines.
 
-**Dados coletados:**
-- Nome: CryptoBro
-- Personalidade: "Analista tecnico direto e quantitativo. Prefere dados a opiniao. Usa bullet points, tabelas e numeros concretos. Nunca diz 'pode ser que' — sempre da um veredito com nivel de confianca."
-- Descricao: "Analista de mercado cripto focado em BTC e altcoins"
-- Especializacoes: analise tecnica, on-chain, macro, derivativos
-- Modelo: opus (analise complexa)
-- Icone: 📊
+**Collected data:**
+- Name: CryptoBro
+- Personality: "Direct and quantitative technical analyst. Prefers data over opinion. Uses bullet points, tables, and concrete numbers. Never says 'might be' — always gives a verdict with a confidence level."
+- Description: "Crypto market analyst focused on BTC and altcoins"
+- Specializations: technical analysis, on-chain, macro, derivatives
+- Model: opus (complex analysis)
+- Icon: 📊
 
-**Resultado — agent.md:**
+**Result — agent.md:**
 ```yaml
 ---
 title: CryptoBro
-description: Analista de mercado cripto focado em BTC e altcoins
+description: Crypto market analyst focused on BTC and altcoins
 type: agent
 created: 2026-04-09
 updated: 2026-04-09
-tags: [agent, crypto, bitcoin, analise-tecnica]
+tags: [agent, crypto, bitcoin, technical-analysis]
 name: CryptoBro
-personality: "Analista tecnico direto e quantitativo. Prefere dados a opiniao."
+personality: "Direct and quantitative technical analyst. Prefers data over opinion."
 model: opus
 icon: "📊"
 default: false
 ---
 ```
 
-**Resultado — CLAUDE.md:**
+**Result — CLAUDE.md:**
 ```markdown
 # CryptoBro 📊
 
-## Personalidade
-Analista tecnico direto e quantitativo. Prefere dados a opiniao.
-Usa bullet points, tabelas e numeros concretos. Nunca diz "pode ser que"
-— sempre da um veredito com nivel de confianca.
+## Personality
+Direct and quantitative technical analyst. Prefers data over opinion.
+Uses bullet points, tables, and concrete numbers. Never says "might be"
+— always gives a verdict with a confidence level.
 
-## Instrucoes
-- Registrar conversas no Journal proprio: `Journal/YYYY-MM-DD.md`
-- Registrar DURANTE a conversa, nao apenas no final
-- Sempre incluir precos exatos, percentuais e timeframes
-- Citar fontes de dados usadas em cada analise
+## Instructions
+- Record conversations in own Journal: `Journal/YYYY-MM-DD.md`
+- Record DURING the conversation, not only at the end
+- Always include exact prices, percentages, and timeframes
+- Cite data sources used in each analysis
 
-## Especializacoes
-- Analise tecnica (EMAs, RSI, suportes/resistencias)
-- Metricas on-chain (funding, OI, long/short)
-- Correlacao macro (DXY, S&P500, GOLD)
-- Derivativos e sentimento (Fear & Greed)
+## Specializations
+- Technical analysis (EMAs, RSI, support/resistance)
+- On-chain metrics (funding, OI, long/short)
+- Macro correlation (DXY, S&P500, GOLD)
+- Derivatives and sentiment (Fear & Greed)
 ```
 
-**Proximo passo sugerido:** "Quer criar uma rotina diaria para o CryptoBro? Ex: analise tecnica as 21:30 com coleta de dados e publicacao no Notion."
+**Suggested next step:** "Would you like to create a daily routine for CryptoBro? E.g.: technical analysis at 21:30 with data collection and publishing to Notion."
 
 ---
 
-## Modo Revisao
+## Review Mode
 
-Acionado quando o usuario pede para revisar, melhorar ou avaliar agentes existentes.
+Triggered when the user asks to review, improve, or evaluate existing agents.
 
-### Passo 1 — Identificar escopo
+### Step 1 — Identify scope
 
-- Se o usuario mencionou um agente especifico → revisar apenas esse
-- Se pediu revisao geral → listar todos os agentes em `vault/Agents/` e analisar cada um (incluindo o Main Agent)
+- If the user mentioned a specific agent → review only that one
+- If a general review was requested → list all agents in `vault/Agents/` and analyze each one (including the Main Agent)
 
-### Passo 2 — Analisar cada agente
+### Step 2 — Analyze each agent
 
-Para cada agente, ler `agent.md` e `CLAUDE.md` completos. Avaliar com o checklist abaixo.
+For each agent, read `agent.md` and `CLAUDE.md` in full. Evaluate using the checklist below.
 
-**Checklist de revisao:**
+**Review checklist:**
 
-#### A. CLAUDE.md atualizado?
+#### A. CLAUDE.md up to date?
 
-- [ ] As instrucoes refletem o uso real do agente? (comparar com Journal recente)
-- [ ] Ha instrucoes obsoletas ou que nunca sao usadas?
-- [ ] Faltam instrucoes para tarefas que o agente faz frequentemente?
+- [ ] Do the instructions reflect the agent's actual usage? (compare with recent Journal)
+- [ ] Are there obsolete instructions or ones that are never used?
+- [ ] Are instructions missing for tasks the agent performs frequently?
 
-#### B. Modelo adequado?
+#### B. Model appropriate?
 
-- [ ] O agente faz tarefas simples com `opus`? → sugerir `sonnet` ou `haiku`
-- [ ] O agente faz analise complexa com `haiku`? → sugerir `sonnet` ou `opus`
-- [ ] O agente tem rotinas frequentes com modelo caro? → avaliar custo-beneficio
+- [ ] Is the agent doing simple tasks with `opus`? → suggest `sonnet` or `haiku`
+- [ ] Is the agent doing complex analysis with `haiku`? → suggest `sonnet` or `opus`
+- [ ] Does the agent have frequent routines with an expensive model? → evaluate cost-benefit
 
-#### C. Agente em uso?
+#### C. Agent in use?
 
-- [ ] O Journal tem entradas recentes (ultimas 2 semanas)?
-- [ ] Se nao tem — o agente ainda eh relevante? Sugerir desativar ou remover.
-- [ ] Se tem poucas entradas — o uso justifica um agente dedicado ou o Main bastaria?
+- [ ] Does the Journal have recent entries (last 2 weeks)?
+- [ ] If not — is the agent still relevant? Suggest disabling or removing.
+- [ ] If few entries — does the usage justify a dedicated agent or would Main suffice?
 
-#### D. Personalidade distintiva?
+#### D. Distinctive personality?
 
-- [ ] A personalidade no `agent.md` eh especifica o suficiente?
-- [ ] O tom do CLAUDE.md corresponde ao campo `personality`?
-- [ ] O agente se diferencia do Main de forma clara?
-- [ ] Se a personalidade for generica ("seja util") → sugerir refinamento
+- [ ] Is the personality in `agent.md` specific enough?
+- [ ] Does the tone in CLAUDE.md match the `personality` field?
+- [ ] Does the agent clearly differentiate itself from Main?
+- [ ] If the personality is generic ("be helpful") → suggest refinement
 
-#### E. Oportunidade de merge?
+#### E. Merge opportunity?
 
-- [ ] Dois agentes tem especializacoes sobrepostas?
-- [ ] Um agente faz tao pouco que poderia ser absorvido por outro?
-- [ ] Se merge fizer sentido → propor qual sobrevive e o que absorve
+- [ ] Do two agents have overlapping specializations?
+- [ ] Does one agent do so little that it could be absorbed by another?
+- [ ] If a merge makes sense → propose which one survives and what it absorbs
 
-### Passo 3 — Apresentar recomendacoes
+### Step 3 — Present recommendations
 
-Para cada agente analisado, apresentar:
+For each analyzed agent, present:
 
 ```
-### {nome-do-agente}
-Status: OK / Melhorias sugeridas
+### {agent-name}
+Status: OK / Improvements suggested
 
-- [melhoria 1]: motivo e beneficio
-- [melhoria 2]: motivo e beneficio
+- [improvement 1]: reason and benefit
+- [improvement 2]: reason and benefit
 ```
 
-Se a revisao for geral, incluir visao consolidada:
+If the review is general, include a consolidated overview:
 ```
-### Visao geral
+### Overview
 
-- Total de agentes: X (+ Main)
-- Em uso ativo: Y
-- Sem uso recente: Z
-- Candidatos a merge: [lista]
-- Candidatos a remocao: [lista]
+- Total agents: X (+ Main)
+- Actively in use: Y
+- No recent usage: Z
+- Merge candidates: [list]
+- Removal candidates: [list]
 ```
 
-### Passo 4 — Executar melhorias aprovadas
+### Step 4 — Apply approved improvements
 
-Perguntar quais melhorias o usuario quer aplicar. Para cada aprovada:
+Ask which improvements the user wants to apply. For each approved one:
 
-- **Mudanca de modelo** → editar `agent.md` (campo `model`)
-- **Refinamento de personalidade** → editar `agent.md` (campo `personality`) e `CLAUDE.md` (secao Personalidade)
-- **Atualizacao de instrucoes** → editar `CLAUDE.md`, mostrar diff ao usuario
-- **Merge de agentes** → migrar instrucoes relevantes para o agente que sobrevive, mover Journal entries se necessario
-- **Remocao** → confirmar com o usuario antes de deletar (via Lixeira do macOS se disponivel)
+- **Model change** → edit `agent.md` (field `model`)
+- **Personality refinement** → edit `agent.md` (field `personality`) and `CLAUDE.md` (Personality section)
+- **Instructions update** → edit `CLAUDE.md`, show diff to the user
+- **Agent merge** → migrate relevant instructions to the surviving agent, move Journal entries if necessary
+- **Removal** → confirm with the user before deleting (via macOS Trash if available)
 
-Ao modificar um agente:
-1. Atualizar campo `updated` no frontmatter do `agent.md`
-2. Registrar mudancas no Journal
+When modifying an agent:
+1. Update the `updated` field in `agent.md` frontmatter
+2. Record changes in the Journal
 
-### Passo 5 — Registrar no Journal
+### Step 5 — Record in the Journal
 
-Appendar no journal do dia com as mudancas aplicadas.
+Append to the day's journal with the applied changes.
 
 ---
 
-## Notas
+## Notes
 
-- O Main Agent eh o agente padrao do bot — nao tem workspace proprio nem CLAUDE.md especifico
-- Agentes mudam o `cwd` para `vault/Agents/{id}/` quando ativos
-- O Claude CLI carrega CLAUDE.md walking up da hierarquia: `Agents/{id}/CLAUDE.md` + `vault/CLAUDE.md` + raiz
-- Rotinas podem ser direcionadas a agentes com `agent: {id}` no frontmatter
-- O app macOS (ClaudeBotManager) permite criar e gerenciar agentes via UI
-- Agentes podem ser importados de templates com `/agent import`
+- The Main Agent is the bot's default agent — it has no own workspace or specific CLAUDE.md
+- Agents change the `cwd` to `vault/Agents/{id}/` when active
+- Claude CLI loads CLAUDE.md walking up the hierarchy: `Agents/{id}/CLAUDE.md` + `vault/CLAUDE.md` + root
+- Routines can be routed to agents with `agent: {id}` in the frontmatter
+- The macOS app (ClaudeBotManager) allows creating and managing agents via UI
+- Agents can be imported from templates with `/agent import`

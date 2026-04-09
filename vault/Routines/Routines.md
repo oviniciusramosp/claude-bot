@@ -1,24 +1,24 @@
 ---
 title: Routines
-description: Indice de todas as rotinas agendadas. Hub que conecta rotinas ao grafo principal.
+description: Index of all scheduled routines. Hub connecting routines to the main graph.
 type: index
 created: 2026-04-07
-updated: 2026-04-07
+updated: 2026-04-09
 tags: [index, routines]
 ---
 
 # Routines
 
-Rotinas agendadas que executam prompts no Claude Code automaticamente.
+Scheduled routines that execute prompts on Claude Code automatically.
 
-## Rotinas ativas
+## Active routines
 
-- [[palmeiras-feed]] — Pipeline de posts Palmeiras → Notion + Telegram (6x/dia: 08h, 11h, 15h, 17h, 21h, 23h)
-- [[crypto-ta-analise]] — Pipeline de análise técnica cripto todo dia as 21:30 (Notion + Telegram)
+- [[palmeiras-feed]] — Palmeiras posts pipeline → Notion + Telegram (6x/day: 08h, 11h, 15h, 17h, 21h, 23h)
+- [[crypto-ta-analise]] — Crypto technical analysis pipeline daily at 21:30 (Notion + Telegram)
 
 
-- [[journal-sweep]] — Varredura noturna que consolida sessoes nao registradas no Journal
-- [[teste-routine]] — Ping o usuario para ele saber que a rotina funcionou
-- [[update-check]] — Verifica diariamente se ha updates do Claude Code ou do repo
-- [[teste-pipeline]] — Pipeline de teste com 3 steps: coleta, analise, resumo.
-- [[vault-graph-update]] — Regenera o knowledge graph do vault diariamente às 4h
+- [[journal-sweep]] — Nightly sweep that consolidates unrecorded sessions into the Journal
+- [[teste-routine]] — Pings the user to confirm the routine worked
+- [[update-check]] — Checks daily for Claude Code or repo updates
+- [[teste-pipeline]] — Test pipeline with 3 steps: collect, analyze, summarize
+- [[vault-graph-update]] — Regenerates the vault knowledge graph daily at 4am

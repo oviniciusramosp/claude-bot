@@ -1,6 +1,6 @@
 ---
 title: Journal Sweep
-description: Varredura noturna que consolida sessoes do dia que nao foram registradas no Journal.
+description: Nightly sweep that consolidates the day's sessions that were not recorded in the Journal.
 type: routine
 created: 2026-04-08
 updated: 2026-04-09
@@ -14,20 +14,20 @@ enabled: true
 
 [[Routines]]
 
-Voce esta executando a varredura noturna de Journal. Sua tarefa eh garantir que todas as sessoes do dia tenham registro no Journal.
+You are running the nightly Journal sweep. Your task is to ensure that all sessions from the day have a record in the Journal.
 
-## Passos
+## Steps
 
-1. Leia o arquivo `~/.claude-bot/sessions.json` para ver todas as sessoes
-2. Identifique sessoes com `message_count > 0` e `session_id` != null (sessoes que tiveram atividade)
-3. Para cada sessao identificada:
-   - Determine o Journal correto: se a sessao tem campo `agent`, use `vault/Agents/{agent}/Journal/YYYY-MM-DD.md`; senao, use `vault/Journal/YYYY-MM-DD.md`
-   - Verifique se o Journal do dia ja existe e se ja tem entrada para essa sessao (procure pelo nome da sessao no conteudo)
-   - Se NAO tiver entrada, use o comando bash: `claude --print --session-id <session_id> -p "Resuma brevemente esta conversa em 3-5 bullets: topicos discutidos, decisoes tomadas, acoes realizadas. Seja conciso."` para obter um resumo
-   - Appende o resumo no Journal correto usando o formato padrao:
+1. Read the file `~/.claude-bot/sessions.json` to see all sessions
+2. Identify sessions with `message_count > 0` and `session_id` != null (sessions that had activity)
+3. For each identified session:
+   - Determine the correct Journal: if the session has an `agent` field, use `vault/Agents/{agent}/Journal/YYYY-MM-DD.md`; otherwise, use `vault/Journal/YYYY-MM-DD.md`
+   - Check whether the day's Journal already exists and already has an entry for that session (search for the session name in the content)
+   - If there is NO entry, use the bash command: `claude --print --session-id <session_id> -p "Briefly summarize this conversation in 3-5 bullets: topics discussed, decisions made, actions taken. Be concise."` to obtain a summary
+   - Append the summary to the correct Journal using the standard format:
 
 ```markdown
-## HH:MM — Consolidacao automatica: {nome-da-sessao}
+## HH:MM — Automatic consolidation: {session-name}
 
 - bullet 1
 - bullet 2
@@ -36,12 +36,12 @@ Voce esta executando a varredura noturna de Journal. Sua tarefa eh garantir que 
 ---
 ```
 
-4. Se o arquivo Journal do dia nao existir, crie-o com frontmatter YAML:
+4. If the day's Journal file does not exist, create it with YAML frontmatter:
 
 ```yaml
 ---
 title: "Journal YYYY-MM-DD"
-description: Registro do dia YYYY-MM-DD.
+description: Daily log for YYYY-MM-DD.
 type: journal
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
@@ -51,18 +51,18 @@ tags: [journal]
 [[Journal]]
 ```
 
-Para journals de agentes, use `[[{agent-id}/Journal|Journal]]` em vez de `[[Journal]]` e adicione o tag do agente.
+For agent journals, use `[[{agent-id}/Journal|Journal]]` instead of `[[Journal]]` and add the agent's tag.
 
-5. Ao final, registre no Journal principal (vault/Journal/YYYY-MM-DD.md) uma entrada de sweep:
+5. At the end, record a sweep entry in the main Journal (vault/Journal/YYYY-MM-DD.md):
 
 ```markdown
 ## 23:45 — Journal Sweep
 
-- Sessoes verificadas: N
-- Sessoes consolidadas: N (listar nomes)
-- Sessoes ja registradas: N
+- Sessions checked: N
+- Sessions consolidated: N (list names)
+- Sessions already recorded: N
 
 ---
 ```
 
-Responda NO_REPLY ao concluir.
+Respond NO_REPLY when done.

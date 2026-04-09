@@ -1,6 +1,6 @@
 ---
 title: Vault Graph Update
-description: Regenera o knowledge graph lightweight do vault a partir de frontmatter e wikilinks. Sem custo de LLM.
+description: Regenerates the vault's lightweight knowledge graph from frontmatter and wikilinks. No LLM cost.
 type: routine
 created: 2026-04-09
 updated: 2026-04-09
@@ -15,13 +15,13 @@ context: minimal
 
 [[Routines]]
 
-Regenere o knowledge graph do vault executando o script Python abaixo. Este script extrai relacionamentos a partir de frontmatter YAML e wikilinks — sem LLM, custo zero.
+Regenerate the vault knowledge graph by running the Python script below. This script extracts relationships from YAML frontmatter and wikilinks — no LLM, zero cost.
 
 ```bash
 python3 /Users/viniciusramos/claude-bot/scripts/vault-graph-builder.py
 ```
 
-Após a execução:
-1. Verifique se `vault/.graphs/graph.json` foi gerado/atualizado
-2. Se houver erros, reporte o erro específico
-3. Se sucesso, responda com `NO_REPLY`
+After execution:
+1. Check whether `vault/.graphs/graph.json` was generated/updated
+2. If there are errors, report the specific error
+3. If successful, respond with `NO_REPLY`

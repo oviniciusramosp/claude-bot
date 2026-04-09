@@ -1,263 +1,263 @@
 ---
-title: Importar ou Revisar Agente Importado
-description: Skill para importar agentes de sistemas externos (ex. OpenClaw) para o vault do claude-bot, ou revisar agentes previamente importados para verificar se a sintese do CLAUDE.md foi adequada. Le instruction files, config e metadata e gera a estrutura vault/Agents/{id}/ com agent.md + CLAUDE.md + Journal/.
+title: Import or Review Imported Agent
+description: Skill to import agents from external systems (e.g. OpenClaw) into the claude-bot vault, or to review previously imported agents to verify whether the CLAUDE.md synthesis was adequate. Reads instruction files, config and metadata and generates the vault/Agents/{id}/ structure with agent.md + CLAUDE.md + Journal/.
 type: skill
 created: 2026-04-07
 updated: 2026-04-09
-trigger: "quando o usuario quiser importar um agente do OpenClaw ou de outro sistema, importar agente de outro sistema, revisar agente importado, verificar importacao, ou usar /import agent"
+trigger: "when the user wants to import an agent from OpenClaw or another system, import agent from another system, review imported agent, verify import, or use /import agent"
 tags: [skill, agent, openclaw, import, automation, review]
 ---
 
-# Importar ou Revisar Agente Importado
+# Import or Review Imported Agent
 
-## Modos de operacao
+## Modes of operation
 
-- **Importacao** — importar agente de sistema externo (atualmente OpenClaw) para o vault
-- **Revisao** — revisar agentes previamente importados para verificar se a sintese do CLAUDE.md foi adequada
+- **Import** — import an agent from an external system (currently OpenClaw) into the vault
+- **Review** — review previously imported agents to verify whether the CLAUDE.md synthesis was adequate
 
-## Dependencias
+## Dependencies
 
-- Agents/Agents.md — destino dos agentes importados
-- Skills/create-agent.md — formato de referencia para a estrutura gerada
+- Agents/Agents.md — destination for imported agents
+- Skills/create-agent.md — reference format for the generated structure
 
-## Objetivo
+## Objective
 
-Migrar agentes do OpenClaw (OC) para o vault do claude-bot, traduzindo instruction files, config de modelo e metadata em uma estrutura padrao vault/Agents/{id}/.
+Migrate agents from OpenClaw (OC) to the claude-bot vault, translating instruction files, model config and metadata into a standard vault/Agents/{id}/ structure.
 
-## Passos
+## Steps
 
-### 1. Listar agentes disponiveis no OpenClaw
+### 1. List available agents in OpenClaw
 
-Verificar o arquivo de config em `~/.openclaw/openclaw.json` na chave `agents.list`. Cada entrada tem:
+Check the config file at `~/.openclaw/openclaw.json` under the `agents.list` key. Each entry has:
 
 ```
 { "id": "...", "name": "...", "model": "...", "workspace": "..." }
 ```
 
-Listar os agentes encontrados no arquivo de config. Apresentar ao usuario a lista com ID, nome e modelo.
+List the agents found in the config file. Present the user with the list showing ID, name and model.
 
-### 2. Perguntar qual agente importar
+### 2. Ask which agent to import
 
-Aguardar a escolha do usuario. Aceitar o ID ou o nome.
+Wait for the user's choice. Accept either the ID or the name.
 
-### 3. Localizar os arquivos fonte do agente
+### 3. Locate the agent's source files
 
-Para cada agente, os arquivos relevantes estao distribuidos em:
+For each agent, the relevant files are distributed across:
 
-**Config do agente:** `~/.openclaw/openclaw.json` → `agents.list[id]`
-- Campos: `id`, `name`, `model`, `workspace`, `thinkingDefault`, `reasoningDefault`
-- Modelo default (se nao especificado): herda de `agents.defaults.model.primary`
+**Agent config:** `~/.openclaw/openclaw.json` → `agents.list[id]`
+- Fields: `id`, `name`, `model`, `workspace`, `thinkingDefault`, `reasoningDefault`
+- Default model (if not specified): inherited from `agents.defaults.model.primary`
 
-**Workspace do agente:** Verificar o campo `workspace` na config do agente. Se nao existir, usar o default `~/.openclaw/workspace/`. Os workspaces especificos de cada agente estao definidos no arquivo de config.
+**Agent workspace:** Check the `workspace` field in the agent's config. If it doesn't exist, use the default `~/.openclaw/workspace/`. Each agent's specific workspaces are defined in the config file.
 
-**Instruction files:** Dentro do workspace, em `instructions/`. Estrutura tipica:
+**Instruction files:** Inside the workspace, under `instructions/`. Typical structure:
 ```
 instructions/
-  {dominio}/
-    _globals.md      # Regras globais do dominio
-    _style.md        # Estilo de escrita
-    _apis.md         # Endpoints e ferramentas
-    _notion.md       # Integracao Notion
-    {role}.md        # Instrucoes por sub-agente (manager, writer, analyst, etc.)
+  {domain}/
+    _globals.md      # Global domain rules
+    _style.md        # Writing style
+    _apis.md         # Endpoints and tools
+    _notion.md       # Notion integration
+    {role}.md        # Instructions per sub-agent (manager, writer, analyst, etc.)
 ```
 
-**Identity e Soul:** Na raiz do workspace:
-- `IDENTITY.md` — nome, emoji, vibe
-- `SOUL.md` — personalidade e diretrizes de comportamento
-- `USER.md` — contexto sobre o usuario
-- `AGENTS.md` — regras operacionais do workspace
+**Identity and Soul:** At the workspace root:
+- `IDENTITY.md` — name, emoji, vibe
+- `SOUL.md` — personality and behavioral guidelines
+- `USER.md` — context about the user
+- `AGENTS.md` — workspace operational rules
 
-### 4. Ler os instruction files
+### 4. Read the instruction files
 
-Ler todos os `.md` em `instructions/` do workspace do agente (recursivo). Priorizar:
-1. Arquivos com prefixo `_` (globals, style, apis) — sao contexto compartilhado
-2. O arquivo `*-manager.md` — eh o orquestrador principal
-3. Demais arquivos de sub-agentes — roles especificos
+Read all `.md` files in `instructions/` of the agent's workspace (recursive). Prioritize:
+1. Files with `_` prefix (globals, style, apis) — these are shared context
+2. The `*-manager.md` file — this is the main orchestrator
+3. Remaining sub-agent files — specific roles
 
-Tambem ler `IDENTITY.md` e `SOUL.md` do workspace para extrair personalidade.
+Also read `IDENTITY.md` and `SOUL.md` from the workspace to extract personality.
 
-### 5. Gerar a estrutura no vault
+### 5. Generate the structure in the vault
 
-Criar em `vault/Agents/{id}/`:
+Create under `vault/Agents/{id}/`:
 
 ```
 vault/Agents/{id}/
-  agent.md       # Metadados (frontmatter parseado pelo bot)
-  CLAUDE.md      # Instrucoes sintetizadas
-  Journal/       # Diretorio para journal proprio
+  agent.md       # Metadata (frontmatter parsed by the bot)
+  CLAUDE.md      # Synthesized instructions
+  Journal/       # Directory for own journal
 ```
 
-#### 5a. Gerar agent.md
+#### 5a. Generate agent.md
 
 ```yaml
 ---
 title: {name}
-description: {descricao curta baseada nos instruction files}
+description: {short description based on the instruction files}
 type: agent
 created: {YYYY-MM-DD}
 updated: {YYYY-MM-DD}
-tags: [agent, imported, openclaw, {tags de especializacao}]
+tags: [agent, imported, openclaw, {specialization tags}]
 name: {name}
-personality: {extraido de IDENTITY.md e SOUL.md}
-model: {modelo mapeado — ver tabela abaixo}
-icon: "{emoji do IDENTITY.md ou inferido}"
-default: {true se id == "main", senao false}
+personality: {extracted from IDENTITY.md and SOUL.md}
+model: {mapped model — see table below}
+icon: "{emoji from IDENTITY.md or inferred}"
+default: {true if id == "main", otherwise false}
 source: openclaw
-source_id: {id original no OC}
-source_workspace: {path do workspace OC}
+source_id: {original id in OC}
+source_workspace: {OC workspace path}
 ---
 
 [[Agents]]
 ```
 
-#### 5b. Gerar CLAUDE.md
+#### 5b. Generate CLAUDE.md
 
-Sintetizar os instruction files em um CLAUDE.md limpo. NAO copiar verbatim — reorganizar em:
+Synthesize the instruction files into a clean CLAUDE.md. DO NOT copy verbatim — reorganize into:
 
 ```markdown
 # {name}
 
-## Personalidade
-{Sintetizado de IDENTITY.md + SOUL.md do workspace}
+## Personality
+{Synthesized from workspace IDENTITY.md + SOUL.md}
 
-## Instrucoes
-- Registrar conversas no Journal proprio: Journal/YYYY-MM-DD.md
-- {instrucoes principais extraidas dos instruction files}
+## Instructions
+- Record conversations in own Journal: Journal/YYYY-MM-DD.md
+- {main instructions extracted from the instruction files}
 
-## Especializacoes
-- {lista de areas de foco, baseada nos sub-agentes e dominios}
+## Specializations
+- {list of focus areas, based on sub-agents and domains}
 
-## Sub-agentes originais (referencia)
-{Lista dos sub-agentes do OC com descricao curta de cada um, para referencia.
-Nao replicar toda a logica — apenas documentar quem fazia o que.}
+## Original sub-agents (reference)
+{List of OC sub-agents with a short description of each, for reference.
+Do not replicate all the logic — just document who did what.}
 
-## Fontes de dados
-{APIs, endpoints, ferramentas extraidos dos instruction files _apis.md/_notion.md}
+## Data sources
+{APIs, endpoints, tools extracted from the _apis.md/_notion.md instruction files}
 ```
 
-O CLAUDE.md do agente NAO precisa repetir regras do vault (frontmatter, wikilinks, etc.) — essas vem do CLAUDE.md pai em ~/claude-bot/.
+The agent's CLAUDE.md does NOT need to repeat vault rules (frontmatter, wikilinks, etc.) — those come from the parent CLAUDE.md at ~/claude-bot/.
 
-#### 5c. Criar Journal/
+#### 5c. Create Journal/
 
-Diretorio vazio. O agente comecara a registrar a partir da primeira sessao.
+Empty directory. The agent will start recording from the first session.
 
-### 6. Mapear modelo
+### 6. Map the model
 
-Usar a tabela de mapeamento (ver secao Notas) para converter o modelo OC para o modelo claude-bot.
+Use the mapping table (see Notes section) to convert the OC model to the claude-bot model.
 
-### 7. Atualizar o index
+### 7. Update the index
 
-Editar `vault/Agents/Agents.md` e adicionar: `- [[{id}]] — {descricao curta} (importado do OpenClaw)`
+Edit `vault/Agents/Agents.md` and add: `- [[{id}]] — {short description} (imported from OpenClaw)`
 
-### 8. Registrar no Journal global
+### 8. Record in the global Journal
 
-Appendar no journal do dia:
+Append to the day's journal:
 ```markdown
-## HH:MM — Agente importado do OpenClaw
+## HH:MM — Agent imported from OpenClaw
 
-- Agente {id} importado do OpenClaw via skill import-agent
-- Fonte: {workspace path}
-- Modelo mapeado: {OC model} -> {vault model}
-- {N} instruction files processados
+- Agent {id} imported from OpenClaw via skill import-agent
+- Source: {workspace path}
+- Mapped model: {OC model} -> {vault model}
+- {N} instruction files processed
 
 ---
 ```
 
-### 9. Confirmar
+### 9. Confirm
 
-Informar ao usuario:
-- O agente foi criado em `vault/Agents/{id}/`
-- Quantos instruction files foram processados
-- Qual modelo foi mapeado
-- Como ativar: `/agent {nome}` no Telegram
-- Sugerir revisar o CLAUDE.md gerado para ajustes
+Inform the user:
+- The agent was created at `vault/Agents/{id}/`
+- How many instruction files were processed
+- Which model was mapped
+- How to activate: `/agent {name}` on Telegram
+- Suggest reviewing the generated CLAUDE.md for adjustments
 
-## Notas
+## Notes
 
-### Tabela de mapeamento de modelos
+### Model mapping table
 
-| Alias OC | Modelo OC | Modelo claude-bot | Notas |
+| OC Alias | OC Model | claude-bot Model | Notes |
 |---|---|---|---|
-| perfil-escrita | zai/glm-5.1 | sonnet | Modelo primario OC -> default do bot |
-| perfil-glm-5 | zai/glm-5 | sonnet | Deep-llm, mapeia para sonnet |
+| perfil-escrita | zai/glm-5.1 | sonnet | OC primary model -> bot default |
+| perfil-glm-5 | zai/glm-5 | sonnet | Deep-llm, maps to sonnet |
 | perfil-glm-flash | zai/glm-4.7-flash | haiku | Light-llm, FREE |
 | perfil-glm-free | zai/glm-4.5-flash | haiku | Light-llm, FREE |
-| perfil-opus | anthropic/claude-opus-4-6 | opus | Mapeamento direto |
-| perfil-sonnet | anthropic/claude-sonnet-4-6 | sonnet | Mapeamento direto |
-| perfil-haiku | anthropic/claude-haiku-4-5 | haiku | Mapeamento direto |
-| perfil-codex | openai-codex/gpt-5.4 | sonnet | Sem equivalente direto |
+| perfil-opus | anthropic/claude-opus-4-6 | opus | Direct mapping |
+| perfil-sonnet | anthropic/claude-sonnet-4-6 | sonnet | Direct mapping |
+| perfil-haiku | anthropic/claude-haiku-4-5 | haiku | Direct mapping |
+| perfil-codex | openai-codex/gpt-5.4 | sonnet | No direct equivalent |
 | perfil-flash | google/gemini-2.0-flash | haiku | Light-llm |
-| perfil-leve | ollama/jarvis-local | haiku | Ultimo recurso |
+| perfil-leve | ollama/jarvis-local | haiku | Last resort |
 
-Se o agente herda o modelo default (`agents.defaults.model.primary`), usar `sonnet`.
+If the agent inherits the default model (`agents.defaults.model.primary`), use `sonnet`.
 
-> **Nota:** Esta tabela reflete os modelos disponiveis na data de criacao. Verificar se ha modelos novos ou descontinuados antes de usar.
+> **Note:** This table reflects the models available at the time of creation. Check for new or discontinued models before using.
 
-## Modo Revisao
+## Review Mode
 
-Acionado quando o usuario pede para revisar agentes importados ou verificar se a importacao ficou adequada.
+Triggered when the user asks to review imported agents or verify whether the import was adequate.
 
-### Passo 1 — Identificar agentes importados
+### Step 1 — Identify imported agents
 
-Listar agentes em `vault/Agents/` que tem `source: openclaw` (ou outro source) no frontmatter do `agent.md`.
+List agents in `vault/Agents/` that have `source: openclaw` (or another source) in the `agent.md` frontmatter.
 
-### Passo 2 — Analisar cada agente importado
+### Step 2 — Analyze each imported agent
 
-Para cada agente, ler `agent.md`, `CLAUDE.md`, e o Journal. Avaliar com o checklist:
+For each agent, read `agent.md`, `CLAUDE.md`, and the Journal. Evaluate with the checklist:
 
-#### A. Qualidade da sintese
+#### A. Synthesis quality
 
-- [ ] O CLAUDE.md captura a essencia dos instruction files originais?
-- [ ] Informacoes importantes foram perdidas na sintese? (comparar com `source_workspace` se acessivel)
-- [ ] O CLAUDE.md esta muito longo (>200 linhas)? Pode ser condensado?
-- [ ] O CLAUDE.md esta muito curto? Faltam instrucoes que existiam no original?
+- [ ] Does the CLAUDE.md capture the essence of the original instruction files?
+- [ ] Was important information lost in the synthesis? (compare with `source_workspace` if accessible)
+- [ ] Is the CLAUDE.md too long (>200 lines)? Can it be condensed?
+- [ ] Is the CLAUDE.md too short? Are there missing instructions that existed in the original?
 
-#### B. Modelo e personalidade
+#### B. Model and personality
 
-- [ ] O modelo mapeado faz sentido para o uso real do agente?
-- [ ] A personalidade extraida de IDENTITY.md/SOUL.md ficou fiel?
-- [ ] O icone representa bem o agente?
+- [ ] Does the mapped model make sense for the agent's actual use?
+- [ ] Was the personality extracted from IDENTITY.md/SOUL.md faithful?
+- [ ] Does the icon represent the agent well?
 
-#### C. Uso pos-importacao
+#### C. Post-import usage
 
-- [ ] O agente tem entradas no Journal? (esta sendo usado?)
-- [ ] Se esta em uso — o usuario encontrou problemas que requerem ajuste no CLAUDE.md?
-- [ ] Se NAO esta em uso — o agente eh relevante? Sugerir desativar ou remover.
+- [ ] Does the agent have Journal entries? (is it being used?)
+- [ ] If in use — has the user encountered issues that require adjustments to CLAUDE.md?
+- [ ] If NOT in use — is the agent relevant? Suggest deactivating or removing it.
 
-#### D. Integracao com o vault
+#### D. Vault integration
 
-- [ ] O agente tem rotinas associadas? Se nao e deveria → sugerir criar via `Skills/create-routine.md`
-- [ ] Skills do OC que este agente usava foram recriadas no vault?
-- [ ] Cron jobs do OC que este agente tinha foram convertidos em rotinas?
+- [ ] Does the agent have associated routines? If not and it should → suggest creating via `Skills/create-routine.md`
+- [ ] Have OC skills this agent used been recreated in the vault?
+- [ ] Have OC cron jobs this agent had been converted into routines?
 
-### Passo 3 — Apresentar recomendacoes
+### Step 3 — Present recommendations
 
 ```
-### {nome-do-agente} (importado de {source})
-Status: OK / Melhorias sugeridas
+### {agent-name} (imported from {source})
+Status: OK / Improvements suggested
 
-- [melhoria 1]: motivo e beneficio
-- [melhoria 2]: motivo e beneficio
+- [improvement 1]: reason and benefit
+- [improvement 2]: reason and benefit
 ```
 
-### Passo 4 — Executar melhorias aprovadas
+### Step 4 — Execute approved improvements
 
-- **Melhorar CLAUDE.md** → re-sintetizar a partir dos instruction files originais (se acessiveis)
-- **Ajustar modelo** → editar `agent.md`
-- **Criar rotinas** → redirecionar para `Skills/create-routine.md` com `agent: {id}`
-- **Recriar skills do OC** → usar formato vault `Skills/{nome}.md`
+- **Improve CLAUDE.md** → re-synthesize from the original instruction files (if accessible)
+- **Adjust model** → edit `agent.md`
+- **Create routines** → redirect to `Skills/create-routine.md` with `agent: {id}`
+- **Recreate OC skills** → use vault format `Skills/{name}.md`
 
-### Passo 5 — Registrar no Journal
+### Step 5 — Record in Journal
 
-Appendar no journal do dia com as mudancas aplicadas.
+Append to the day's journal with the applied changes.
 
 ---
 
 ### Caveats
 
-- **Sub-agentes nao migram 1:1.** O OC usa pipelines multi-agente (manager -> writer -> reviewer). O vault consolida em um agente unico. → Se o workflow original era complexo, sugerir criar uma **pipeline** via `Skills/create-pipeline.md` para replicar a orquestracao.
-- **Instruction files com prefixo `_` sao contexto compartilhado** (_globals, _style, _apis, _notion). Devem ser incorporados no CLAUDE.md, nao ignorados.
-- **Cron jobs e schedules do OC nao migram automaticamente.** → Apos importar, perguntar ao usuario se quer criar rotinas para este agente usando `Skills/create-routine.md` com `agent: {id}`.
-- **Memory do OC nao eh importada.** Os arquivos em `memory/` sao historicos e nao migram. → Se houver contexto critico em memory/, sugerir criar uma nota em `vault/Notes/` com o conteudo relevante.
-- **Skills do OC devem ser recriadas** como vault skills em `Skills/{nome}.md`. → Listar as skills que o agente usava no OC e perguntar se o usuario quer recriar alguma.
-- **O campo `source_workspace` no agent.md** preserva a referencia ao workspace OC original para consulta futura dos instruction files detalhados.
+- **Sub-agents do not migrate 1:1.** OC uses multi-agent pipelines (manager -> writer -> reviewer). The vault consolidates into a single agent. → If the original workflow was complex, suggest creating a **pipeline** via `Skills/create-pipeline.md` to replicate the orchestration.
+- **Instruction files with `_` prefix are shared context** (_globals, _style, _apis, _notion). They must be incorporated into CLAUDE.md, not ignored.
+- **OC cron jobs and schedules do not migrate automatically.** → After importing, ask the user if they want to create routines for this agent using `Skills/create-routine.md` with `agent: {id}`.
+- **OC memory is not imported.** Files in `memory/` are historical and do not migrate. → If there is critical context in memory/, suggest creating a note in `vault/Notes/` with the relevant content.
+- **OC skills must be recreated** as vault skills in `Skills/{name}.md`. → List the skills this agent used in OC and ask if the user wants to recreate any of them.
+- **The `source_workspace` field in agent.md** preserves the reference to the original OC workspace for future consultation of the detailed instruction files.

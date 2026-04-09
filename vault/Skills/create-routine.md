@@ -1,261 +1,261 @@
 ---
-title: Criar ou Revisar Rotina
-description: Skill para criar rotinas agendadas ou revisar rotinas existentes. Analisa proativamente se o caso do usuario funcionaria melhor como pipeline paralela.
+title: Create or Review Routine
+description: Skill for creating scheduled routines or reviewing existing ones. Proactively analyzes whether the user's use case would work better as a parallel pipeline.
 type: skill
 created: 2026-04-07
 updated: 2026-04-09
-trigger: "quando o usuario quiser criar, revisar, melhorar ou otimizar uma rotina, agendar uma tarefa recorrente, ou usar /routine"
+trigger: "when the user wants to create, review, improve, or optimize a routine, schedule a recurring task, or use /routine"
 tags: [skill, routine, automation, review]
 ---
 
-# Criar ou Revisar Rotina
+# Create or Review Routine
 
-## Modos de operacao
+## Modes of operation
 
-Esta skill opera em dois modos:
+This skill operates in two modes:
 
-1. **Criacao** — quando o usuario quer criar uma nova rotina
-2. **Revisao** — quando o usuario quer revisar, melhorar ou otimizar rotinas existentes
+1. **Creation** — when the user wants to create a new routine
+2. **Review** — when the user wants to review, improve, or optimize existing routines
 
-Detectar o modo pelo contexto da conversa. Se ambiguo, perguntar.
+Detect the mode from the conversation context. If ambiguous, ask.
 
 ---
 
-## Modo Criacao
+## Creation Mode
 
-### Passo 0 — Triagem: rotina simples ou pipeline?
+### Step 0 — Triage: simple routine or pipeline?
 
-ANTES de criar qualquer coisa, analisar o objetivo do usuario para determinar se seria melhor como rotina simples ou como pipeline multi-agente.
+BEFORE creating anything, analyze the user's goal to determine whether it would be better as a simple routine or as a multi-agent pipeline.
 
-**Sinais de que deveria ser pipeline (e nao rotina):**
+**Signals that it should be a pipeline (not a routine):**
 
-- O objetivo envolve **multiplas etapas distintas** (coletar → analisar → escrever → publicar)
-- Precisa buscar dados de **3+ fontes independentes** (APIs, sites, bancos de dados)
-- Envolve verbos como "coletar e depois analisar", "buscar de varias fontes", "produzir relatorio"
-- Tem uma etapa final de **publicacao** (Notion, Telegram, email, webhook)
-- Etapas intermediarias poderiam usar **modelos diferentes** (haiku para coleta, opus para analise)
-- O processo todo levaria **mais de 5 minutos** com um agente unico
-- Partes do trabalho sao **independentes entre si** e poderiam rodar em paralelo
+- The goal involves **multiple distinct steps** (collect → analyze → write → publish)
+- Needs to fetch data from **3+ independent sources** (APIs, websites, databases)
+- Involves verbs like "collect and then analyze", "fetch from multiple sources", "produce a report"
+- Has a final **publication step** (Notion, Telegram, email, webhook)
+- Intermediate steps could use **different models** (haiku for collection, opus for analysis)
+- The whole process would take **more than 5 minutes** with a single agent
+- Parts of the work are **independent of each other** and could run in parallel
 
-**Se detectar 2+ sinais de pipeline:**
+**If 2+ pipeline signals are detected:**
 
-Sugerir proativamente ao usuario:
+Proactively suggest to the user:
 
-> "Pelo que voce descreveu, isso funcionaria melhor como **pipeline** em vez de rotina simples. Pipelines permitem:
-> - Quebrar em X steps paralelos (coleta mais rapida)
-> - Usar modelos diferentes por etapa (haiku para coleta, opus para analise)
-> - Retry automatico por step se uma fonte falhar
+> "Based on what you described, this would work better as a **pipeline** instead of a simple routine. Pipelines allow:
+> - Breaking into X parallel steps (faster collection)
+> - Using different models per step (haiku for collection, opus for analysis)
+> - Automatic retry per step if a source fails
 >
-> Posso criar como pipeline? Ou prefere uma rotina simples mesmo?"
+> Should I create it as a pipeline? Or do you prefer a simple routine?"
 
-Se o usuario aceitar → ler e seguir a skill `Skills/create-pipeline.md` para o restante do fluxo.
-Se preferir rotina simples → continuar com os passos abaixo.
+If the user accepts → read and follow the `Skills/create-pipeline.md` skill for the rest of the flow.
+If they prefer a simple routine → continue with the steps below.
 
-**Exemplos de triagem:**
+**Triage examples:**
 
-| Objetivo do usuario | Recomendacao | Motivo |
-|---------------------|--------------|--------|
-| "Me lembre de beber agua as 10h" | Rotina simples | Tarefa unica, sem etapas |
-| "Relatorio diario do mercado cripto" | Pipeline | Coleta + analise + escrita + publicacao |
-| "Resumo dos meus emails toda manha" | Rotina simples | Uma tarefa, uma fonte |
-| "Comparar precos em 5 sites e gerar relatorio" | Pipeline | 5 fontes paralelas + analise |
-| "Backup do journal todo domingo" | Rotina simples | Uma tarefa mecanica |
-| "Newsletter semanal com pesquisa e redacao" | Pipeline | Pesquisa + redacao + revisao + envio |
+| User's goal | Recommendation | Reason |
+|-------------|----------------|--------|
+| "Remind me to drink water at 10am" | Simple routine | Single task, no steps |
+| "Daily crypto market report" | Pipeline | Collection + analysis + writing + publishing |
+| "Summary of my emails every morning" | Simple routine | One task, one source |
+| "Compare prices across 5 sites and generate a report" | Pipeline | 5 parallel sources + analysis |
+| "Journal backup every Sunday" | Simple routine | One mechanical task |
+| "Weekly newsletter with research and writing" | Pipeline | Research + writing + review + send |
 
-### Passo 1 — Perguntar o objetivo
+### Step 1 — Ask for the goal
 
-O que a rotina deve fazer? Pedir descricao clara do prompt.
+What should the routine do? Ask for a clear description of the prompt.
 
-#### Orientacao de prompt engineering
+#### Prompt engineering guidance
 
-Ajudar o usuario a formular um prompt eficaz. Se o prompt fornecido for vago, sugerir melhorias antes de prosseguir.
+Help the user formulate an effective prompt. If the provided prompt is vague, suggest improvements before proceeding.
 
-**Bons prompts para rotinas:**
+**Good prompts for routines:**
 
-| Exemplo | Por que funciona |
-|---------|-----------------|
-| "Liste os 5 principais topicos do Hacker News com links. Formato: bullet list com titulo + URL. Se a API falhar, responda 'HN indisponivel — tentarei na proxima execucao'." | Formato de output claro, instrucao de fallback, escopo definido |
-| "Verifique se ha commits novos no repo X desde ontem. Se houver, resuma as mudancas em 3 bullets. Se nao houver, responda NO_REPLY." | Condicional explicito, usa NO_REPLY para silencio, escopo temporal claro |
-| "Leia o journal de ontem e gere 3 perguntas de reflexao baseadas nas decisoes tomadas. Formato: lista numerada." | Fonte de dados especifica, output estruturado, quantidade definida |
+| Example | Why it works |
+|---------|-------------|
+| "List the top 5 Hacker News topics with links. Format: bullet list with title + URL. If the API fails, respond 'HN unavailable — will retry next run'." | Clear output format, fallback instruction, defined scope |
+| "Check if there are new commits in repo X since yesterday. If so, summarize the changes in 3 bullets. If not, respond NO_REPLY." | Explicit conditional, uses NO_REPLY for silence, clear time scope |
+| "Read yesterday's journal and generate 3 reflection questions based on the decisions made. Format: numbered list." | Specific data source, structured output, defined quantity |
 
-**Prompts problematicos (e como melhorar):**
+**Problematic prompts (and how to improve them):**
 
-| Prompt ruim | Problema | Versao melhorada |
-|-------------|----------|-----------------|
-| "Analise o mercado cripto" | Vago — qual aspecto? Qual output? | "Liste top 5 cryptos por market cap com variacao 24h. Formato: tabela markdown." |
-| "Me atualize sobre noticias" | Sem fonte, sem formato, sem escopo | "Resuma as 3 noticias mais relevantes de tech do TechCrunch hoje. Formato: titulo + 1 frase cada." |
-| "Faca um backup" | Backup de que? Para onde? | "Copie o conteudo de Journal/YYYY-MM-DD.md para Notes/backups/journal-YYYY-MM-DD.md" |
+| Bad prompt | Problem | Improved version |
+|------------|---------|-----------------|
+| "Analyze the crypto market" | Vague — which aspect? What output? | "List the top 5 cryptos by market cap with 24h change. Format: markdown table." |
+| "Update me on the news" | No source, no format, no scope | "Summarize the 3 most relevant tech news from TechCrunch today. Format: title + 1 sentence each." |
+| "Do a backup" | Backup of what? To where? | "Copy the content of Journal/YYYY-MM-DD.md to Notes/backups/journal-YYYY-MM-DD.md" |
 
-**Checklist de um bom prompt de rotina:**
-- [ ] Escopo claro (o que fazer, de onde, ate onde)
-- [ ] Formato de output definido (bullets, tabela, texto corrido)
-- [ ] Instrucao de fallback (o que fazer se algo falhar)
-- [ ] Quantidade/limite quando aplicavel (top 5, ultimos 3 dias)
+**Good routine prompt checklist:**
+- [ ] Clear scope (what to do, from where, up to what)
+- [ ] Defined output format (bullets, table, plain text)
+- [ ] Fallback instruction (what to do if something fails)
+- [ ] Quantity/limit when applicable (top 5, last 3 days)
 
-### Passo 2 — Perguntar horarios
+### Step 2 — Ask for schedules
 
-Em quais horarios deve rodar? Formato HH:MM (24h). Pode ser multiplos: "09:00 e 18:00".
+At what times should it run? Format HH:MM (24h). Can be multiple: "09:00 and 18:00".
 
-### Passo 3 — Perguntar dias da semana
+### Step 3 — Ask for days of the week
 
-Em quais dias? Opcoes:
-- Dias uteis (mon, tue, wed, thu, fri)
-- Todos os dias (*)
-- Dias especificos (ex: mon, wed, fri)
-- Fim de semana (sat, sun)
+On which days? Options:
+- Weekdays (mon, tue, wed, thu, fri)
+- Every day (*)
+- Specific days (e.g.: mon, wed, fri)
+- Weekend (sat, sun)
 
-### Passo 4 — Perguntar modelo
+### Step 4 — Ask for model
 
-Qual modelo usar? Sugerir com base no tipo de tarefa:
+Which model to use? Suggest based on the task type:
 
-| Tipo de tarefa | Modelo recomendado | Motivo |
-|----------------|-------------------|--------|
-| Lembrete, notificacao, backup, checagem simples | `haiku` | Rapido e barato — nao precisa de raciocinio profundo |
-| Resumo, formatacao, coleta de dados, listagem | `sonnet` | Equilibrio entre qualidade e custo — default seguro |
-| Analise profunda, escrita criativa, decisao complexa, sintese multi-fonte | `opus` | Melhor raciocinio e qualidade de output |
+| Task type | Recommended model | Reason |
+|-----------|------------------|--------|
+| Reminder, notification, backup, simple check | `haiku` | Fast and cheap — no deep reasoning needed |
+| Summary, formatting, data collection, listing | `sonnet` | Balance between quality and cost — safe default |
+| Deep analysis, creative writing, complex decision, multi-source synthesis | `opus` | Best reasoning and output quality |
 
-Se o usuario nao souber, usar `sonnet` como default.
+If the user doesn't know, use `sonnet` as default.
 
-### Passo 4.5 — Campos opcionais
+### Step 4.5 — Optional fields
 
-Perguntar se o usuario precisa de algum destes campos adicionais:
+Ask if the user needs any of these additional fields:
 
-**`context: minimal`** — Pula o system prompt do vault (Journal, Tooling, etc.). A rotina roda apenas com os CLAUDE.md da hierarquia. Usar quando:
-- A rotina NAO precisa ler o vault (ex: buscar dados externos, gerar lembretes fixos)
-- Economia de tokens e velocidade sao prioridade
-- O prompt eh autocontido e nao depende de contexto do vault
+**`context: minimal`** — Skips the vault system prompt (Journal, Tooling, etc.). The routine runs only with the CLAUDE.md files in the hierarchy. Use when:
+- The routine does NOT need to read the vault (e.g.: fetching external data, generating fixed reminders)
+- Token savings and speed are a priority
+- The prompt is self-contained and does not depend on vault context
 
-**`voice: true`** — Alem da mensagem de texto, envia a resposta como audio TTS no Telegram. Usar quando:
-- O usuario consome rotinas em movimento (ex: briefing matinal, resumo de noticias)
-- O conteudo eh curto e faz sentido ouvir (nao tabelas ou listas longas)
+**`voice: true`** — In addition to the text message, sends the response as TTS audio on Telegram. Use when:
+- The user consumes routines on the go (e.g.: morning briefing, news summary)
+- The content is short and makes sense to listen to (not tables or long lists)
 
-**`agent: {id}`** — Roteia a execucao para o workspace de um agente especifico. Usar quando:
-- A rotina pertence ao dominio de um agente existente (ex: agente de financas para rotina de mercado)
-- O prompt depende do CLAUDE.md ou contexto do agente
-- O agente tem ferramentas ou instrucoes especificas necessarias para a tarefa
+**`agent: {id}`** — Routes execution to a specific agent's workspace. Use when:
+- The routine belongs to an existing agent's domain (e.g.: finance agent for a market routine)
+- The prompt depends on the agent's CLAUDE.md or context
+- The agent has specific tools or instructions required for the task
 
-Se nenhum campo opcional for necessario, seguir em frente sem adiciona-los.
+If no optional fields are needed, move forward without adding them.
 
-### Passo 5 — Perguntar data limite
+### Step 5 — Ask for end date
 
-Ate quando a rotina deve rodar? Formato YYYY-MM-DD. Opcional (sem limite se omitido).
+Until when should the routine run? Format YYYY-MM-DD. Optional (no limit if omitted).
 
-### Passo 6 — Gerar nome do arquivo
+### Step 6 — Generate file name
 
-Converter o objetivo em kebab-case para o nome do arquivo. Ex: "relatorio matinal cripto" → `relatorio-matinal-cripto.md`
+Convert the goal to kebab-case for the filename. E.g.: "morning crypto report" → `morning-crypto-report.md`
 
-### Passo 7 — Criar o arquivo
+### Step 7 — Create the file
 
-Gerar em `vault/Routines/{nome}.md` com o seguinte formato:
+Generate at `vault/Routines/{name}.md` with the following format:
 
 ```yaml
 ---
-title: {titulo descritivo}
-description: {frase curta sobre o que a rotina faz e quando roda}
+title: {descriptive title}
+description: {short sentence about what the routine does and when it runs}
 type: routine
 created: {YYYY-MM-DD}
 updated: {YYYY-MM-DD}
-tags: [routine, {categorias relevantes}]
+tags: [routine, {relevant categories}]
 schedule:
   times: ["{HH:MM}", "{HH:MM}"]
-  days: [{dias}]
+  days: [{days}]
   until: "{YYYY-MM-DD}"
-model: {modelo}
+model: {model}
 enabled: true
 ---
 
 [[Routines]]
 
-{Prompt completo que sera enviado ao Claude Code}
+{Full prompt to be sent to Claude Code}
 ```
 
-A primeira linha do body DEVE ser `[[Routines]]` (link para o index pai).
+The first line of the body MUST be `[[Routines]]` (link to the parent index).
 
-### Passo 8 — Atualizar o index
+### Step 8 — Update the index
 
-Editar `vault/Routines/Routines.md` e adicionar o novo arquivo na lista de rotinas ativas: `- [[{nome}]] — descricao curta`
+Edit `vault/Routines/Routines.md` and add the new file to the active routines list: `- [[{name}]] — short description`
 
-### Passo 9 — Registrar no Journal
+### Step 9 — Record in the Journal
 
-Appendar no journal do dia:
+Append to the day's journal:
 ```
-## HH:MM — Nova rotina criada
+## HH:MM — New routine created
 
-- Criada rotina {nome-da-rotina}
-- Horarios: {horarios}
-- Dias: {dias}
-- Modelo: {modelo}
+- Created routine {routine-name}
+- Times: {times}
+- Days: {days}
+- Model: {model}
 
 ---
 ```
 
-### Passo 10 — Confirmar
+### Step 10 — Confirm
 
-Informar ao usuario que a rotina foi criada e quando sera a proxima execucao.
-
----
-
-## Modo Revisao
-
-Acionado quando o usuario pede para revisar, melhorar ou otimizar rotinas existentes.
-
-### Passo 1 — Identificar escopo
-
-- Se o usuario mencionou uma rotina especifica → revisar apenas essa
-- Se pediu revisao geral → listar todas as rotinas em `vault/Routines/` e analisar cada uma
-
-### Passo 2 — Analisar cada rotina
-
-Para cada rotina com `type: routine`, ler o arquivo completo e avaliar:
-
-**Checklist de revisao:**
-
-1. **Deveria ser pipeline?** — O prompt faz multiplas tarefas sequenciais? Busca dados de varias fontes? Tem etapas que poderiam rodar em paralelo? Se sim, sugerir conversao para pipeline.
-
-2. **Modelo adequado?** — Tarefas simples (lembrete, backup, notificacao) deveriam usar `haiku`. Tarefas de analise/escrita deveriam usar `opus` ou `sonnet`. O modelo esta superestimado ou subestimado?
-
-3. **Contexto adequado?** — Rotinas que nao precisam ler o vault inteiro deveriam usar `context: minimal` para economizar tokens e rodar mais rapido.
-
-4. **Prompt claro?** — O prompt e especifico o suficiente? Tem instrucoes ambiguas? Faltam instrucoes de output?
-
-5. **Schedule adequado?** — O horario e a frequencia fazem sentido para o objetivo?
-
-6. **Execucoes recentes** — Ler `~/.claude-bot/routines-state/` e localizar o JSON do dia atual (formato `YYYY-MM-DD.json`). Verificar:
-   - A rotina esta executando com sucesso ou falhando?
-   - Se falhando: qual o erro? Ha quanto tempo falha consecutivamente?
-   - O tempo de execucao esta dentro do esperado ou estourando timeout?
-   - Se a rotina nao aparece no state file, pode nunca ter executado (schedule errado? `enabled: false`?)
-
-### Passo 3 — Apresentar recomendacoes
-
-Para cada rotina analisada, apresentar:
-```
-### {nome-da-rotina}
-Status: ✅ OK / ⚠️ Melhorias sugeridas
-
-- [melhoria 1]: motivo e beneficio
-- [melhoria 2]: motivo e beneficio
-```
-
-### Passo 4 — Executar melhorias aprovadas
-
-Perguntar quais melhorias o usuario quer aplicar. Para cada aprovada:
-
-- Se for conversao para pipeline → ler e seguir a skill `Skills/create-pipeline.md`
-- Se for mudanca de modelo/contexto/schedule → editar o arquivo diretamente
-- Se for melhoria de prompt → reescrever o prompt e mostrar diff ao usuario
-
-### Passo 5 — Registrar no Journal
-
-Appendar no journal do dia com as mudancas aplicadas.
+Inform the user that the routine was created and when the next execution will be.
 
 ---
 
-## Notas
+## Review Mode
 
-- O prompt da rotina pode referenciar skills pelo nome
-- O prompt pode incluir instrucoes para consultar Tooling e .env
-- Rotinas podem ser desabilitadas mudando `enabled: false` no frontmatter
-- O scheduler do bot verifica rotinas a cada 60 segundos
-- Rotinas que falham aparecem com icone vermelho no menu bar
-- **Se o usuario quiser uma rotina com multiplos passos/agentes/steps, usar a skill `Skills/create-pipeline.md` em vez desta.** Pipelines tem `type: pipeline` e permitem orquestrar multiplos sub-agentes com dependencias, paralelismo e modelos diferentes por step.
+Triggered when the user asks to review, improve, or optimize existing routines.
+
+### Step 1 — Identify scope
+
+- If the user mentioned a specific routine → review only that one
+- If they asked for a general review → list all routines in `vault/Routines/` and analyze each one
+
+### Step 2 — Analyze each routine
+
+For each routine with `type: routine`, read the full file and evaluate:
+
+**Review checklist:**
+
+1. **Should it be a pipeline?** — Does the prompt perform multiple sequential tasks? Does it fetch data from multiple sources? Are there steps that could run in parallel? If so, suggest conversion to pipeline.
+
+2. **Appropriate model?** — Simple tasks (reminder, backup, notification) should use `haiku`. Analysis/writing tasks should use `opus` or `sonnet`. Is the model over- or under-estimated?
+
+3. **Appropriate context?** — Routines that don't need to read the entire vault should use `context: minimal` to save tokens and run faster.
+
+4. **Clear prompt?** — Is the prompt specific enough? Are there ambiguous instructions? Missing output instructions?
+
+5. **Appropriate schedule?** — Do the time and frequency make sense for the goal?
+
+6. **Recent executions** — Read `~/.claude-bot/routines-state/` and locate the JSON for the current day (format `YYYY-MM-DD.json`). Check:
+   - Is the routine executing successfully or failing?
+   - If failing: what is the error? How long has it been failing consecutively?
+   - Is the execution time within the expected range or hitting the timeout?
+   - If the routine doesn't appear in the state file, it may have never executed (wrong schedule? `enabled: false`?)
+
+### Step 3 — Present recommendations
+
+For each analyzed routine, present:
+```
+### {routine-name}
+Status: ✅ OK / ⚠️ Improvements suggested
+
+- [improvement 1]: reason and benefit
+- [improvement 2]: reason and benefit
+```
+
+### Step 4 — Execute approved improvements
+
+Ask which improvements the user wants to apply. For each approved one:
+
+- If it's a conversion to pipeline → read and follow the `Skills/create-pipeline.md` skill
+- If it's a model/context/schedule change → edit the file directly
+- If it's a prompt improvement → rewrite the prompt and show the diff to the user
+
+### Step 5 — Record in the Journal
+
+Append to the day's journal with the applied changes.
+
+---
+
+## Notes
+
+- The routine prompt can reference skills by name
+- The prompt can include instructions to consult Tooling and .env
+- Routines can be disabled by changing `enabled: false` in the frontmatter
+- The bot's scheduler checks routines every 60 seconds
+- Routines that fail appear with a red icon in the menu bar
+- **If the user wants a routine with multiple steps/agents/steps, use the `Skills/create-pipeline.md` skill instead of this one.** Pipelines have `type: pipeline` and allow orchestrating multiple sub-agents with dependencies, parallelism, and different models per step.

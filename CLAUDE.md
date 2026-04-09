@@ -1,6 +1,6 @@
 # Claude Bot — Development Guide
 
-**IMPORTANTE:** Este eh o CLAUDE.md de DESENVOLVIMENTO do projeto claude-bot. Ele contem instrucoes para quem esta trabalhando no codigo do bot (Python, Swift, shell scripts). Para a knowledge base operacional do bot (vault, rotinas, agentes, journal), ver `vault/CLAUDE.md`.
+**IMPORTANT:** This is the DEVELOPMENT CLAUDE.md for the claude-bot project. It contains instructions for working on the bot's code (Python, Swift, shell scripts). For the bot's operational knowledge base (vault, routines, agents, journal), see `vault/CLAUDE.md`.
 
 ## Overview
 
@@ -28,9 +28,9 @@ All runtime data is stored in `~/.claude-bot/`:
 - `sessions.json` — Session persistence (names, IDs, models, agents, message counts)
 - `bot.log` — Application log (rotating, 5MB × 3 backups)
 - `launchd-stdout.log` / `launchd-stderr.log` — Process output
-- `routines-state/YYYY-MM-DD.json` — Estado diario de execucao de rotinas
+- `routines-state/YYYY-MM-DD.json` — Daily routine execution state
 
-Quando precisar diagnosticar problemas do bot, ler `~/.claude-bot/bot.log` (ultimas ~50 linhas).
+When diagnosing bot issues, read `~/.claude-bot/bot.log` (last ~50 lines).
 
 ### Key Classes
 
@@ -51,19 +51,19 @@ runner.run(
 )
 ```
 
-O `ClaudeRunner` monta o comando com `--print --dangerously-skip-permissions --output-format stream-json`. O `--append-system-prompt` instrui o Claude a ler o vault (Journal, Tooling, etc.) — pode ser omitido via `system_prompt=None` quando a rotina usa `context: minimal`.
+The `ClaudeRunner` builds the command with `--print --dangerously-skip-permissions --output-format stream-json`. The `--append-system-prompt` instructs Claude to read the vault (Journal, Tooling, etc.) — it can be omitted via `system_prompt=None` when the routine uses `context: minimal`.
 
-**Workspace padrao:** `vault/` — o bot opera dentro do vault por padrao. Agentes mudam o cwd para `vault/Agents/{id}/`. O Claude CLI carrega CLAUDE.md walking up da hierarquia, entao:
-- Sessao normal: `vault/CLAUDE.md` (primario) + este arquivo (pai)
-- Agente ativo: `Agents/{id}/CLAUDE.md` + `vault/CLAUDE.md` + este arquivo
+**Default workspace:** `vault/` — the bot operates inside the vault by default. Agents change the cwd to `vault/Agents/{id}/`. Claude CLI loads CLAUDE.md walking up the hierarchy, so:
+- Normal session: `vault/CLAUDE.md` (primary) + this file (parent)
+- Active agent: `Agents/{id}/CLAUDE.md` + `vault/CLAUDE.md` + this file
 
 ## Configuration
 
-Este projeto usa **dois arquivos `.env` com propositos distintos** — nao os confunda:
+This project uses **two `.env` files with distinct purposes** — don't confuse them:
 
-### `~/claude-bot/.env` — Config operacional do bot
+### `~/claude-bot/.env` — Bot operational config
 
-Lido pelo `claude-fallback-bot.py` na inicializacao e pelo ClaudeBotManager (app macOS). Contem credenciais e caminhos necessarios para o bot funcionar:
+Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager (macOS app). Contains credentials and paths needed for the bot to run:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -72,19 +72,19 @@ Lido pelo `claude-fallback-bot.py` na inicializacao e pelo ClaudeBotManager (app
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI binary |
 | `CLAUDE_WORKSPACE` | No | `vault/` | Working directory for Claude sessions |
 
-**Editado via:** ClaudeBotManager → Settings, ou diretamente no arquivo.
+**Edited via:** ClaudeBotManager → Settings, or directly in the file.
 
-### `vault/.env` — API keys para tarefas do vault
+### `vault/.env` — API keys for vault tasks
 
-Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sessoes interativas). Contem chaves para servicos externos que o Claude pode precisar acessar:
+Read by Claude Code when executing tasks in the vault context (routines, interactive sessions). Contains keys for external services that Claude may need to access:
 
 - `NOTION_API_KEY` — Notion integration
 - `FIGMA_TOKEN` — Figma MCP
-- Outras chaves de APIs externas conforme necessario
+- Other external API keys as needed
 
-**Nao contem** credenciais do Telegram nem caminhos do bot.
+**Does not contain** Telegram credentials or bot paths.
 
-**Por que separados?** `vault/` pode ser sincronizado (iCloud, Git) — misturar tokens do Telegram com API keys de terceiros seria risco de seguranca desnecessario. O bot ops config fica local; as keys de workspace ficam no vault.
+**Why separate?** `vault/` can be synced (iCloud, Git) — mixing Telegram tokens with third-party API keys would be an unnecessary security risk. Bot ops config stays local; workspace keys stay in the vault.
 
 ## Bot Commands
 
@@ -122,16 +122,16 @@ Lido pelo Claude Code quando executa tarefas no contexto do vault (rotinas, sess
 - The bot validates `AUTHORIZED_CHAT_ID` on every incoming message — unauthorized messages are silently ignored.
 - Plist files use `__HOME__` and `__SCRIPT_DIR__` placeholders — the install script (`claude-bot.sh`) substitutes them via `sed`.
 
-### Tratamento de erros — zero erros silenciosos
+### Error handling — zero silent errors
 
-Ao encontrar um erro, **nunca trate como caso pontual**. Seguir este fluxo obrigatório:
+When encountering an error, **never treat it as a one-off**. Follow this mandatory flow:
 
-1. **Investigar a causa raiz** — não corrigir apenas o sintoma. Rastrear o caminho do erro até a origem real (dado inválido, estado inconsistente, race condition, etc.)
-2. **Corrigir a causa raiz** — a fix deve eliminar a classe de erro, não apenas a instância observada
-3. **Adicionar proteção estrutural** — implementar validação, guard clause, ou check que previna a recorrência. Se o erro pode voltar por fatores externos (API fora, arquivo ausente, etc.), adicionar tratamento resiliente
-4. **Garantir visibilidade** — todo erro que não puder ser prevenido DEVE notificar o usuário (via Telegram, log, ou ambos). Nenhum `except: pass`, nenhum `try/except` que engole o erro silenciosamente. Se capturar uma exceção, no mínimo logar com `logging.error()` e notificar no Telegram quando possível
+1. **Investigate the root cause** — don't fix just the symptom. Trace the error path to the real origin (invalid data, inconsistent state, race condition, etc.)
+2. **Fix the root cause** — the fix must eliminate the class of error, not just the observed instance
+3. **Add structural protection** — implement validation, guard clause, or check to prevent recurrence. If the error can return due to external factors (API down, missing file, etc.), add resilient handling
+4. **Ensure visibility** — every error that cannot be prevented MUST notify the user (via Telegram, log, or both). No `except: pass`, no `try/except` that swallows errors silently. If catching an exception, at minimum log with `logging.error()` and notify on Telegram when possible
 
-**Princípio:** O usuário deve saber quando algo deu errado — mesmo que o bot se recupere automaticamente. Erros silenciosos acumulam e geram problemas maiores depois.
+**Principle:** The user must know when something went wrong — even if the bot recovers automatically. Silent errors accumulate and create bigger problems later.
 
 ## Common Tasks
 
@@ -149,232 +149,232 @@ Edit the constants at the top of `claude-fallback-bot.py`:
 - `STREAM_EDIT_INTERVAL` — seconds between Telegram message edits
 - `TYPING_INTERVAL` — seconds between typing indicators
 
-## Versionamento e Commits
+## Versioning and Commits
 
 ### Semantic Versioning
 
-O projeto segue **[Semantic Versioning 2.0.0](https://semver.org/)** (MAJOR.MINOR.PATCH). A versão vive em dois lugares — **sempre atualizar os dois juntos**:
+The project follows **[Semantic Versioning 2.0.0](https://semver.org/)** (MAJOR.MINOR.PATCH). The version lives in two places — **always update both together**:
 
-1. `claude-fallback-bot.py`, linha `BOT_VERSION = "X.Y.Z"` — com comentário descritivo da mudança
-2. `ClaudeBotManager/Sources/App/Info.plist`, campo `CFBundleShortVersionString`
+1. `claude-fallback-bot.py`, line `BOT_VERSION = "X.Y.Z"` — with a descriptive comment of the change
+2. `ClaudeBotManager/Sources/App/Info.plist`, field `CFBundleShortVersionString`
 
-### Quando bumpar (regra de ouro)
+### When to bump (golden rule)
 
-**Toda mudança que afeta o comportamento do bot em runtime DEVE bumpar a versão.** Isso inclui bug fixes, novos comandos, mudanças de prompt, alterações de constantes, e refactoring que muda comportamento. A versão é o que identifica o que está rodando — sem bump, não há como distinguir builds.
+**Every change that affects bot runtime behavior MUST bump the version.** This includes bug fixes, new commands, prompt changes, constant changes, and refactoring that changes behavior. The version identifies what's running — without a bump, there's no way to distinguish builds.
 
-**NÃO bumpar** para mudanças puramente documentais (CLAUDE.md, README, comentários no código) ou arquivos do vault (skills, rotinas, journal) que não alteram o código do bot.
+**DO NOT bump** for purely documentation changes (CLAUDE.md, README, code comments) or vault files (skills, routines, journal) that don't alter bot code.
 
-### Como decidir o tipo de bump
+### How to decide the bump type
 
-| Tipo | Quando usar | Exemplos |
+| Type | When to use | Examples |
 |------|------------|----------|
-| **PATCH** (+0.0.1) | Bug fix, ajuste de comportamento existente, mudança de configuração/constante, ajuste de prompt | fix: corrige timeout, ajusta `STREAM_EDIT_INTERVAL` |
-| **MINOR** (+0.1.0) | Nova funcionalidade, novo comando, mudança de comportamento visível ao usuário, refactoring estrutural | feat: adiciona `/voice`, novo handler de inline keyboard |
-| **MAJOR** (+1.0.0) | Breaking change — altera formato de `sessions.json`, muda API de comandos existentes de forma incompatível, redesign de arquitetura | redesign do SessionManager, migração de formato de dados |
+| **PATCH** (+0.0.1) | Bug fix, behavior adjustment, config/constant change, prompt tweak | fix: timeout correction, adjust `STREAM_EDIT_INTERVAL` |
+| **MINOR** (+0.1.0) | New feature, new command, user-visible behavior change, structural refactoring | feat: add `/voice`, new inline keyboard handler |
+| **MAJOR** (+1.0.0) | Breaking change — alters `sessions.json` format, changes existing command API incompatibly, architecture redesign | SessionManager redesign, data format migration |
 
-**Dica prática:** Se em dúvida entre PATCH e MINOR, pergunte: "o usuário vai notar a diferença?" Se sim → MINOR. Se não → PATCH.
+**Practical tip:** If in doubt between PATCH and MINOR, ask: "will the user notice the difference?" If yes → MINOR. If no → PATCH.
 
-### Version bump proativo
+### Proactive version bump
 
-**Bumpar a versão NO MESMO commit da mudança** — nunca em commit separado. O bump faz parte da mudança, não é uma tarefa à parte.
+**Bump the version IN THE SAME commit as the change** — never in a separate commit. The bump is part of the change, not a separate task.
 
-Sequência obrigatória para mudanças em `claude-fallback-bot.py`:
+Mandatory sequence for changes to `claude-fallback-bot.py`:
 ```bash
-# 1. Fazer a mudança no código
-# 2. Bumpar versão nos dois arquivos (mesmo commit)
-# 3. Verificar sintaxe
+# 1. Make the code change
+# 2. Bump version in both files (same commit)
+# 3. Verify syntax
 python3 -m py_compile claude-fallback-bot.py
-# 4. Commitar tudo junto
+# 4. Commit everything together
 git add claude-fallback-bot.py ClaudeBotManager/Sources/App/Info.plist
-git commit -m "feat: adiciona comando /foo"
+git commit -m "feat: add /foo command"
 ```
 
 ### Conventional Commits
 
-Seguir **[Conventional Commits](https://www.conventionalcommits.org/)** para mensagens de commit:
+Follow **[Conventional Commits](https://www.conventionalcommits.org/)** for commit messages:
 
-| Prefixo | Uso | Bump implícito |
-|---------|-----|----------------|
-| `feat:` | Nova funcionalidade | MINOR |
-| `fix:` | Correção de bug | PATCH |
-| `refactor:` | Mudança de código sem alterar comportamento externo | PATCH (se runtime) ou nenhum |
-| `docs:` | Apenas documentação | nenhum |
-| `chore:` | Manutenção, tooling, configs sem impacto em runtime | nenhum |
+| Prefix | Use | Implied bump |
+|--------|-----|--------------|
+| `feat:` | New feature | MINOR |
+| `fix:` | Bug fix | PATCH |
+| `refactor:` | Code change without external behavior change | PATCH (if runtime) or none |
+| `docs:` | Documentation only | none |
+| `chore:` | Maintenance, tooling, configs without runtime impact | none |
 
-O prefixo do commit **implica** o tipo de bump — `feat:` → MINOR, `fix:` → PATCH. Não usar `chore: bump version` como commit isolado.
+The commit prefix **implies** the bump type — `feat:` → MINOR, `fix:` → PATCH. Don't use `chore: bump version` as a standalone commit.
 
-### Quando commitar
+### When to commit
 
-**Commitar proativamente** após cada mudança coerente — não acumular alterações não relacionadas num commit só.
+**Commit proactively** after each coherent change — don't accumulate unrelated changes in a single commit.
 
-Fazer commit imediatamente após:
-- Qualquer mudança em `claude-fallback-bot.py` (com version bump)
-- Criação ou edição de skill, rotina, ou agent no vault
-- Mudança em CLAUDE.md (raiz ou vault)
-- Mudança em configuração (`.env`, plist, `settings.local.json`)
+Commit immediately after:
+- Any change to `claude-fallback-bot.py` (with version bump)
+- Creating or editing a skill, routine, or agent in the vault
+- Changes to CLAUDE.md (root or vault)
+- Changes to configuration (`.env`, plist, `settings.local.json`)
 
 ## Routines
 
 ### Frontmatter fields
 
-| Campo | Tipo | Default | Descricao |
-|-------|------|---------|-----------|
-| `type` | string | `routine` | `routine` ou `pipeline` |
-| `schedule.times` | list | — | Horarios HH:MM (24h) |
-| `schedule.days` | list | `["*"]` | Dias da semana ou `["*"]` para todos |
-| `schedule.until` | string | — | Data limite YYYY-MM-DD (opcional) |
-| `model` | string | `sonnet` | Modelo a usar |
-| `agent` | string | — | Agente para rotear a execucao |
-| `enabled` | bool | `true` | Ativa/desativa a rotina |
-| `context` | string | `full` | `minimal` = pula system prompt do vault, usa apenas CLAUDE.md |
-| `voice` | bool | `false` | Envia resposta tambem como audio (TTS) |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | string | `routine` | `routine` or `pipeline` |
+| `schedule.times` | list | — | Times HH:MM (24h) |
+| `schedule.days` | list | `["*"]` | Weekdays or `["*"]` for all |
+| `schedule.until` | string | — | End date YYYY-MM-DD (optional) |
+| `model` | string | `sonnet` | Model to use |
+| `agent` | string | — | Agent to route execution to |
+| `enabled` | bool | `true` | Enable/disable the routine |
+| `context` | string | `full` | `minimal` = skip vault system prompt, use only CLAUDE.md |
+| `voice` | bool | `false` | Also send response as audio (TTS) |
 | `notify` | string | `final` | Pipeline only: `final\|all\|summary\|none` |
 
-### Contexto minimal vs full
+### Minimal vs full context
 
-- **`full`** (default): O Claude recebe o `SYSTEM_PROMPT` que instrui a ler Journal, Tooling, vault. Bom para rotinas que precisam de contexto do vault.
-- **`minimal`**: O `--append-system-prompt` eh omitido. O Claude roda apenas com os CLAUDE.md da hierarquia de diretorios (automatico pelo CLI). Economiza tokens e eh mais rapido para tarefas pontuais.
+- **`full`** (default): Claude receives the `SYSTEM_PROMPT` that instructs it to read Journal, Tooling, vault. Good for routines that need vault context.
+- **`minimal`**: The `--append-system-prompt` is omitted. Claude runs only with the CLAUDE.md files from the directory hierarchy (automatic by CLI). Saves tokens and is faster for one-off tasks.
 
 ### Pipeline notifications
 
-Pipelines notificam via `_notify_success` / `_notify_failure`. O step marcado com `output: telegram` tem seu output (conteudo do arquivo `data/{id}.md`) enviado ao Telegram. Se o step ja envia ao Telegram via API propria (ex: publisher), usar `output: none` para evitar duplicacao. O campo `notify` controla:
-- `final` — envia output do step marcado (ou ultimo step) ao completar
-- `all` — envia progresso a cada step completado
-- `summary` — envia resumo compacto (X/Y steps in Nm Ns)
-- `none` — silencioso (falhas sempre notificam)
+Pipelines notify via `_notify_success` / `_notify_failure`. The step marked with `output: telegram` has its output (content of the `data/{id}.md` file) sent to Telegram. If the step already sends to Telegram via its own API (e.g., publisher), use `output: none` to avoid duplication. The `notify` field controls:
+- `final` — sends output of the marked step (or last step) on completion
+- `all` — sends progress on each step completion
+- `summary` — sends compact summary (X/Y steps in Nm Ns)
+- `none` — silent (failures always notify)
 
-### Rotina `NO_REPLY`
+### `NO_REPLY` routine
 
-Se o output de uma rotina (nao pipeline) for exatamente `NO_REPLY`, o bot nao envia nada ao Telegram. Usado para rotinas que enviam mensagens manualmente ou que devem rodar em silencio.
+If the output of a routine (not pipeline) is exactly `NO_REPLY`, the bot sends nothing to Telegram. Used for routines that send messages manually or that should run silently.
 
-### Rotinas built-in (commitadas no repo)
+### Built-in routines (committed to repo)
 
-| Rotina | Descricao |
-|--------|-----------|
-| `update-check` | Verifica diariamente se ha updates do Claude Code CLI (brew) ou do repo (git). Notifica apenas quando ha algo para atualizar. |
-| `vault-graph-update` | Regenera o knowledge graph lightweight do vault (`vault/.graphs/graph.json`) a partir de frontmatter e wikilinks. Sem custo de LLM. Roda diariamente as 4h. |
-| `journal-sweep` | Varredura noturna (23:45) que consolida sessoes do dia que nao foram registradas no Journal. |
+| Routine | Description |
+|---------|-------------|
+| `update-check` | Checks daily for Claude Code CLI (brew) or repo (git) updates. Notifies only when there's something to update. |
+| `vault-graph-update` | Regenerates the vault's lightweight knowledge graph (`vault/.graphs/graph.json`) from frontmatter and wikilinks. No LLM cost. Runs daily at 4am. |
+| `journal-sweep` | Nightly sweep (23:45) that consolidates day's sessions not yet recorded in the Journal. |
 
 ## Voice / TTS
 
-O bot suporta respostas por voz (Text-to-Speech) via macOS `say` + ffmpeg (OGG Opus):
+The bot supports voice responses (Text-to-Speech) via macOS `say` + ffmpeg (OGG Opus):
 
-- **`/voice on`** — ativa TTS para todas as proximas mensagens da sessao (texto + audio)
-- **`/voice off`** — desativa TTS
-- **`#voice` na mensagem** — TTS one-shot (so audio, sem texto)
-- **`voice: true` no frontmatter** — rotinas/pipelines entregam resposta como audio
+- **`/voice on`** — enables TTS for all subsequent session messages (text + audio)
+- **`/voice off`** — disables TTS
+- **`#voice` in message** — one-shot TTS (audio only, no text)
+- **`voice: true` in frontmatter** — routines/pipelines deliver response as audio
 
-A voz segue o `HEAR_LOCALE` (default `pt-BR` → voz Luciana). O prompt TTS instrui o Claude a responder na lingua configurada, sem emojis, curto e conversacional. Emojis sao removidos do audio via `_strip_markdown()`.
+Voice follows the `HEAR_LOCALE` (default `pt-BR` → Luciana voice). The TTS prompt instructs Claude to respond in the configured language, without emojis, short and conversational. Emojis are removed from audio via `_strip_markdown()`.
 
-## Auto-compact e rotacao de sessoes
+## Auto-compact and session rotation
 
-- **Auto-compact**: a cada `AUTO_COMPACT_INTERVAL` (25) turns, roda `/compact` em background
-- **Auto-rotate**: apos `AUTO_ROTATE_THRESHOLD` (80) turns, reseta session_id (proxima msg inicia sessao nova)
-- Aplica apenas a sessoes interativas (rotinas usam session_id=None)
+- **Auto-compact**: every `AUTO_COMPACT_INTERVAL` (25) turns, runs `/compact` in background
+- **Auto-rotate**: after `AUTO_ROTATE_THRESHOLD` (80) turns, resets session_id (next message starts a new session)
+- Applies only to interactive sessions (routines use session_id=None)
 
 ## Watchdog
 
-`bot-watchdog.sh` roda via launchd a cada 60s (`com.vr.claude-bot-watchdog.plist`):
-- Se o bot nao esta rodando: reinicia via `launchctl start` e notifica no Telegram
-- Se o bot voltou: envia mensagem de recuperacao
-- Usa flag file (`~/.claude-bot/.watchdog-notified`) para notificar apenas uma vez por downtime
+`bot-watchdog.sh` runs via launchd every 60s (`com.vr.claude-bot-watchdog.plist`):
+- If the bot is not running: restarts via `launchctl start` and notifies on Telegram
+- If the bot came back: sends recovery message
+- Uses flag file (`~/.claude-bot/.watchdog-notified`) to notify only once per downtime
 
 ## ClaudeBotManager
 
-App macOS nativa (SwiftUI) em `ClaudeBotManager/`. Menu bar app para gerenciar o bot:
-- Dashboard com status do bot e sessoes
-- Gerenciamento de agentes, rotinas e skills (UI redesenhada v2.3)
-- Criacao e edicao de pipelines com step editor expandivel
-- Delete via Lixeira do macOS (restauravel pelo Finder)
-- Toggle de contexto minimal para rotinas
-- Edicao de settings (.env)
-- Visualizacao de logs com filtros e busca
+Native macOS app (SwiftUI) in `ClaudeBotManager/`. Menu bar app for managing the bot:
+- Dashboard with bot status and sessions
+- Agent, routine, and skill management (redesigned UI v2.3)
+- Pipeline creation and editing with expandable step editor
+- Delete via macOS Trash (recoverable from Finder)
+- Minimal context toggle for routines
+- Settings editing (.env)
+- Log viewer with filters and search
 
-### Build e deploy
+### Build and deploy
 
-O app eh distribuido como `.app` bundle (necessario para preservar permissoes macOS entre builds):
+The app is distributed as an `.app` bundle (required to preserve macOS permissions between builds):
 
 ```bash
-# Build + monta .app + reinicia — uso normal
+# Build + assemble .app + restart — normal usage
 cd ClaudeBotManager && bash build-app.sh
 ```
 
-O script `build-app.sh`:
-1. Compila com `swift build -c release` usando Xcode 26 toolchain
-2. Monta `ClaudeBotManager.app/Contents/` com o binario e `Info.plist`
-3. Assina com ad-hoc identity (`codesign --sign -`)
-4. Mata o processo anterior e abre o novo bundle
+The `build-app.sh` script:
+1. Compiles with `swift build -c release` using Xcode 26 toolchain
+2. Assembles `ClaudeBotManager.app/Contents/` with the binary and `Info.plist`
+3. Signs with ad-hoc identity (`codesign --sign -`)
+4. Kills the previous process and opens the new bundle
 
-**Por que .app bundle?** Sem bundle, o macOS nao tem identidade estavel (`Info.plist=not bound`) e pede permissoes (TCC) a cada novo build. Com o bundle, as permissoes ficam vinculadas ao `CFBundleIdentifier=com.vr.claude-bot-manager`.
+**Why .app bundle?** Without a bundle, macOS has no stable identity (`Info.plist=not bound`) and asks for permissions (TCC) on every new build. With the bundle, permissions are bound to `CFBundleIdentifier=com.vr.claude-bot-manager`.
 
-O `.app` e gerado em `ClaudeBotManager/ClaudeBotManager.app` (gitignored — artefato de build).
+The `.app` is generated at `ClaudeBotManager/ClaudeBotManager.app` (gitignored — build artifact).
 
 ### Design System (LiquidGlassTheme.swift)
 
-Componentes compartilhados:
+Shared components:
 
-| Componente | Descricao |
-|------------|-----------|
-| `GlassCard` | Container principal com `.ultraThinMaterial` + borda 0.5pt |
-| `SectionCard` | GlassCard com cabecalho (titulo + SF Symbol) |
-| `SettingRow` | Label `.callout` + controle alinhado a direita |
-| `ModelBadge` | Badge colorido por modelo (opus=purple, haiku=green, outros=blue) |
-| `StatusDot` | Circulo com pulse animation quando `isRunning` |
-| `UsageBar` | Barra de progresso colorida por percentual |
-| `EmptyStateView` | Estado vazio centrado com icone 48pt |
-| `FlowLayout` | Layout wrapping para chips e dependencias de pipeline |
+| Component | Description |
+|-----------|-------------|
+| `GlassCard` | Main container with `.ultraThinMaterial` + 0.5pt border |
+| `SectionCard` | GlassCard with header (title + SF Symbol) |
+| `SettingRow` | `.callout` label + right-aligned control |
+| `ModelBadge` | Color-coded badge by model (opus=purple, haiku=green, others=blue) |
+| `StatusDot` | Circle with pulse animation when `isRunning` |
+| `UsageBar` | Progress bar colored by percentage |
+| `EmptyStateView` | Centered empty state with 48pt icon |
+| `FlowLayout` | Wrapping layout for chips and pipeline dependencies |
 
-Escala de spacing: `Spacing.xs(4) sm(8) md(12) lg(16) xl(20) xxl(24)`
+Spacing scale: `Spacing.xs(4) sm(8) md(12) lg(16) xl(20) xxl(24)`
 
 ### Sidebar
 
-Colapsavel. Agrupada em 3 sections:
+Collapsible. Grouped in 3 sections:
 - **Overview** — Dashboard
 - **Manage** — Agents, Routines, Skills
 - **System** — Sessions, Logs, Settings, Changelog
 
-Cada item mostra um badge com contagem (Agents, Routines, Skills) ou status (Dashboard: "Running", Logs: "⚠ N"). Changelog mostra a versao (vX.Y.Z).
+Each item shows a badge with count (Agents, Routines, Skills) or status (Dashboard: "Running", Logs: "⚠ N"). Changelog shows the version (vX.Y.Z).
 
 ### Agents
 
-O **Main Agent** eh o agente padrao do bot (sem workspace proprio). Ele conta como agente nas contagens da sidebar e dos stat chips do Dashboard. A contagem total de agentes eh sempre `appState.agents.count + 1` (custom agents + Main).
+The **Main Agent** is the bot's default agent (no own workspace). It counts as an agent in sidebar counts and Dashboard stat chips. Total agent count is always `appState.agents.count + 1` (custom agents + Main).
 
 ## Vault
 
-O diretorio `vault/` eh a knowledge base persistente do bot — um grafo Obsidian com Journal, Notes, Skills, Routines, e Agents. Ver `vault/CLAUDE.md` para documentacao completa da estrutura e regras do vault.
+The `vault/` directory is the bot's persistent knowledge base — an Obsidian graph with Journal, Notes, Skills, Routines, and Agents. See `vault/CLAUDE.md` for complete documentation of the vault structure and rules.
 
-### Setup para novos usuarios
+### Setup for new users
 
-Os index files do vault (`Agents/Agents.md`, `Routines/Routines.md`, `Journal/Journal.md`) sao commitados com conteudo placeholder. Ao configurar o bot pela primeira vez, cada usuario deve:
+The vault's index files (`Agents/Agents.md`, `Routines/Routines.md`, `Journal/Journal.md`) are committed with placeholder content. When setting up the bot for the first time, each user should:
 
-1. Editar os index files para refletir seus proprios agentes/rotinas
-2. Criar seu `vault/.env` com API keys proprias (gitignored)
-3. Personalizar `vault/Tooling.md` com suas preferencias de ferramentas
+1. Edit the index files to reflect their own agents/routines
+2. Create their `vault/.env` with their own API keys (gitignored)
+3. Customize `vault/Tooling.md` with their tool preferences
 
-O conteudo pessoal dos indexes (lista de agentes, rotinas, entradas de journal) NAO deve ser commitado — manter apenas localmente.
+The personal content of indexes (list of agents, routines, journal entries) SHOULD NOT be committed — keep local only.
 
-## Isolamento de contexto
+## Context isolation
 
-O Claude Code carrega TODOS os CLAUDE.md na hierarquia de diretorios (do cwd ate a raiz + `~/.claude/CLAUDE.md`). Para que o bot use APENAS as instrucoes deste projeto:
+Claude Code loads ALL CLAUDE.md files in the directory hierarchy (from cwd to root + `~/.claude/CLAUDE.md`). To ensure the bot uses ONLY this project's instructions:
 
 **`.claude/settings.local.json`** (gitignored):
 ```json
 {
   "claudeMdExcludes": [
-    "/Users/SEU_USERNAME/CLAUDE.md",
-    "/Users/SEU_USERNAME/.claude/CLAUDE.md"
+    "/Users/YOUR_USERNAME/CLAUDE.md",
+    "/Users/YOUR_USERNAME/.claude/CLAUDE.md"
   ]
 }
 ```
 
-Isso bloqueia CLAUDE.md de outros projetos (ex: OpenClaw) quando o Claude CLI roda com `cwd` dentro deste projeto.
+This blocks CLAUDE.md from other projects (e.g., OpenClaw) when Claude CLI runs with `cwd` inside this project.
 
-**Separacao dev/runtime:** Este CLAUDE.md contem instrucoes de DESENVOLVIMENTO. O `vault/CLAUDE.md` contem a knowledge base OPERACIONAL do bot. Quando o bot invoca o Claude CLI com `cwd=vault/`, o Claude ve primariamente o vault/CLAUDE.md. Este arquivo (da raiz) carrega como pai na hierarquia, mas contem apenas info de desenvolvimento — nao interfere nas operacoes do bot.
+**Dev/runtime separation:** This CLAUDE.md contains DEVELOPMENT instructions. `vault/CLAUDE.md` contains the bot's OPERATIONAL knowledge base. When the bot invokes Claude CLI with `cwd=vault/`, Claude sees primarily vault/CLAUDE.md. This file (from root) loads as parent in the hierarchy, but contains only development info — it doesn't interfere with bot operations.
 
 ## Knowledge Graph (Graphify)
 
-O vault possui um knowledge graph em `vault/.graphs/graph.json`, gerado pelo script `scripts/vault-graph-builder.py` (sem LLM). Para analise profunda on-demand, usar `/graphify vault/` que aciona o Graphify full com extracao semantica.
+The vault has a knowledge graph at `vault/.graphs/graph.json`, generated by the `scripts/vault-graph-builder.py` script (no LLM). For deep on-demand analysis, use `/graphify vault/` which triggers the full Graphify with semantic extraction.
 
-- Rotina `vault-graph-update` regenera o grafo lightweight diariamente as 4h
-- O grafo mapeia nodes (arquivos) e edges (wikilinks + related) com confidence labels
-- Consultar o grafo antes de glob extensivo no vault para encontrar relacionamentos
+- The `vault-graph-update` routine regenerates the lightweight graph daily at 4am
+- The graph maps nodes (files) and edges (wikilinks + related) with confidence labels
+- Query the graph before extensive globbing in the vault to find relationships
