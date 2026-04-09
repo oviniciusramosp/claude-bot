@@ -1,0 +1,15 @@
+{
+    "hooks": {
+        "PreToolUse": [
+            {
+                "matcher": "Glob|Grep",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "[ -f vault/.graphs/graph.json ] && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"Knowledge graph exists at vault/.graphs/graph.json — consider consulting it for vault-related searches before scanning raw files.\"}}' || true"
+                    }
+                ]
+            }
+        ]
+    }
+}

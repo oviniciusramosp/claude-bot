@@ -12,12 +12,31 @@ Este vault eh tanto a memoria de longo prazo do bot quanto um workspace visual p
 
 **Principio: scan antes de ler.** Nunca abrir todos os arquivos de uma pasta. Primeiro listar os arquivos e ler apenas as primeiras ~10 linhas (frontmatter) de cada. Usar o campo `description` para decidir quais merecem leitura completa.
 
+### Knowledge Graph (`.graphs/graph.json`)
+
+O vault possui um knowledge graph gerado pelo [Graphify](https://github.com/safishamsi/graphify) em `.graphs/graph.json`. Este grafo mapeia relacionamentos entre todos os arquivos do vault — conceitos, dependencias, e comunidades tematicas.
+
+**Quando usar o graph.json:**
+- Antes de fazer glob extensivo em pastas grandes (Notes/, Routines/)
+- Para encontrar arquivos relacionados a um topico sem ler todos os frontmatters
+- Para entender a estrutura de comunidades (quais arquivos formam clusters tematicos)
+
+**Como consultar:**
+1. Ler `.graphs/graph.json` — contem nodes (arquivos) e edges (relacoes) com confidence labels
+2. Fazer traversal BFS/DFS a partir do node relevante para encontrar vizinhos
+3. Edges marcadas como `EXTRACTED` sao relacoes explicitas; `INFERRED` sao deduzidas; `AMBIGUOUS` precisam validacao
+
+**Fallback:** Se o graph.json nao existir ou estiver desatualizado, voltar ao scan-before-read padrao. A rotina `vault-graph-update` regenera o grafo diariamente as 4h.
+
+### Scan-before-read (procedimento padrao)
+
 Ao iniciar qualquer sessao:
-1. Glob `Journal/*.md` — ler os ultimos 2-3 dias para contexto recente
-2. Ler `Tooling.md` — preferencias de ferramentas (qual usar para cada tarefa)
-3. Se o usuario mencionar um topico, listar `Notes/` e ler frontmatters para filtrar por `description` e `tags` antes de abrir arquivos inteiros
-4. Se uma skill for acionada, ler `Skills/<skill>.md` para instrucoes
-5. Se uma rotina for acionada, ler `Routines/<rotina>.md` para o prompt e contexto
+1. Se `.graphs/graph.json` existir, consultar para contexto estrutural
+2. Glob `Journal/*.md` — ler os ultimos 2-3 dias para contexto recente
+3. Ler `Tooling.md` — preferencias de ferramentas (qual usar para cada tarefa)
+4. Se o usuario mencionar um topico, listar `Notes/` e ler frontmatters para filtrar por `description` e `tags` antes de abrir arquivos inteiros
+5. Se uma skill for acionada, ler `Skills/<skill>.md` para instrucoes
+6. Se uma rotina for acionada, ler `Routines/<rotina>.md` para o prompt e contexto
 
 **Navegacao eficiente em pastas grandes:**
 - Listar arquivos → ler primeiras 10 linhas de cada → filtrar por `description`/`tags` → abrir somente os relevantes
@@ -40,6 +59,27 @@ tags: [topico1, topico2]
 ```
 
 O campo `description` eh obrigatorio e funciona como indice semantico. Deve conter contexto suficiente para decidir se o arquivo precisa ser lido inteiro ou nao.
+
+### Campo `related` (opcional)
+
+Relacionamentos semanticos que NAO devem virar wikilinks (para manter o grafo limpo), mas que ajudam na navegacao e descoberta:
+
+```yaml
+related:
+  - file: "nome-do-arquivo"
+    type: extracted    # explicito no conteudo
+    reason: "usa dados do mesmo endpoint"
+  - file: "outro-arquivo"
+    type: inferred     # deduzido por contexto
+    reason: "ambos lidam com analise de mercado"
+```
+
+Tipos de confianca:
+- `extracted` — relacao explicita no conteudo (ex: step referencia output de outro step)
+- `inferred` — deduzido por similaridade de tema, dados, ou funcao
+- `ambiguous` — possivel relacao que precisa validacao humana
+
+O campo `related` eh um indice semantico complementar. Nao cria edges no Graph View — serve para que o Claude encontre arquivos relacionados sem glob extensivo.
 
 ## Estrutura do grafo
 

@@ -17,4 +17,5 @@ Tarefas recorrentes e estruturadas, executaveis pelo Claude Code.
 - [[create-pipeline]] — Criar ou revisar pipelines multi-agente (consultoria de paralelismo)
 - [[create-agent]] — Criar novos agentes especializados
 - [[import-agent]] — Importar agentes existentes do OpenClaw
+- [[extract-knowledge]] — Extrair conceitos duráveis de pipelines/conversas para Notes/
 

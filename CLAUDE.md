@@ -307,3 +307,11 @@ O Claude Code carrega TODOS os CLAUDE.md na hierarquia de diretorios (do cwd ate
 Isso bloqueia CLAUDE.md de outros projetos (ex: OpenClaw) quando o Claude CLI roda com `cwd` dentro deste projeto.
 
 **Separacao dev/runtime:** Este CLAUDE.md contem instrucoes de DESENVOLVIMENTO. O `vault/CLAUDE.md` contem a knowledge base OPERACIONAL do bot. Quando o bot invoca o Claude CLI com `cwd=vault/`, o Claude ve primariamente o vault/CLAUDE.md. Este arquivo (da raiz) carrega como pai na hierarquia, mas contem apenas info de desenvolvimento — nao interfere nas operacoes do bot.
+
+## Knowledge Graph (Graphify)
+
+O vault possui um knowledge graph em `vault/.graphs/graph.json`, gerado pelo script `scripts/vault-graph-builder.py` (sem LLM). Para analise profunda on-demand, usar `/graphify vault/` que aciona o Graphify full com extracao semantica.
+
+- Rotina `vault-graph-update` regenera o grafo lightweight diariamente as 4h
+- O grafo mapeia nodes (arquivos) e edges (wikilinks + related) com confidence labels
+- Consultar o grafo antes de glob extensivo no vault para encontrar relacionamentos

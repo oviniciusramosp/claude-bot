@@ -21,3 +21,5 @@ Rotinas agendadas que executam prompts no Claude Code automaticamente.
 - [[journal-sweep]] — Varredura noturna que consolida sessoes nao registradas no Journal
 - [[teste-routine]] — Ping o usuario para ele saber que a rotina funcionou
 - [[update-check]] — Verifica diariamente se ha updates do Claude Code ou do repo
+- [[teste-pipeline]] — Pipeline de teste com 3 steps: coleta, analise, resumo.
+- [[vault-graph-update]] — Regenera o knowledge graph do vault diariamente às 4h

@@ -21,6 +21,7 @@ Before installing Claude Bot, make sure you have:
   brew install ffmpeg
   ```
 - **[hear](https://github.com/sveinbjornt/hear)** -- a lightweight CLI wrapping Apple's SFSpeechRecognizer. Automatically downloaded during install to `~/.claude-bot/bin/hear`.
+- **[Graphify](https://github.com/safishamsi/graphify)** -- knowledge graph builder for the vault. Generates a queryable graph of relationships between vault files. Automatically installed via pip during `./claude-bot.sh install`.
 
 ## Quick Start
 

@@ -23,14 +23,21 @@ vault/Skills/*
 !vault/Skills/create-routine.md
 !vault/Skills/create-agent.md
 !vault/Skills/import-agent.md
+!vault/Skills/create-pipeline.md
+!vault/Skills/extract-knowledge.md
 vault/Routines/*
 !vault/Routines/.gitkeep
 !vault/Routines/Routines.md
 !vault/Routines/update-check.md
 !vault/Routines/journal-sweep.md
+!vault/Routines/vault-graph-update.md
 vault/Agents/*
 !vault/Agents/.gitkeep
 !vault/Agents/Agents.md
+
+# Knowledge graph (generated)
+vault/.graphs/
+graphify-out/
 
 # Obsidian workspace state (user-specific)
 vault/.obsidian/workspace.json

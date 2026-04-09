@@ -137,6 +137,30 @@ install_deps() {
     # hear
     install_hear
 
+    # graphify (knowledge graph builder for vault)
+    local graphify_bin
+    graphify_bin=$(python3 -c "import site; print(site.getusersitepackages().replace('/lib/python', '/bin/graphify').rsplit('/lib/', 1)[0])" 2>/dev/null || echo "")
+    if python3 -c "import graphifyy" &>/dev/null; then
+        local graphify_path
+        graphify_path=$(command -v graphify 2>/dev/null || echo "${HOME}/Library/Python/$(python3 -c 'import sys;print(f"{sys.version_info.major}.{sys.version_info.minor}")')/bin/graphify")
+        echo -e "  graphify: ${GREEN}found${NC} ($graphify_path)"
+    else
+        echo -e "  graphify: ${YELLOW}not found — installing...${NC}"
+        pip3 install --user --break-system-packages graphifyy 2>/dev/null || pip3 install --user graphifyy 2>/dev/null || {
+            echo -e "  graphify: ${YELLOW}pip install failed — trying from source...${NC}"
+            local tmp_dir
+            tmp_dir=$(mktemp -d)
+            git clone --depth 1 https://github.com/safishamsi/graphify.git "$tmp_dir/graphify" 2>/dev/null
+            pip3 install --user --break-system-packages -e "$tmp_dir/graphify" 2>/dev/null || pip3 install --user -e "$tmp_dir/graphify" 2>/dev/null || {
+                echo -e "  graphify: ${RED}install failed — install manually: pip3 install --user graphifyy${NC}"
+                rm -rf "$tmp_dir"
+            }
+        }
+        if python3 -c "import graphifyy" &>/dev/null; then
+            echo -e "  graphify: ${GREEN}installed${NC}"
+        fi
+    fi
+
     echo ""
 }
 
