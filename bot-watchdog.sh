@@ -32,11 +32,10 @@ if pgrep -f "$BOT_PROCESS" > /dev/null 2>&1; then
         send_telegram "✅ *Claude Bot* voltou a funcionar."
     fi
 else
-    # Bot is down — notify only once per downtime
+    # Bot is down — restart via launchd and notify (once per downtime)
     if [[ ! -f "$FLAG_FILE" ]]; then
         touch "$FLAG_FILE"
-        send_telegram "🚨 *Claude Bot está offline!*
-O processo \`$BOT_PROCESS\` não está rodando.
-Use \`claude-bot.sh start\` para reiniciar."
+        launchctl start com.vr.claude-bot 2>/dev/null
+        send_telegram "🚨 *Claude Bot caiu!* Reiniciando automaticamente..."
     fi
 fi
