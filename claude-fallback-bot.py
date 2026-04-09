@@ -1466,13 +1466,12 @@ class PipelineExecutor:
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
             logger.warning("Pipeline %s failed: %s", self.task.name, err)
 
-        # Cleanup workspace (keep on failure for debugging)
-        if all_completed:
-            try:
-                import shutil
-                shutil.rmtree(self.workspace, ignore_errors=True)
-            except Exception:
-                pass
+        # Cleanup workspace
+        try:
+            import shutil
+            shutil.rmtree(self.workspace, ignore_errors=True)
+        except Exception:
+            pass
         # Remove pipeline activity sidecar
         self._cleanup_activity()
         return all_completed
