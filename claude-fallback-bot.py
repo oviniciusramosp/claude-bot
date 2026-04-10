@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.18.0"  # feat: session snapshot to journal before auto-compact
+BOT_VERSION = "2.18.1"  # feat: frozen context snapshot injected on first message of session
 
 import http.server
 import json
@@ -3346,6 +3346,41 @@ class ClaudeTelegramBot:
     def cmd_compact(self) -> None:
         self._run_claude_prompt("/compact")
 
+    def _build_frozen_context(self, session: Session) -> str:
+        """Build a compact context snapshot to inject once on the first message of a session.
+
+        Includes agent CLAUDE.md (truncated) and the last portion of today's journal.
+        Frozen at session start — does not change mid-session — to preserve prefix cache hits.
+        Only injected when there is actually content to add (no-op for empty journals).
+        """
+        parts = []
+
+        # Agent instructions (up to 2000 chars to keep it tight)
+        if session.agent:
+            agent_claude_md = AGENTS_DIR / session.agent / "CLAUDE.md"
+            if agent_claude_md.is_file():
+                try:
+                    content = agent_claude_md.read_text(encoding="utf-8")[:2000]
+                    if content.strip():
+                        parts.append(f"# Agent Instructions ({session.agent})\n\n{content}")
+                except OSError:
+                    pass
+
+        # Recent journal entries (last 1500 chars of today's journal)
+        journal_path = Path(self._get_journal_path())
+        if journal_path.is_file():
+            try:
+                journal_text = journal_path.read_text(encoding="utf-8")
+                if journal_text.strip():
+                    excerpt = journal_text[-1500:].strip()
+                    parts.append(f"# Journal — Today's Context\n\n{excerpt}")
+            except OSError:
+                pass
+
+        if not parts:
+            return ""
+        return "\n\n---\n\n".join(parts)
+
     def _snapshot_session_to_journal(self, session: Session) -> None:
         """Generate a structured snapshot of the session and append it to today's journal.
 
@@ -4382,6 +4417,13 @@ class ClaudeTelegramBot:
         if tts_this_request:
             suffix = _tts_prompt_suffix()
             effective_sp = (effective_sp + suffix) if effective_sp else suffix
+
+        # Inject frozen context snapshot on the first message of an interactive session.
+        # Frozen = built once, never updated mid-session, so prefix cache hits are preserved.
+        if not _retry and not routine_mode and session.message_count == 1:
+            frozen = self._build_frozen_context(session)
+            if frozen:
+                effective_sp = (effective_sp + "\n\n" + frozen) if effective_sp else frozen
 
         # All paths use the same session/model/effort
         effective_session_id = session.session_id
