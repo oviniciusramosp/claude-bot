@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.19.1"  # feat: auto-inject relevant skills into system prompt via keyword match
+BOT_VERSION = "2.20.0"  # feat: /delegate command — isolated subagent for parallel sub-tasks
 
 import http.server
 import json
@@ -3578,6 +3578,64 @@ class ClaudeTelegramBot:
         else:
             self._run_claude_prompt(text)
 
+    def cmd_delegate(self, prompt: str) -> None:
+        """Spawn an isolated Claude subprocess for a sub-task and inject the result back.
+
+        The subagent runs with session_id=None (fresh context, no conversation history),
+        minimal system prompt, and a hard 10-minute wall-clock limit. The result is sent
+        to Telegram and optionally injected into the parent session via /btw.
+        """
+        if not prompt.strip():
+            self.send_message("❌ Uso: `/delegate <prompt>`")
+            return
+        session = self._get_session()
+        self.send_message(f"🧬 _Sub-task delegada — aguardando resultado (max 10min)..._")
+
+        def _worker() -> None:
+            try:
+                sub_runner = ClaudeRunner()
+                runner_thread = threading.Thread(
+                    target=sub_runner.run,
+                    kwargs={
+                        "prompt": prompt,
+                        "model": session.model,
+                        "session_id": None,        # fresh context
+                        "workspace": session.workspace,
+                        "system_prompt": None,     # minimal — no vault system prompt
+                    },
+                    daemon=True,
+                )
+                runner_thread.start()
+                runner_thread.join(timeout=600)     # 10-minute hard limit
+                if runner_thread.is_alive():
+                    sub_runner.cancel()
+                    self.send_message("⏱️ _Subagent timeout (10min). Resultado parcial:_")
+
+                result = (sub_runner.result_text or sub_runner.accumulated_text or "").strip()
+                if not result:
+                    err = sub_runner.stderr_text or sub_runner.error_text or "sem output"
+                    self.send_message(f"❌ Subagent sem resultado: `{err[:200]}`")
+                    return
+
+                # Truncate very large results before sending
+                display = result if len(result) <= 3800 else result[:3800] + "\n\n[…truncado]"
+                self.send_message(f"🧬 *Subagent Result:*\n\n{display}")
+
+                # Inject back into the parent session if it's idle
+                ctx = self._ctx
+                if ctx and ctx.runner and not ctx.runner.running:
+                    injection = (
+                        f"[SUBAGENT RESULT for: {prompt[:80]}]\n\n{result[:3000]}"
+                    )
+                    with ctx.pending_lock:
+                        ctx.pending.append(injection)
+                    logger.info("Subagent result queued for injection into parent session")
+            except Exception as exc:
+                logger.error("Delegate failed: %s", exc)
+                self.send_message(f"❌ Erro no subagent: `{str(exc)[:200]}`")
+
+        threading.Thread(target=_worker, daemon=True, name="subagent-delegate").start()
+
     def _get_journal_path(self) -> str:
         """Return the journal file path for today, using agent journal if active."""
         session = self._get_session()
@@ -5003,6 +5061,7 @@ class ClaudeTelegramBot:
                 "/workspace": lambda: self.cmd_workspace(arg) if arg else self.send_message("❌ Use: `/workspace <path>`"),
                 "/effort": lambda: self.cmd_effort(arg) if arg else self.send_message(f"ℹ️ Effort atual: {self.effort or 'padrão'}"),
                 "/btw": lambda: self.cmd_btw(arg) if arg else self.send_message("❌ Use: `/btw <mensagem>`"),
+                "/delegate": lambda: self.cmd_delegate(arg) if arg else self.send_message("❌ Use: `/delegate <prompt>`"),
                 "/clear": lambda: self.cmd_clear(),
                 "/important": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
