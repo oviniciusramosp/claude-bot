@@ -135,6 +135,7 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/cost` | Token usage and cost for current session |
 | `/doctor` | Check Claude Code installation health |
 | `/btw <msg>` | Inject message to running Claude process |
+| `/delegate <prompt>` | Spawn an isolated subagent (fresh context, 10min hard limit), result injected back into the parent session |
 | `/timeout <sec>` | Activity timeout (default: 600s) |
 | `/workspace <path>` | Change working directory |
 
@@ -471,6 +472,20 @@ claude-bot/
 ```
 
 Runtime data: `~/.claude-bot/` (sessions, logs, routine state).
+
+---
+
+## Tests
+
+The repo ships with a full test suite (Python + Swift, no pip dependencies for the Python side):
+
+```bash
+./test.sh           # Python + Swift (full suite)
+./test.sh py        # Python only (~200 tests, ~5s)
+./test.sh swift     # Swift only (ClaudeBotManager)
+```
+
+CI runs on every push/PR via `.github/workflows/tests.yml` on a macOS runner.
 
 ---
 

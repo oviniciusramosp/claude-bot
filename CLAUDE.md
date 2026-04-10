@@ -103,11 +103,16 @@ Read by Claude Code when executing tasks in the vault context (routines, interac
 | `/cost` | Token usage and cost for current session |
 | `/doctor` | Check Claude Code installation health |
 | `/btw <msg>` | Inject message to running Claude process (native); falls back to queue |
+| `/delegate <prompt>` | Spawn an isolated subagent (fresh context, 10min hard limit), inject result back into parent session |
 | `/stop` | Cancel running task |
 | `/timeout <sec>` | Change timeout |
 | `/workspace <path>` | Change working directory |
 | `/effort <low\|medium\|high>` | Set reasoning effort |
 | `/clear` | Reset current session |
+| `/important` | Record key points from the current session into today's Journal |
+| `/agent [name\|new\|list]` | Switch/create/list agents (no arg → inline keyboard) |
+| `/routine [list\|status]` | Create a routine interactively, or list/status of today's routines |
+| `/skill [name]` | Run a vault skill directly |
 | `/voice [on\|off]` | Toggle TTS voice responses for all messages |
 | `/audio` | Choose transcription language |
 | `#voice` (in message) | One-shot voice response (audio only, no text) |
@@ -137,9 +142,9 @@ When encountering an error, **never treat it as a one-off**. Follow this mandato
 
 ### Adding a new command
 
-1. Add a handler method to `ClaudeTelegramBot` class
-2. Register it in the `_COMMANDS` dict or add an `elif` in `_handle_command()`
-3. Add it to the help text in `_cmd_start()`
+1. Add a `cmd_<name>` method to the `ClaudeTelegramBot` class
+2. Register it in the `handler_map` dict inside `_handle_text()` (around line 5188)
+3. Add it to the help text in `cmd_help()`
 
 ### Changing default model/timeouts
 
