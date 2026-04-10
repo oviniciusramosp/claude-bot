@@ -464,6 +464,26 @@ actor VaultService {
         return home.appending(component: ".claude-bot").appending(component: "reaction-secrets.json")
     }
 
+    private var reactionStatsURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appending(component: ".claude-bot").appending(component: "reaction-stats.json")
+    }
+
+    private func loadReactionStats() -> [String: [String: Any]] {
+        guard let data = try? Data(contentsOf: reactionStatsURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return [:]
+        }
+        var result: [String: [String: Any]] = [:]
+        for (key, value) in json {
+            if let dict = value as? [String: Any] {
+                result[key] = dict
+            }
+        }
+        return result
+    }
+
     private func loadReactionSecrets() -> [String: [String: String]] {
         guard let data = try? Data(contentsOf: reactionSecretsURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -502,6 +522,11 @@ actor VaultService {
 
         let entries = try fm.contentsOfDirectory(atPath: dir.path)
         let secrets = loadReactionSecrets()
+        let stats = loadReactionStats()
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let isoNoFrac = ISO8601DateFormatter()
+        isoNoFrac.formatOptions = [.withInternetDateTime]
         var reactions: [Reaction] = []
 
         for entry in entries {
@@ -519,6 +544,13 @@ actor VaultService {
             let modeStr = (authDict["mode"] as? String) ?? "token"
             let mode = Reaction.AuthMode(rawValue: modeStr) ?? .token
             let mySecrets = secrets[name] ?? [:]
+            let myStats = stats[name] ?? [:]
+
+            // Parse last_fired_at — tolerate both with and without fractional seconds
+            var lastFired: Date? = nil
+            if let s = myStats["last_fired_at"] as? String {
+                lastFired = iso.date(from: s) ?? isoNoFrac.date(from: s)
+            }
 
             let cleanBody = body
                 .replacingOccurrences(of: "[[Reactions]]\n", with: "")
@@ -542,7 +574,12 @@ actor VaultService {
                 agentId: (actionDict["agent"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                 body: cleanBody,
                 token: mySecrets["token"],
-                hmacSecret: mySecrets["hmac_secret"]
+                hmacSecret: mySecrets["hmac_secret"],
+                lastFiredAt: lastFired,
+                fireCount: (myStats["fire_count"] as? Int) ?? 0,
+                lastStatus: myStats["last_status"] as? String,
+                lastForwarded: (myStats["last_forwarded"] as? Bool) ?? false,
+                lastRoutineEnqueued: (myStats["last_routine_enqueued"] as? Bool) ?? false
             )
             reactions.append(reaction)
         }

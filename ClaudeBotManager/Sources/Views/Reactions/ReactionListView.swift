@@ -363,9 +363,35 @@ private struct ReactionRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
-                    Text(reaction.actionSummary)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                    HStack(spacing: Spacing.sm) {
+                        Text(reaction.actionSummary)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                        if let lastFired = reaction.lastFiredAt {
+                            Text("•")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                            HStack(spacing: 3) {
+                                Image(systemName: reaction.lastStatus == "error"
+                                      ? "exclamationmark.triangle.fill"
+                                      : "checkmark.circle.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(reaction.lastStatus == "error" ? .orange : .green)
+                                Text("Last fired \(lastFired.relativeDescription())")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            if reaction.fireCount > 1 {
+                                Text("• \(reaction.fireCount) total")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        } else {
+                            Text("• Never fired")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
                 }
 
                 Spacer()
@@ -412,6 +438,21 @@ private struct ExternalStep: Identifiable {
     let number: Int
     let symbol: String
     let text: String
+}
+
+private extension Date {
+    /// Short relative description like "2m ago", "3h ago", "yesterday", "Apr 5".
+    func relativeDescription() -> String {
+        let interval = Date().timeIntervalSince(self)
+        if interval < 60 { return "just now" }
+        if interval < 3600 { return "\(Int(interval / 60))m ago" }
+        if interval < 86400 { return "\(Int(interval / 3600))h ago" }
+        if interval < 172_800 { return "yesterday" }
+        if interval < 604_800 { return "\(Int(interval / 86400))d ago" }
+        let f = DateFormatter()
+        f.dateFormat = "MMM d"
+        return f.string(from: self)
+    }
 }
 
 private struct ExternalStepsGuide: View {

@@ -118,6 +118,7 @@ final class AppState: ObservableObject {
         for path in [
             "\(dataDir)/sessions.json",
             "\(dataDir)/contexts.json",
+            "\(dataDir)/reaction-stats.json",
             "\(vaultPath)/Agents",
             "\(vaultPath)/Routines",
             "\(vaultPath)/Skills",

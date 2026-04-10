@@ -35,6 +35,13 @@ struct Reaction: Identifiable, Hashable, Sendable {
     var token: String?
     var hmacSecret: String?
 
+    // Stats — loaded from ~/.claude-bot/reaction-stats.json, not serialized to .md
+    var lastFiredAt: Date?
+    var fireCount: Int = 0
+    var lastStatus: String?         // "ok" | "error"
+    var lastForwarded: Bool = false
+    var lastRoutineEnqueued: Bool = false
+
     enum AuthMode: String, Hashable, Sendable, CaseIterable {
         case token
         case hmac

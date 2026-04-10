@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.22.2"  # fix: pipeline progress message not sent when notify=none
+BOT_VERSION = "2.23.0"  # feat: YAML block scalars in frontmatter + reaction fire stats sidecar
 
 import hmac
 import hashlib
@@ -516,6 +516,59 @@ def get_frontmatter_and_body(filepath: Path) -> tuple:
             body = "\n".join(lines[end + 1:]).strip()
             return fm, body
     return fm, text.strip()
+
+
+_REACTION_STATS_LOCK = threading.Lock()
+
+
+def _record_reaction_fire(
+    reaction_id: str,
+    *,
+    forwarded: bool,
+    routine_enqueued: bool,
+    errors: int,
+) -> None:
+    """Append a fire event to the reaction stats sidecar.
+
+    Stats file schema:
+        {
+          "reaction-id": {
+            "last_fired_at": "2026-04-10T19:15:00+00:00",
+            "fire_count": 42,
+            "last_status": "ok" | "error",
+            "last_forwarded": bool,
+            "last_routine_enqueued": bool
+          },
+          ...
+        }
+    """
+    from datetime import datetime, timezone
+
+    try:
+        with _REACTION_STATS_LOCK:
+            stats: Dict[str, Any] = {}
+            if REACTION_STATS_FILE.exists():
+                try:
+                    stats = json.loads(REACTION_STATS_FILE.read_text(encoding="utf-8")) or {}
+                except Exception:
+                    stats = {}
+            entry = stats.get(reaction_id) or {}
+            entry["last_fired_at"] = datetime.now(timezone.utc).isoformat()
+            entry["fire_count"] = int(entry.get("fire_count", 0)) + 1
+            entry["last_status"] = "ok" if errors == 0 else "error"
+            entry["last_forwarded"] = bool(forwarded)
+            entry["last_routine_enqueued"] = bool(routine_enqueued)
+            stats[reaction_id] = entry
+            REACTION_STATS_FILE.write_text(
+                json.dumps(stats, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            try:
+                REACTION_STATS_FILE.chmod(0o644)
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.error("Failed to record reaction fire for %s: %s", reaction_id, exc)
 
 
 def _load_reaction_secrets() -> Dict[str, Dict[str, Any]]:
@@ -5955,6 +6008,12 @@ class ClaudeTelegramBot:
                 logger.info(
                     "Reaction %s fired (forward=%s, routine=%s, errors=%d)",
                     reaction_id, forwarded, routine_enqueued, len(errors),
+                )
+                _record_reaction_fire(
+                    reaction_id,
+                    forwarded=forwarded,
+                    routine_enqueued=routine_enqueued,
+                    errors=len(errors),
                 )
                 self._respond(200, {
                     "ok": True,
