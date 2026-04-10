@@ -71,6 +71,7 @@ VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_DIR = VAULT_DIR / "Routines"
 AGENTS_DIR = VAULT_DIR / "Agents"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
+ACTIVITY_LOG_DIR = VAULT_DIR / "Journal" / ".activity"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_AUDIO_DIR = Path("/tmp/claude-bot-audio")
 HEAR_BIN_DIR = DATA_DIR / "bin"
@@ -194,19 +195,22 @@ SYSTEM_PROMPT = (
     "All vault .md files MUST have YAML frontmatter (title, description, type, created/updated, tags). "
     "Use the description field to scan files before reading them fully. "
     "\n\n"
-    "## Journal — Registro Proativo\n"
+    "## Journal — Proactive Recording\n"
     "You MUST write to the Journal DURING conversations, not just at the end. "
-    "Append to Journal/YYYY-MM-DD.md (today's date) whenever any of these happen:\n"
+    "After completing any task or receiving important information, write a journal entry "
+    "BEFORE responding to the user. Append to Journal/YYYY-MM-DD.md whenever:\n"
     "- A decision is made or a task is completed\n"
     "- You learn new information about the user's projects, preferences, or environment\n"
     "- A debugging session reaches a conclusion (root cause found, fix applied)\n"
     "- Configuration changes are made (files edited, settings changed, tools installed)\n"
     "- The user explicitly asks you to remember something\n"
     "- A routine or pipeline finishes executing\n"
-    "Do NOT wait for the conversation to end — write the entry immediately. "
     "Use the standard format: ## HH:MM — Short summary, followed by bullet points, then ---. "
     "If an agent is active, use the agent's own Journal/ directory instead. "
-    "Journal entries are append-only — never overwrite existing content. "
+    "Journal entries are append-only — never overwrite existing content.\n"
+    "When CREATING a new journal file, always include proper YAML frontmatter with BOTH "
+    "opening AND closing `---` delimiters. The `description` field must summarize the actual "
+    "content — never use a generic placeholder like 'Daily log for DATE'. "
     "\n\n"
     "## Bot Commands — USE THESE instead of doing things manually\n"
     "You are running inside a Telegram bot that has its own command system. "
@@ -1084,6 +1088,24 @@ def get_weekly_cost() -> dict:
         }
     except Exception:
         return {"week": "", "total": 0.0, "today": 0.0}
+
+
+# ---------------------------------------------------------------------------
+# Activity log — vault-based session tracking for journal audit
+# ---------------------------------------------------------------------------
+
+
+def _log_activity(entry: dict) -> None:
+    """Append one JSONL line to vault/Journal/.activity/YYYY-MM-DD.jsonl."""
+    try:
+        ACTIVITY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        today = time.strftime("%Y-%m-%d")
+        path = ACTIVITY_LOG_DIR / f"{today}.jsonl"
+        entry.setdefault("time", time.strftime("%H:%M"))
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.debug("Activity log write failed: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -2289,6 +2311,16 @@ class PipelineExecutor:
             except Exception as exc:
                 logger.warning("Pipeline TTS failed: %s", exc)
 
+        # Activity log
+        _log_activity({
+            "agent": self.task.agent or "main",
+            "type": "pipeline",
+            "pipeline": self.task.name,
+            "status": "completed",
+            "steps": len(self.task.steps),
+            "elapsed": elapsed,
+        })
+
     def _notify_failure(self, error: str) -> None:
         """Always notify on failure, regardless of notify mode. Skip if cancelled (progress msg already updated)."""
         if self._cancelled.is_set():
@@ -2307,6 +2339,15 @@ class PipelineExecutor:
             self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
         except Exception as exc:
             logger.error("Pipeline notify_failure send failed: %s", exc)
+
+        # Activity log
+        _log_activity({
+            "agent": self.task.agent or "main",
+            "type": "pipeline",
+            "pipeline": self.task.name,
+            "status": "failed",
+            "error": error[:150],
+        })
 
 
 class ClaudeTelegramBot:
@@ -4662,6 +4703,38 @@ class ClaudeTelegramBot:
             tts_text = re.sub(r'\n\n💰 Custo:.*$', '', final_text, flags=re.DOTALL).strip()
             if tts_text:
                 self._maybe_send_tts(tts_text, ctx.chat_id, ctx.thread_id)
+
+        # Activity log — record this response for journal audit
+        if runner.exit_code in (None, 0) and prompt:
+            # Skip internal bot prompts — not real user activity
+            if prompt.startswith("Consolide esta sessao") or prompt == "/compact":
+                pass
+            # Skip pipeline step entries — logged separately by _notify_success/_notify_failure
+            elif routine_mode and prompt.startswith("[PIPELINE:"):
+                pass
+            elif routine_mode:
+                session = self._get_session()
+                m = re.match(r'\[ROTINA:\s*([^\|]+)\|\s*([^\]]+)', prompt)
+                routine_name = m.group(1).strip() if m else "unknown"
+                _log_activity({
+                    "agent": (session.agent if session else None) or "main",
+                    "type": "routine",
+                    "routine": routine_name,
+                    "session": routine_name,
+                })
+            else:
+                # Interactive sessions: log FULL user message + response for reliable journal audit.
+                # This is the source of truth — the nightly audit reads these to write journal entries.
+                session = self._get_session()
+                response = (runner.result_text or runner.accumulated_text or "").strip()
+                _log_activity({
+                    "agent": (session.agent if session else None) or "main",
+                    "type": "interactive",
+                    "session": session.name if session else "unknown",
+                    "model": session.model if session else "unknown",
+                    "user": prompt,
+                    "response": response[:500],
+                })
 
         if ctx:
             ctx.stream_msg_id = None

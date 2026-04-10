@@ -29,7 +29,7 @@ vault/Routines/*
 !vault/Routines/.gitkeep
 !vault/Routines/Routines.md
 !vault/Routines/update-check.md
-!vault/Routines/journal-sweep.md
+!vault/Routines/journal-audit.md
 !vault/Routines/vault-graph-update.md
 vault/Agents/*
 !vault/Agents/.gitkeep

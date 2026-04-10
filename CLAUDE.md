@@ -253,7 +253,7 @@ If the output of a routine (not pipeline) is exactly `NO_REPLY`, the bot sends n
 |---------|-------------|
 | `update-check` | Checks daily for Claude Code CLI (brew) or repo (git) updates. Notifies only when there's something to update. |
 | `vault-graph-update` | Regenerates the vault's lightweight knowledge graph (`vault/.graphs/graph.json`) from frontmatter and wikilinks. No LLM cost. Runs daily at 4am. |
-| `journal-sweep` | Nightly sweep (23:45) that consolidates day's sessions not yet recorded in the Journal. |
+| `journal-audit` | Nightly audit (23:59) that checks all agents' journals for completeness, fixes frontmatter, and fills gaps from the activity log. |
 
 ## Voice / TTS
 

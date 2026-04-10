@@ -71,7 +71,7 @@ struct Routine: Identifiable, Hashable, Sendable {
     var isPipeline: Bool { routineType == "pipeline" }
 
     /// Built-in routines shipped with the repo — can be disabled but not deleted
-    static let builtInIds: Set<String> = ["update-check", "vault-graph-update", "journal-sweep"]
+    static let builtInIds: Set<String> = ["update-check", "vault-graph-update", "journal-audit"]
     var isBuiltIn: Bool { Self.builtInIds.contains(id) }
 
     /// For pipelines: count of completed/failed/skipped steps across today's executions

@@ -3,7 +3,7 @@ title: Routines
 description: Index of all scheduled routines. Hub connecting routines to the main graph.
 type: index
 created: 2026-04-07
-updated: 2026-04-09
+updated: 2026-04-10
 tags: [index, routines]
 ---
 
@@ -17,7 +17,7 @@ Scheduled routines that execute prompts on Claude Code automatically.
 - [[crypto-ta-analise]] — Crypto technical analysis pipeline daily at 21:30 (Notion + Telegram)
 
 
-- [[journal-sweep]] — Nightly sweep that consolidates unrecorded sessions into the Journal
+- [[journal-audit]] — Nightly audit that checks all agents' journals for completeness and fills gaps
 - [[teste-routine]] — Pings the user to confirm the routine worked
 - [[update-check]] — Checks daily for Claude Code or repo updates
 - [[teste-pipeline]] — Test pipeline with 3 steps: collect, analyze, summarize
