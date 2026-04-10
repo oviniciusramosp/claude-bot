@@ -7,11 +7,11 @@
 	<key>CFBundleDisplayName</key>
 	<string>Claude Bot Manager</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.vr.claude-bot-manager</string>
+	<string>com.claudebot.manager</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.20.0</string>
+	<string>2.22.0</string>
 	<key>CFBundleExecutable</key>
 	<string>ClaudeBotManager</string>
 	<key>CFBundlePackageType</key>

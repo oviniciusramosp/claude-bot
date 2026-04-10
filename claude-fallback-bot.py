@@ -5,8 +5,10 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.20.0"  # feat: /delegate command — isolated subagent for parallel sub-tasks
+BOT_VERSION = "2.22.0"  # refactor: distributability pass — neutral bundle ids, auto-detect Claude CLI, clean vault placeholders
 
+import hmac
+import hashlib
 import http.server
 import json
 import logging
@@ -59,7 +61,29 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("HEAR_LOCALE", _v)
             elif _k == "TTS_ENGINE":
                 os.environ.setdefault("TTS_ENGINE", _v)
-CLAUDE_PATH = os.environ.get("CLAUDE_PATH", "/opt/homebrew/bin/claude")
+def _detect_claude_path() -> str:
+    """Locate the claude CLI binary. Checks env var, then common install paths."""
+    env_path = os.environ.get("CLAUDE_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    # Common install locations (Apple Silicon brew, Intel brew, npm global, user local)
+    for candidate in (
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        os.path.expanduser("~/.local/bin/claude"),
+        os.path.expanduser("~/.npm-global/bin/claude"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    # Fallback: search PATH
+    from shutil import which
+    found = which("claude")
+    if found:
+        return found
+    # Last resort — return Apple Silicon default so error messages are informative
+    return "/opt/homebrew/bin/claude"
+
+CLAUDE_PATH = _detect_claude_path()
 CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent / "vault"))
 
 DATA_DIR = Path.home() / ".claude-bot"
@@ -112,6 +136,10 @@ def _tts_prompt_suffix() -> str:
 DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
 CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
+WEBHOOK_PORT = 27183                                # public via Tailscale Funnel; control server stays on CONTROL_PORT (local-only)
+REACTIONS_DIR = VAULT_DIR / "Reactions"
+REACTION_SECRETS_FILE = DATA_DIR / "reaction-secrets.json"
+WEBHOOK_MAX_BODY_BYTES = 1_048_576                  # 1 MB cap on webhook payloads
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 SESSION_MAX_AGE_DAYS = 60
@@ -304,6 +332,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+REACTIONS_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 HEAR_BIN_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -418,6 +447,67 @@ def get_frontmatter_and_body(filepath: Path) -> tuple:
     return fm, text.strip()
 
 
+def _load_reaction_secrets() -> Dict[str, Dict[str, Any]]:
+    """Load per-reaction secrets from ~/.claude-bot/reaction-secrets.json.
+
+    File format: {"reaction-id": {"token": "rxn_...", "hmac_secret": "..."}}
+    Missing file → returns {}. Malformed → logs and returns {}.
+    """
+    if not REACTION_SECRETS_FILE.exists():
+        return {}
+    try:
+        return json.loads(REACTION_SECRETS_FILE.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        logger.error("Failed to load reaction secrets: %s", exc)
+        return {}
+
+
+def load_reaction(name: str) -> Optional[Dict[str, Any]]:
+    """Load a reaction by id. Returns merged frontmatter + secrets + body.
+
+    Returns None if file missing, disabled, or frontmatter invalid. The returned
+    dict has keys: id, title, description, enabled, auth (dict with mode,
+    token/hmac_secret, hmac_header, hmac_algo), action (dict with routine,
+    forward, forward_template, agent), body.
+    """
+    md_file = REACTIONS_DIR / f"{name}.md"
+    if not md_file.exists():
+        return None
+    fm, body = get_frontmatter_and_body(md_file)
+    if not fm:
+        return None
+    if not fm.get("enabled", False):
+        return None
+    if str(fm.get("type", "")).lower() != "reaction":
+        return None
+
+    auth_fm = fm.get("auth") if isinstance(fm.get("auth"), dict) else {}
+    action_fm = fm.get("action") if isinstance(fm.get("action"), dict) else {}
+
+    secrets = _load_reaction_secrets().get(name, {})
+
+    return {
+        "id": name,
+        "title": str(fm.get("title", name)),
+        "description": str(fm.get("description", "")),
+        "enabled": True,
+        "auth": {
+            "mode": str(auth_fm.get("mode", "token")).lower(),
+            "hmac_header": str(auth_fm.get("hmac_header", "X-Signature")),
+            "hmac_algo": str(auth_fm.get("hmac_algo", "sha256")).lower(),
+            "token": secrets.get("token"),
+            "hmac_secret": secrets.get("hmac_secret"),
+        },
+        "action": {
+            "routine": action_fm.get("routine"),
+            "forward": bool(action_fm.get("forward", False)),
+            "forward_template": action_fm.get("forward_template"),
+            "agent": action_fm.get("agent"),
+        },
+        "body": body,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pipeline body parser
 # ---------------------------------------------------------------------------
@@ -488,6 +578,10 @@ class RoutineTask:
     minimal_context: bool = False
     voice: bool = False
     effort: Optional[str] = None
+    # When set, the raw webhook payload is injected into the routine prompt
+    # (see _execute_routine_task). Used by Reactions that trigger routines via
+    # the webhook server.
+    webhook_payload: Optional[str] = None
 
 
 @dataclass
@@ -2402,6 +2496,7 @@ class ClaudeTelegramBot:
 
         self._start_time = time.time()
         self._start_control_server()
+        self._start_webhook_server()
 
         # Agent ↔ chat mapping: (chat_id, thread_id) → agent dict
         self._agent_chat_map: Dict[tuple, Dict[str, Any]] = self._build_agent_chat_map()
@@ -4945,8 +5040,12 @@ class ClaudeTelegramBot:
 
         prompt = (f"[ROTINA: {task.name} | {task.time_slot}]\n"
                   f"Importante: execute a tarefa abaixo e envie apenas o output. "
-                  f"Não adicione cabeçalho, confirmação de execução, nem frase dizendo que a rotina rodou.\n\n"
-                  f"{task_prompt}")
+                  f"Não adicione cabeçalho, confirmação de execução, nem frase dizendo que a rotina rodou.\n\n")
+        if task.webhook_payload:
+            prompt += (
+                f"Webhook payload recebido:\n```\n{task.webhook_payload}\n```\n\n"
+            )
+        prompt += task_prompt
 
         # Send progress message so it can be updated on failure/cancellation
         progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._",
@@ -5546,6 +5645,230 @@ class ClaudeTelegramBot:
         except Exception as exc:
             self._control_server = None
             logger.error("Failed to start control server: %s", exc)
+
+    def _start_webhook_server(self) -> None:
+        """Start a dedicated HTTP server for webhook/Reaction endpoints.
+
+        Runs on WEBHOOK_PORT (separate from the control server) so that only
+        webhook routes are exposed when the user enables Tailscale Funnel.
+        The control server (CONTROL_PORT) stays 100% local.
+        """
+        bot = self
+
+        def _render_template(template: str, payload_obj: Any, raw_body: str) -> str:
+            """Replace {{key}} placeholders with values from parsed JSON payload.
+
+            Supports dotted paths (e.g. {{data.ticker}}). Unknown keys are left
+            as empty strings. {{raw}} inserts the full raw body.
+            """
+            def _resolve(path: str) -> str:
+                if path == "raw":
+                    return raw_body
+                cur: Any = payload_obj
+                for part in path.split("."):
+                    if isinstance(cur, dict):
+                        cur = cur.get(part)
+                    else:
+                        return ""
+                if cur is None:
+                    return ""
+                if isinstance(cur, (dict, list)):
+                    return json.dumps(cur, ensure_ascii=False)
+                return str(cur)
+
+            def _sub(match: "re.Match[str]") -> str:
+                return _resolve(match.group(1).strip())
+
+            return re.sub(r"\{\{\s*([\w\.]+)\s*\}\}", _sub, template)
+
+        class _WebhookHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/health":
+                    self._respond(200, {"status": "ok", "service": "webhook"})
+                else:
+                    self._respond(404, {"error": "not found"})
+
+            def do_POST(self):
+                if not self.path.startswith("/webhook/"):
+                    return self._respond(404, {"error": "not found"})
+                self._handle_webhook()
+
+            def _handle_webhook(self):
+                reaction_id = self.path[len("/webhook/"):].split("?", 1)[0].strip("/")
+                if not reaction_id:
+                    return self._respond(401, {"error": "unauthorized"})
+
+                # Read body (capped)
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    length = 0
+                if length > WEBHOOK_MAX_BODY_BYTES:
+                    return self._respond(413, {"error": "payload too large"})
+                raw_bytes = self.rfile.read(length) if length > 0 else b""
+                raw_body = raw_bytes.decode("utf-8", errors="replace")
+
+                # Load reaction (missing/disabled → uniform 401 so we don't leak existence)
+                reaction = load_reaction(reaction_id)
+                if not reaction:
+                    return self._respond(401, {"error": "unauthorized"})
+
+                # Parse query string for token auth via ?token=
+                query_token = ""
+                if "?" in self.path:
+                    try:
+                        qs = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                        query_token = (qs.get("token") or [""])[0]
+                    except Exception:
+                        query_token = ""
+
+                auth = reaction["auth"]
+                mode = auth.get("mode", "token")
+                if mode == "token":
+                    expected = auth.get("token") or ""
+                    provided = self.headers.get("X-Reaction-Token", "") or query_token
+                    if not expected or not hmac.compare_digest(expected, provided):
+                        return self._respond(401, {"error": "unauthorized"})
+                elif mode == "hmac":
+                    secret = auth.get("hmac_secret") or ""
+                    header_name = auth.get("hmac_header") or "X-Signature"
+                    algo = auth.get("hmac_algo") or "sha256"
+                    provided_sig = self.headers.get(header_name, "") or ""
+                    if not secret or not provided_sig:
+                        return self._respond(401, {"error": "unauthorized"})
+                    # Strip "sha256=" prefix convention
+                    if provided_sig.lower().startswith(f"{algo}="):
+                        provided_sig = provided_sig.split("=", 1)[1]
+                    try:
+                        digestmod = getattr(hashlib, algo)
+                    except AttributeError:
+                        return self._respond(401, {"error": "unauthorized"})
+                    computed = hmac.new(secret.encode("utf-8"), raw_bytes, digestmod).hexdigest()
+                    if not hmac.compare_digest(computed, provided_sig):
+                        return self._respond(401, {"error": "unauthorized"})
+                else:
+                    return self._respond(401, {"error": "unauthorized"})
+
+                # Parse payload as JSON if possible (for template interpolation)
+                payload_obj: Any = None
+                try:
+                    if raw_body.strip():
+                        payload_obj = json.loads(raw_body)
+                except Exception:
+                    payload_obj = None
+
+                action = reaction["action"]
+                forwarded = False
+                routine_enqueued = False
+                errors: List[str] = []
+
+                # 1) Forward to Telegram
+                if action.get("forward"):
+                    try:
+                        template = action.get("forward_template") or "{{raw}}"
+                        text = _render_template(template, payload_obj, raw_body)
+                        # Resolve agent → chat_id/thread_id
+                        chat_id: Optional[str] = None
+                        thread_id: Optional[str] = None
+                        agent_id = action.get("agent")
+                        if agent_id:
+                            agent_dir = AGENTS_DIR / str(agent_id)
+                            agent_md = agent_dir / "agent.md"
+                            if agent_md.exists():
+                                a_fm, _ = get_frontmatter_and_body(agent_md)
+                                acid = a_fm.get("chat_id") or a_fm.get("telegram_chat_id")
+                                atid = a_fm.get("thread_id") or a_fm.get("telegram_thread_id")
+                                if acid:
+                                    chat_id = str(acid)
+                                if atid is not None:
+                                    thread_id = str(atid)
+                        header = f"🪝 *{reaction['title']}*\n\n"
+                        bot.send_message(header + text, chat_id=chat_id, thread_id=thread_id)
+                        forwarded = True
+                    except Exception as exc:
+                        logger.error("Reaction %s forward failed: %s", reaction_id, exc)
+                        errors.append(f"forward: {exc}")
+
+                # 2) Execute routine/pipeline
+                routine_name = action.get("routine")
+                if routine_name:
+                    try:
+                        md_file = ROUTINES_DIR / f"{routine_name}.md"
+                        if not md_file.exists():
+                            raise FileNotFoundError(f"routine {routine_name} not found")
+                        r_fm, r_body = get_frontmatter_and_body(md_file)
+                        if not r_fm or not r_body:
+                            raise ValueError(f"invalid routine {routine_name}")
+                        time_slot = f"webhook-{int(time.time())}"
+                        if str(r_fm.get("type", "routine")) == "pipeline":
+                            # Pipelines don't yet support payload injection — log a warning
+                            # but still run them so the user gets an immediate trigger.
+                            logger.warning(
+                                "Reaction %s triggers pipeline %s — payload is NOT injected (unsupported)",
+                                reaction_id, routine_name)
+                            bot.scheduler._enqueue_pipeline_from_file(
+                                md_file, r_fm, r_body, routine_name,
+                                str(r_fm.get("model", "sonnet")), time_slot)
+                        else:
+                            _effort_raw = str(r_fm.get("effort", "")).lower().strip()
+                            task = RoutineTask(
+                                name=routine_name,
+                                prompt=r_body,
+                                model=str(r_fm.get("model", "sonnet")),
+                                time_slot=time_slot,
+                                agent=r_fm.get("agent") or action.get("agent"),
+                                minimal_context=bool(r_fm.get("context") == "minimal"),
+                                voice=bool(r_fm.get("voice", False)),
+                                effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                                webhook_payload=raw_body,
+                            )
+                            bot.routine_state.set_status(routine_name, time_slot, "running")
+                            bot._enqueue_routine(task)
+                        routine_enqueued = True
+                    except Exception as exc:
+                        logger.error("Reaction %s routine trigger failed: %s", reaction_id, exc)
+                        errors.append(f"routine: {exc}")
+                        # Visibility: notify the user so errors never happen silently
+                        try:
+                            bot.send_message(
+                                f"⚠️ Reaction *{reaction['title']}* falhou ao executar rotina: `{exc}`"
+                            )
+                        except Exception:
+                            pass
+
+                logger.info(
+                    "Reaction %s fired (forward=%s, routine=%s, errors=%d)",
+                    reaction_id, forwarded, routine_enqueued, len(errors),
+                )
+                self._respond(200, {
+                    "ok": True,
+                    "forwarded": forwarded,
+                    "routine_enqueued": routine_enqueued,
+                    "errors": errors,
+                })
+
+            def _respond(self, code, data):
+                try:
+                    body = json.dumps(data).encode()
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception as exc:
+                    logger.error("Webhook response error: %s", exc)
+
+            def log_message(self, *args):
+                pass  # suppress default HTTP logging
+
+        try:
+            server = http.server.HTTPServer(("127.0.0.1", WEBHOOK_PORT), _WebhookHandler)
+            self._webhook_server = server
+            threading.Thread(target=server.serve_forever, daemon=True, name="webhook-server").start()
+            logger.info("Webhook server listening on 127.0.0.1:%d", WEBHOOK_PORT)
+        except Exception as exc:
+            self._webhook_server = None
+            logger.error("Failed to start webhook server: %s", exc)
 
     def _notify_startup(self) -> None:
         for cid in self.authorized_ids:

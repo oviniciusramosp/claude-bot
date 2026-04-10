@@ -16,12 +16,15 @@
 
 set -euo pipefail
 
-LABEL="com.vr.claude-bot"
-LABEL_MENUBAR="com.vr.claude-bot-menubar"
+LABEL="com.claudebot.bot"
+LABEL_MENUBAR="com.claudebot.menubar"
+# Legacy labels (used to detect and migrate old installations)
+LEGACY_LABEL="com.vr.claude-bot"
+LEGACY_LABEL_MENUBAR="com.vr.claude-bot-menubar"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PLIST_SRC="${SCRIPT_DIR}/com.vr.claude-bot.plist"
+PLIST_SRC="${SCRIPT_DIR}/com.claudebot.bot.plist"
 PLIST_DST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
-PLIST_MENUBAR_SRC="${SCRIPT_DIR}/com.vr.claude-bot-menubar.plist"
+PLIST_MENUBAR_SRC="${SCRIPT_DIR}/com.claudebot.menubar.plist"
 PLIST_MENUBAR_DST="${HOME}/Library/LaunchAgents/${LABEL_MENUBAR}.plist"
 BOT_SCRIPT="${SCRIPT_DIR}/claude-fallback-bot.py"
 LOG_DIR="${HOME}/.claude-bot"
@@ -115,22 +118,39 @@ for a in data.get('assets', []):
 install_deps() {
     echo -e "${CYAN}Checking dependencies...${NC}"
 
-    # ffmpeg
-    if [[ -x "/opt/homebrew/bin/ffmpeg" ]] || command -v ffmpeg &>/dev/null; then
-        local ffmpeg_path
-        ffmpeg_path=$([[ -x "/opt/homebrew/bin/ffmpeg" ]] && echo "/opt/homebrew/bin/ffmpeg" || command -v ffmpeg)
+    # Detect Homebrew prefix (Apple Silicon: /opt/homebrew, Intel: /usr/local)
+    local brew_prefix=""
+    if command -v brew &>/dev/null; then
+        brew_prefix=$(brew --prefix 2>/dev/null || echo "")
+    elif [[ -x "/opt/homebrew/bin/brew" ]]; then
+        brew_prefix="/opt/homebrew"
+    elif [[ -x "/usr/local/bin/brew" ]]; then
+        brew_prefix="/usr/local"
+    fi
+
+    # ffmpeg (check brew prefix first, then PATH)
+    local ffmpeg_path=""
+    if [[ -n "$brew_prefix" ]] && [[ -x "${brew_prefix}/bin/ffmpeg" ]]; then
+        ffmpeg_path="${brew_prefix}/bin/ffmpeg"
+    elif command -v ffmpeg &>/dev/null; then
+        ffmpeg_path=$(command -v ffmpeg)
+    fi
+
+    if [[ -n "$ffmpeg_path" ]]; then
         echo -e "  ffmpeg: ${GREEN}found${NC} ($ffmpeg_path)"
     else
-        if command -v brew &>/dev/null; then
+        if [[ -n "$brew_prefix" ]]; then
             echo -e "  ffmpeg: ${YELLOW}not found — installing via brew...${NC}"
             brew install ffmpeg --quiet
-            if [[ -x "/opt/homebrew/bin/ffmpeg" ]] || command -v ffmpeg &>/dev/null; then
+            if [[ -x "${brew_prefix}/bin/ffmpeg" ]] || command -v ffmpeg &>/dev/null; then
                 echo -e "  ffmpeg: ${GREEN}installed${NC}"
             else
                 echo -e "  ffmpeg: ${RED}brew install failed — install manually: brew install ffmpeg${NC}"
             fi
         else
-            echo -e "  ffmpeg: ${RED}not found and Homebrew not available — install manually: brew install ffmpeg${NC}"
+            echo -e "  ffmpeg: ${RED}not found and Homebrew not available${NC}"
+            echo -e "    Install Homebrew first: ${CYAN}https://brew.sh${NC}"
+            echo -e "    Then run: ${CYAN}brew install ffmpeg${NC}"
         fi
     fi
 
@@ -185,6 +205,19 @@ case "${1:-help}" in
         if is_loaded; then
             echo "Unloading existing service..."
             launchctl unload "$PLIST_DST" 2>/dev/null || true
+        fi
+
+        # Migrate from legacy bundle id (com.vr.claude-bot) if present
+        LEGACY_PLIST_DST="${HOME}/Library/LaunchAgents/${LEGACY_LABEL}.plist"
+        if [[ -f "$LEGACY_PLIST_DST" ]]; then
+            echo -e "${YELLOW}Detected legacy service (${LEGACY_LABEL}) — migrating...${NC}"
+            launchctl unload "$LEGACY_PLIST_DST" 2>/dev/null || true
+            rm -f "$LEGACY_PLIST_DST"
+        fi
+        LEGACY_PLIST_MENUBAR_DST="${HOME}/Library/LaunchAgents/${LEGACY_LABEL_MENUBAR}.plist"
+        if [[ -f "$LEGACY_PLIST_MENUBAR_DST" ]]; then
+            launchctl unload "$LEGACY_PLIST_MENUBAR_DST" 2>/dev/null || true
+            rm -f "$LEGACY_PLIST_MENUBAR_DST"
         fi
 
         # Copy plist with path substitution

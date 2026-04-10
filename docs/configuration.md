@@ -80,7 +80,7 @@ The default model for new sessions is `"sonnet"`, set in the `Session` dataclass
 
 ## launchd Configuration
 
-The bot runs as a macOS launchd user agent. The plist template (`com.vr.claude-bot.plist`) uses placeholder tokens that the install script substitutes via `sed`.
+The bot runs as a macOS launchd user agent. The plist template (`com.claudebot.bot.plist`) uses placeholder tokens that the install script substitutes via `sed`.
 
 ### Placeholders
 

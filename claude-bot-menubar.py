@@ -75,7 +75,7 @@ def item_with_icon(title, symbol, color=None, size=14, callback=None):
 # Paths & constants
 # ---------------------------------------------------------------------------
 
-LABEL = "com.vr.claude-bot"
+LABEL = "com.claudebot.bot"
 BOT_PROCESS = "claude-fallback-bot.py"
 HOME = os.path.expanduser("~")
 SCRIPTS_DIR = os.path.join(HOME, "claude-bot")
@@ -84,7 +84,7 @@ SESSION_FILE = os.path.join(DATA_DIR, "sessions.json")
 COSTS_FILE = os.path.join(DATA_DIR, "costs.json")
 LOG_FILE = os.path.join(DATA_DIR, "bot.log")
 STDOUT_LOG = os.path.join(DATA_DIR, "launchd-stdout.log")
-PLIST_SRC = os.path.join(SCRIPTS_DIR, "com.vr.claude-bot.plist")
+PLIST_SRC = os.path.join(SCRIPTS_DIR, "com.claudebot.bot.plist")
 PLIST_DST = os.path.join(HOME, f"Library/LaunchAgents/{LABEL}.plist")
 
 VAULT_DIR = os.path.join(SCRIPTS_DIR, "vault")

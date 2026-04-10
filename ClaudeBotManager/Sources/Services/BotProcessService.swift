@@ -1,7 +1,7 @@
 import Foundation
 
 actor BotProcessService {
-    private let plistLabel = "com.vr.claude-bot"
+    private let plistLabel = "com.claudebot.bot"
     private let claudePath: String
 
     init(claudePath: String = "/opt/homebrew/bin/claude") {

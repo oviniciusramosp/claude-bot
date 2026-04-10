@@ -461,8 +461,8 @@ claude-bot/
 |-- claude-fallback-bot.py            Core bot (stdlib only)
 |-- claude-bot-menubar.py             Menu bar indicator (requires rumps)
 |-- claude-bot.sh                     Service manager
-|-- com.vr.claude-bot.plist           launchd template (bot)
-|-- com.vr.claude-bot-menubar.plist   launchd template (menu bar)
+|-- com.claudebot.bot.plist           launchd template (bot)
+|-- com.claudebot.menubar.plist   launchd template (menu bar)
 |-- ClaudeBotManager/                 macOS native manager app (SwiftUI)
 |-- .env.example                      Environment variable template
 |-- CLAUDE.md                         Instructions for Claude Code

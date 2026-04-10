@@ -135,8 +135,8 @@ claude-bot/
   claude-fallback-bot.py           Core bot (Python stdlib only)
   claude-bot-menubar.py            Menu bar indicator (requires rumps)
   claude-bot.sh                    Service manager (install/start/stop/status)
-  com.vr.claude-bot.plist          launchd template (bot)
-  com.vr.claude-bot-menubar.plist  launchd template (menu bar)
+  com.claudebot.bot.plist          launchd template (bot)
+  com.claudebot.menubar.plist      launchd template (menu bar)
   .env                             Bot configuration (gitignored)
   .env.example                     Template for .env
   CLAUDE.md                        Development instructions for Claude Code

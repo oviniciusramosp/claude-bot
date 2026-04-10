@@ -19,8 +19,8 @@ User ↔ Telegram API ↔ claude-fallback-bot.py ↔ Claude Code CLI (subprocess
 | `claude-fallback-bot.py` | Main bot — Telegram polling, session management, Claude CLI orchestration |
 | `claude-bot-menubar.py` | macOS menu bar indicator (requires `rumps`) |
 | `claude-bot.sh` | Service manager — install/uninstall/start/stop/restart/status/logs |
-| `com.vr.claude-bot.plist` | launchd template for the bot (uses `__HOME__`/`__SCRIPT_DIR__` placeholders) |
-| `com.vr.claude-bot-menubar.plist` | launchd template for the menu bar app |
+| `com.claudebot.bot.plist` | launchd template for the bot (uses `__HOME__`/`__SCRIPT_DIR__` placeholders) |
+| `com.claudebot.menubar.plist` | launchd template for the menu bar app |
 
 ### Runtime Data
 
@@ -275,7 +275,7 @@ Voice follows the `HEAR_LOCALE` (default `pt-BR` → Luciana voice). The TTS pro
 
 ## Watchdog
 
-`bot-watchdog.sh` runs via launchd every 60s (`com.vr.claude-bot-watchdog.plist`):
+`bot-watchdog.sh` runs via launchd every 60s (`com.claudebot.bot-watchdog.plist`):
 - If the bot is not running: restarts via `launchctl start` and notifies on Telegram
 - If the bot came back: sends recovery message
 - Uses flag file (`~/.claude-bot/.watchdog-notified`) to notify only once per downtime
@@ -306,7 +306,7 @@ The `build-app.sh` script:
 3. Signs with ad-hoc identity (`codesign --sign -`)
 4. Kills the previous process and opens the new bundle
 
-**Why .app bundle?** Without a bundle, macOS has no stable identity (`Info.plist=not bound`) and asks for permissions (TCC) on every new build. With the bundle, permissions are bound to `CFBundleIdentifier=com.vr.claude-bot-manager`.
+**Why .app bundle?** Without a bundle, macOS has no stable identity (`Info.plist=not bound`) and asks for permissions (TCC) on every new build. With the bundle, permissions are bound to `CFBundleIdentifier=com.claudebot.manager`.
 
 The `.app` is generated at `ClaudeBotManager/ClaudeBotManager.app` (gitignored — build artifact).
 

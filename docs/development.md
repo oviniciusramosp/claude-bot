@@ -9,8 +9,8 @@ claude-bot/
   claude-fallback-bot.py           # Main bot (Telegram polling, session mgmt, Claude CLI)
   claude-bot-menubar.py            # macOS menu bar indicator (requires rumps)
   claude-bot.sh                    # Service manager (install/start/stop/restart/status/logs)
-  com.vr.claude-bot.plist          # launchd template for the bot
-  com.vr.claude-bot-menubar.plist  # launchd template for the menu bar app
+  com.claudebot.bot.plist          # launchd template for the bot
+  com.claudebot.menubar.plist      # launchd template for the menu bar app
   CLAUDE.md                        # Development instructions (this project)
   .env                             # Bot operational config (tokens, paths)
   vault/                           # Knowledge base (Obsidian vault)
@@ -28,7 +28,7 @@ claude-bot/
 |------|---------|
 | `claude-fallback-bot.py` | The entire bot in one file. Telegram polling, session management, Claude CLI orchestration, routine scheduling, pipeline execution, voice transcription, image handling. |
 | `claude-bot.sh` | Shell script to manage the bot as a macOS launchd service. Also handles dependency installation (`install-deps`). |
-| `com.vr.claude-bot.plist` | launchd plist template. Uses `__HOME__` and `__SCRIPT_DIR__` placeholders that `claude-bot.sh install` replaces via `sed`. |
+| `com.claudebot.bot.plist` | launchd plist template. Uses `__HOME__` and `__SCRIPT_DIR__` placeholders that `claude-bot.sh install` replaces via `sed`. |
 | `vault/` | Obsidian knowledge base. Default working directory for Claude Code sessions. See `docs/vault-structure.md`. |
 | `ClaudeBotManager/` | SwiftUI macOS app for managing the bot (dashboard, agents, routines, settings, logs). |
 

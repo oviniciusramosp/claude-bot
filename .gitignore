@@ -45,6 +45,11 @@ vault/.obsidian/graph.json
 
 # Claude Code local settings (user-specific paths)
 .claude/settings.local.json
+# Claude Code implementation plans (user-local, may contain hardcoded paths)
+.claude/plans/
+# Claude Code session state
+.claude/todos/
+.claude/history/
 
 # ============================================
 # Runtime data

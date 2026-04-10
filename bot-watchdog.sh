@@ -35,7 +35,7 @@ else
     # Bot is down — restart via launchd and notify (once per downtime)
     if [[ ! -f "$FLAG_FILE" ]]; then
         touch "$FLAG_FILE"
-        launchctl start com.vr.claude-bot 2>/dev/null
+        launchctl start com.claudebot.bot 2>/dev/null
         send_telegram "🚨 *Claude Bot caiu!* Reiniciando automaticamente..."
     fi
 fi
