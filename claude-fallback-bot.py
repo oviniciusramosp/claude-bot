@@ -4242,6 +4242,36 @@ class ClaudeTelegramBot:
         # Stream updates while runner is active
         self._stream_updates(runner_thread, runner, routine_mode=routine_mode)
 
+        # Auto-recovery: classify error and retry if possible (first attempt only)
+        if not _retry and runner.exit_code not in (0, 130, 2) and prompt is not None:
+            raw_error = runner.stderr_text or (runner.error_text if not runner.result_text else "")
+            if raw_error:
+                kind = classify_error(raw_error)
+                action, backoff, _ = get_recovery_plan(kind)
+                if action != RecoveryAction.ABORT:
+                    logger.info(
+                        "Auto-recovery: kind=%s action=%s backoff=%ds",
+                        kind.value, action.value, backoff,
+                    )
+                    self.send_message(f"🔄 _{kind.value} — tentando recuperar automaticamente..._")
+                    if action == RecoveryAction.RETRY_AFTER_COMPACT:
+                        self._auto_compact(session)
+                        time.sleep(3)
+                    if backoff > 0:
+                        time.sleep(backoff)
+                    self._run_claude_prompt(
+                        prompt,
+                        _retry=True,
+                        no_output_timeout=no_output_timeout,
+                        max_total_timeout=max_total_timeout,
+                        inactivity_timeout=inactivity_timeout,
+                        routine_mode=routine_mode,
+                        system_prompt=system_prompt,
+                        force_tts=force_tts,
+                        suppress_text=suppress_text,
+                    )
+                    return
+
         # Finalize
         self._finalize_response(session, runner, prompt=prompt if not _retry else None,
                                 routine_mode=routine_mode, force_tts=tts_this_request,
