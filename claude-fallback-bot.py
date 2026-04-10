@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.17.0"  # feat: error classification + auto-recovery + vault checkpoints
+BOT_VERSION = "2.17.1"  # fix: path locking prevents concurrent writes to same file in pipeline
 
 import http.server
 import json
@@ -1706,6 +1706,9 @@ class PipelineExecutor:
         self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
         self._bot = None  # set by _enqueue_pipeline if available
         self._progress_msg_id: Optional[int] = None  # Telegram message ID for live progress
+        # Path locking: output_filename → step_id holding the write lock.
+        # Prevents two parallel steps from writing to the same output file.
+        self._output_file_locks: Dict[str, str] = {}
 
     def execute(self) -> bool:
         """Run the full pipeline. Returns True if all steps completed successfully."""
@@ -1901,11 +1904,21 @@ class PipelineExecutor:
                 else:
                     break  # Deadlock or all resolved
 
-            # Launch ready steps in parallel
+            # Launch ready steps in parallel — skip any whose output file is
+            # currently locked by a running step (will retry next wave).
             threads = []
             for step in ready:
+                out_file = step.resolved_filename
                 with self._lock:
+                    if out_file in self._output_file_locks:
+                        # Another step is writing to the same file; defer to next wave
+                        logger.debug(
+                            "Pipeline %s: step %s deferred — output %s locked by %s",
+                            self.task.name, step.id, out_file, self._output_file_locks[out_file],
+                        )
+                        continue
                     self._step_status[step.id] = "running"
+                    self._output_file_locks[out_file] = step.id
                 t = threading.Thread(target=self._execute_step, args=(step, data_dir),
                                      daemon=True, name=f"pipeline-step-{step.id}")
                 threads.append(t)
@@ -2096,6 +2109,9 @@ class PipelineExecutor:
         finally:
             with self._lock:
                 self._active_runners.pop(step.id, None)
+                # Release output-file path lock so deferred steps can proceed
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
             self._remove_step_activity(step.id)
 
     def _build_step_prompt(self, step: PipelineStep, data_dir: Path) -> str:
