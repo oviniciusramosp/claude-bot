@@ -1,0 +1,50 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Python tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Compile-check Python files
+        run: |
+          python3 -m py_compile claude-fallback-bot.py
+          python3 -m py_compile claude-bot-menubar.py
+          python3 -m py_compile scripts/journal-audit.py
+          python3 -m py_compile scripts/vault-graph-builder.py
+
+      - name: Run unit + integration + contract tests
+        env:
+          PYTHONWARNINGS: ignore::ResourceWarning
+        run: |
+          python3 -m unittest discover -t . -s tests -v
+
+  swift:
+    name: Swift build + tests
+    runs-on: macos-15  # Need recent macOS for swift-tools-version 6.2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode.app
+
+      - name: Build ClaudeBotManager
+        working-directory: ClaudeBotManager
+        run: swift build -c release
+
+      - name: Run Swift tests
+        working-directory: ClaudeBotManager
+        run: swift test
