@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.13.1"  # fix: don't double-escape pre-escaped MDv2 sequences from Claude output
+BOT_VERSION = "2.15.0"  # feat: auto-route group messages to mapped agent by chat_id/thread_id
 
 import http.server
 import json
@@ -1461,6 +1461,19 @@ class ClaudeRunner:
 # ---------------------------------------------------------------------------
 
 
+def _get_agent_workspace(agent_id: str) -> Path:
+    """Return (and create if needed) the isolated workspace dir for an agent.
+
+    Each agent gets its own permanent workspace at Agents/{id}/workspace/ so
+    that pipeline data persists across runs and CLAUDE.md inheritance is
+    controlled via .claude/settings.local.json inside the workspace.
+    """
+    ws = AGENTS_DIR / agent_id / "workspace"
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / "data").mkdir(exist_ok=True)
+    return ws
+
+
 def load_agent(agent_id: str) -> Optional[Dict[str, Any]]:
     """Load agent definition from vault/Agents/{id}/agent.md. Returns parsed frontmatter + body or None."""
     agent_file = AGENTS_DIR / agent_id / "agent.md"
@@ -1519,6 +1532,8 @@ class ThreadContext:
     last_typing_time: float = 0.0
     last_snapshot_len: int = 0
     tts_enabled: bool = False
+    _auto_agent: Optional[str] = None  # agent ID set by auto-routing (None = manual or unset)
+    _manual_override: bool = False  # True when user explicitly switched agent in this context
 
     def ensure_runner(self) -> "ClaudeRunner":
         if self.runner is None:
@@ -1540,7 +1555,11 @@ class PipelineExecutor:
         self.bot = bot
         self.ctx = ctx
         self.state = state_mgr
-        self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{secrets.token_hex(6)}")
+        # Agent pipelines use a permanent per-agent workspace; otherwise use a temp dir
+        if task.agent and (AGENTS_DIR / task.agent).is_dir():
+            self.workspace = _get_agent_workspace(task.agent)
+        else:
+            self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{secrets.token_hex(6)}")
         self._step_status: Dict[str, str] = {s.id: "pending" for s in task.steps}
         self._step_outputs: Dict[str, str] = {}
         self._step_errors: Dict[str, str] = {}
@@ -1564,8 +1583,12 @@ class PipelineExecutor:
             return False
         logger.info("Pipeline %s starting (%d steps)", self.task.name, len(self.task.steps))
         self.workspace.mkdir(parents=True, exist_ok=True)
-        data_dir = self.workspace / "data"
-        data_dir.mkdir(exist_ok=True)
+        if self.task.agent and (AGENTS_DIR / self.task.agent).is_dir():
+            # Persistent per-pipeline data dir inside the agent's permanent workspace
+            data_dir = self.workspace / "data" / self.task.name
+        else:
+            data_dir = self.workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
 
         # Initialize pipeline state with all step ids + output types + workspace path
         steps_info = [{"id": s.id, "output_type": s.output_type} for s in self.task.steps]
@@ -1789,16 +1812,15 @@ class PipelineExecutor:
         with self._lock:
             self._active_runners[step.id] = runner
 
-        # Determine workspace for Claude CLI
+        # Determine workspace for Claude CLI — prefer isolated workspace/ subdir
         ws = str(self.workspace)
-        if step.agent:
-            agent_dir = AGENTS_DIR / step.agent
-            if agent_dir.is_dir():
-                ws = str(agent_dir)
-        elif self.task.agent:
-            agent_dir = AGENTS_DIR / self.task.agent
-            if agent_dir.is_dir():
-                ws = str(agent_dir)
+        agent_id_for_ws = step.agent or self.task.agent
+        if agent_id_for_ws:
+            isolated = AGENTS_DIR / agent_id_for_ws / "workspace"
+            if isolated.is_dir():
+                ws = str(isolated)
+            elif (AGENTS_DIR / agent_id_for_ws).is_dir():
+                ws = str(AGENTS_DIR / agent_id_for_ws)
 
         try:
             # Run Claude CLI in a separate thread so timeouts can actually fire
@@ -1884,16 +1906,22 @@ class PipelineExecutor:
             # Capture output: prefer file written by Claude, fallback to runner text
             output_file = data_dir / step.resolved_filename
             if not (output_file.exists() and output_file.stat().st_size > 0):
-                # Fallback: check if Claude wrote to the agent's data/ dir instead
+                # Fallback: check if Claude wrote to the agent's workspace data dir
                 # (safety net for when agent workspace differs from pipeline data_dir)
                 agent_id = step.agent or self.task.agent
                 if agent_id:
-                    agent_data_file = AGENTS_DIR / agent_id / "data" / step.resolved_filename
-                    if agent_data_file.exists() and agent_data_file.stat().st_size > 0:
-                        output = agent_data_file.read_text(encoding="utf-8")
-                        output_file.write_text(output, encoding="utf-8")
-                        logger.info("Pipeline %s: step %s output recovered from agent workspace %s",
-                                    self.task.name, step.id, agent_id)
+                    candidates = [
+                        AGENTS_DIR / agent_id / "workspace" / "data" / self.task.name / step.resolved_filename,
+                        AGENTS_DIR / agent_id / "workspace" / "data" / step.resolved_filename,
+                        AGENTS_DIR / agent_id / "data" / step.resolved_filename,  # legacy
+                    ]
+                    for candidate in candidates:
+                        if candidate.exists() and candidate.stat().st_size > 0:
+                            output = candidate.read_text(encoding="utf-8")
+                            output_file.write_text(output, encoding="utf-8")
+                            logger.info("Pipeline %s: step %s output recovered from %s",
+                                        self.task.name, step.id, candidate)
+                            break
 
             if output_file.exists() and output_file.stat().st_size > 0:
                 # Claude wrote the file directly — use that
@@ -2162,6 +2190,9 @@ class ClaudeTelegramBot:
         self._start_time = time.time()
         self._start_control_server()
 
+        # Agent ↔ chat mapping: (chat_id, thread_id) → agent dict
+        self._agent_chat_map: Dict[tuple, Dict[str, Any]] = self._build_agent_chat_map()
+
         # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
         self._pending_approvals: Dict[str, dict] = {}
         self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
@@ -2190,6 +2221,65 @@ class ClaudeTelegramBot:
                            self._tts_tools.get("ffmpeg", "not found"))
 
         logger.info("Bot initialized. Authorized IDs: %s", self.authorized_ids)
+
+    # -- Agent ↔ Chat mapping --
+
+    _AGENT_MAP_TTL = 60  # seconds between automatic refreshes
+
+    def _build_agent_chat_map(self) -> Dict[tuple, Dict[str, Any]]:
+        """Build a mapping of (chat_id, thread_id) → agent dict from agent frontmatter.
+
+        Only maps agents that have BOTH chat_id AND thread_id — a chat_id alone
+        (without thread_id) would hijack the entire group for one agent.
+        """
+        mapping: Dict[tuple, Dict[str, Any]] = {}
+        for agent in list_agents():
+            agent_chat_id = agent.get("chat_id") or agent.get("telegram_chat_id")
+            agent_thread_id = agent.get("thread_id")
+            if agent_chat_id and agent_thread_id is not None:
+                # Normalize: chat_id as str, thread_id as int
+                tid = int(agent_thread_id)
+                mapping[(str(agent_chat_id), tid)] = agent
+        if mapping:
+            logger.info("Agent chat map: %s", {k: v["_id"] for k, v in mapping.items()})
+        self._agent_map_ts = time.time()
+        return mapping
+
+    def _refresh_agent_chat_map(self) -> None:
+        """Refresh the agent ↔ chat mapping (call after agent creation/update)."""
+        self._agent_chat_map = self._build_agent_chat_map()
+
+    def _find_agent_for_chat(self, chat_id: str, thread_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        """Return the agent dict if this (chat_id, thread_id) is mapped to an agent.
+
+        Auto-refreshes the map if older than _AGENT_MAP_TTL seconds.
+        """
+        if thread_id is None:
+            return None  # require thread_id — don't hijack entire groups
+        # Lazy refresh: re-scan agents periodically to pick up new/edited agents
+        if time.time() - self._agent_map_ts > self._AGENT_MAP_TTL:
+            self._refresh_agent_chat_map()
+        # Exact match (chat_id as str, thread_id as int)
+        return self._agent_chat_map.get((chat_id, int(thread_id)))
+
+    def _auto_activate_agent(self, agent: Dict[str, Any]) -> None:
+        """Activate an agent on the current session (workspace + model), silently.
+
+        Thread-safe: acquires context lock before mutating session state.
+        """
+        ctx = self._ctx
+        lock = ctx.lock if ctx else threading.Lock()
+        with lock:
+            session = self._get_session()
+            session.agent = agent["_id"]
+            session.model = agent.get("model", session.model)
+            isolated = AGENTS_DIR / agent["_id"] / "workspace"
+            session.workspace = str(isolated) if isolated.is_dir() else str(AGENTS_DIR / agent["_id"])
+            # Mark as auto-activated so manual overrides are respected
+            if ctx:
+                ctx._auto_agent = agent["_id"]
+            self.sessions.save()
+        logger.info("Auto-activated agent %s for chat context (%s)", agent["_id"], self._ctx)
 
     def _load_offset(self) -> int:
         """Load last persisted Telegram update offset from disk."""
@@ -3525,6 +3615,12 @@ class ClaudeTelegramBot:
         self._run_claude_prompt(prompt)
 
     def cmd_agent_switch(self, agent_id: str) -> None:
+        # Refresh agent chat map on every switch (catches new/updated agents)
+        self._refresh_agent_chat_map()
+        # Mark as manual override so auto-routing doesn't overwrite
+        ctx = self._ctx
+        if ctx:
+            ctx._manual_override = True
         if agent_id == "none":
             session = self._get_session()
             session.agent = None
@@ -3545,7 +3641,8 @@ class ClaudeTelegramBot:
         session = self._get_session()
         session.agent = found["_id"]
         session.model = found.get("model", session.model)
-        session.workspace = str(AGENTS_DIR / found["_id"])
+        isolated = AGENTS_DIR / found["_id"] / "workspace"
+        session.workspace = str(isolated) if isolated.is_dir() else str(AGENTS_DIR / found["_id"])
         self.sessions.save()
         icon = found.get("icon", "🤖")
         name = found.get("name", found["_id"])
@@ -3999,11 +4096,15 @@ class ClaudeTelegramBot:
 
     def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
                           no_output_timeout: int = 90,
-                          max_total_timeout: int = 600,
+                          max_total_timeout: int = 3600,
+                          inactivity_timeout: Optional[int] = None,
                           routine_mode: bool = False,
                           system_prompt: Optional[str] = SYSTEM_PROMPT,
                           force_tts: bool = False,
                           suppress_text: bool = False) -> None:
+        # Resolve inactivity timeout: explicit param > user-configured /timeout value
+        if inactivity_timeout is None:
+            inactivity_timeout = self.timeout_seconds
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -4061,7 +4162,9 @@ class ClaudeTelegramBot:
 
         # Start watchdog thread
         watchdog_thread = threading.Thread(
-            target=self._watchdog, args=(runner, no_output_timeout, max_total_timeout), daemon=True)
+            target=self._watchdog,
+            args=(runner, no_output_timeout, max_total_timeout, inactivity_timeout),
+            daemon=True)
         watchdog_thread.start()
 
         # Stream updates while runner is active
@@ -4077,9 +4180,21 @@ class ClaudeTelegramBot:
 
     def _watchdog(self, runner: ClaudeRunner,
                   no_output_timeout: int = 90,
-                  max_total_timeout: int = 600) -> None:
-        NO_OUTPUT_TIMEOUT = no_output_timeout
-        MAX_TOTAL_TIMEOUT = max_total_timeout
+                  max_total_timeout: int = 3600,
+                  inactivity_timeout: int = 120) -> None:
+        """Watchdog with activity-aware timeouts.
+
+        Three layers of protection:
+        1. no_output_timeout — kills if Claude produces NO output at all since start
+           (detects CLI boot failures, auth errors). Thinking events count as activity.
+        2. inactivity_timeout — kills if no new JSON events for N seconds.
+           If the process is still alive (poll() is None), waits 2x the limit before
+           killing (the process may be waiting on an API response). If the process
+           is dead, kills immediately at 1x.
+        3. max_total_timeout — absolute ceiling (default 1h). Safety net against
+           infinite loops. Only kills if ALSO inactive for at least 60s, so a
+           genuinely productive agent near the ceiling isn't killed mid-sentence.
+        """
         _notified_first_output = False
 
         while runner.running:
@@ -4093,32 +4208,43 @@ class ClaudeTelegramBot:
             if (has_output or is_thinking) and not _notified_first_output:
                 _notified_first_output = True
 
+            # Layer 1: No output at all since start (CLI may have failed to boot)
             if not has_output and not is_thinking:
                 elapsed_start = now - runner.start_time
-                if elapsed_start > NO_OUTPUT_TIMEOUT:
+                if elapsed_start > no_output_timeout:
                     logger.warning("No-output timeout after %.0fs", elapsed_start)
                     self.send_message(f"⏰ Timeout — Claude não produziu nenhum output em {int(elapsed_start)}s. Cancelando...")
                     runner.cancel()
                     break
-            else:
-                elapsed_total = now - runner.start_time
-                if elapsed_total > MAX_TOTAL_TIMEOUT:
-                    logger.warning("Hard total timeout after %.0fs", elapsed_total)
-                    self.send_message(f"⏰ Timeout — Claude rodou por mais de {int(elapsed_total//60)}min sem concluir. Cancelando...")
+                continue
+
+            idle = now - runner.last_activity
+            elapsed_total = now - runner.start_time
+            proc = runner.process
+            process_alive = proc and proc.poll() is None
+
+            # Layer 2: Inactivity timeout (no new JSON events)
+            if idle > inactivity_timeout:
+                if not process_alive:
+                    # Process already dead but thread lingering — clean up
+                    logger.warning("Activity timeout after %.0fs of silence (process dead)", idle)
+                    self.send_message(f"⏰ Timeout — Claude ficou {int(idle)}s sem atividade. Cancelando...")
                     runner.cancel()
                     break
-                elapsed = now - runner.last_activity
-                if elapsed > self.timeout_seconds:
-                    # Only trigger if process is dead — a live process means
-                    # the agent is reasoning or waiting for API response
-                    proc = runner.process
-                    if proc and proc.poll() is None:
-                        pass  # process alive = agent working, not idle
-                    else:
-                        logger.warning("Activity timeout after %.0fs of silence", elapsed)
-                        self.send_message(f"⏰ Timeout — Claude ficou {int(elapsed)}s sem atividade. Cancelando...")
-                        runner.cancel()
-                        break
+                elif idle > inactivity_timeout * 2:
+                    # Process alive but completely silent for 2x the limit — likely hung
+                    logger.warning("Activity timeout after %.0fs of silence (process hung)", idle)
+                    self.send_message(f"⏰ Timeout — Claude está sem responder há {int(idle)}s. Cancelando...")
+                    runner.cancel()
+                    break
+
+            # Layer 3: Absolute ceiling — safety net against infinite loops
+            # Only kills if also idle for at least 60s (don't kill mid-work)
+            if elapsed_total > max_total_timeout and idle > 60:
+                logger.warning("Hard ceiling timeout after %.0fs (idle %.0fs)", elapsed_total, idle)
+                self.send_message(f"⏰ Timeout — Claude rodou por {int(elapsed_total//60)}min e está inativo. Cancelando...")
+                runner.cancel()
+                break
 
     def _update_reaction(self, runner: ClaudeRunner) -> None:
         ctx = self._ctx
@@ -4332,7 +4458,8 @@ class ClaudeTelegramBot:
             session.model = task.model
         if task.agent:
             session.agent = task.agent
-            session.workspace = str(AGENTS_DIR / task.agent)
+            isolated = AGENTS_DIR / task.agent / "workspace"
+            session.workspace = str(isolated) if isolated.is_dir() else str(AGENTS_DIR / task.agent)
         changed = (session.model != original_model or session.agent != original_agent
                     or session.workspace != original_workspace)
 
@@ -4359,10 +4486,9 @@ class ClaudeTelegramBot:
         progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._",
                                                    disable_notification=True)
 
-        saved_timeout = self.timeout_seconds
-        self.timeout_seconds = 300  # 5 min inactivity for routines
         try:
-            self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=1200,
+            self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=3600,
+                                    inactivity_timeout=300,
                                     routine_mode=True,
                                     system_prompt=None if task.minimal_context else SYSTEM_PROMPT,
                                     force_tts=task.voice or inline_tts)
@@ -4389,8 +4515,6 @@ class ClaudeTelegramBot:
                 self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
             else:
                 self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
-        finally:
-            self.timeout_seconds = saved_timeout
 
         # Restore original model, agent, workspace, and session_id
         session.model = original_model
@@ -4984,22 +5108,30 @@ class ClaudeTelegramBot:
                         self._ctx = self._get_context(chat_id, thread_id)
 
                         # Process update + onboarding in a thread so polling never blocks
-                        def _handle(u=update, c=self._ctx, new=is_new_topic, ct=chat_type, tid=thread_id):
+                        def _handle(u=update, c=self._ctx, new=is_new_topic, ct=chat_type, tid=thread_id, cid=chat_id):
                             try:
                                 self._ctx = c
-                                # Onboarding: first message in a new group topic
-                                if new and tid and ct in ("group", "supergroup"):
-                                    agents = list_agents()
-                                    if agents:
-                                        self.cmd_agent_keyboard()
-                                    else:
-                                        markup = {"inline_keyboard": [[
-                                            {"text": "🤖 Criar agente", "callback_data": "agent:create"},
-                                            {"text": "⏭ Sem agente", "callback_data": "agent:none"},
-                                        ]]}
-                                        self.send_message(
-                                            "👋 Novo tópico! Escolha um agente para este canal:",
-                                            reply_markup=markup)
+                                # Auto-routing: check if this chat/thread is mapped to an agent
+                                if ct in ("group", "supergroup"):
+                                    mapped_agent = self._find_agent_for_chat(cid, tid)
+                                    if mapped_agent and not c._manual_override:
+                                        # Ensure agent is active (covers new topics + bot restarts)
+                                        session = self._get_session()
+                                        if session.agent != mapped_agent["_id"]:
+                                            self._auto_activate_agent(mapped_agent)
+                                    elif new and tid:
+                                        # No mapping — show onboarding keyboard for new topics
+                                        agents = list_agents()
+                                        if agents:
+                                            self.cmd_agent_keyboard()
+                                        else:
+                                            markup = {"inline_keyboard": [[
+                                                {"text": "🤖 Criar agente", "callback_data": "agent:create"},
+                                                {"text": "⏭ Sem agente", "callback_data": "agent:none"},
+                                            ]]}
+                                            self.send_message(
+                                                "👋 Novo tópico! Escolha um agente para este canal:",
+                                                reply_markup=markup)
                                 self._process_update(u)
                             except Exception as exc:
                                 logger.error("Error processing update: %s", exc, exc_info=True)
