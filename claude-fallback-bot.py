@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.18.1"  # feat: frozen context snapshot injected on first message of session
+BOT_VERSION = "2.19.0"  # feat: merge journal audit + effort level from claude branches
 
 import http.server
 import json
