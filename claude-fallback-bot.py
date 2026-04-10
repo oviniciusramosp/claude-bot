@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.15.0"  # feat: auto-route group messages to mapped agent by chat_id/thread_id
+BOT_VERSION = "2.15.1"  # fix: activity-aware timeouts — don't kill productive agents, detect real hangs
 
 import http.server
 import json
@@ -23,6 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
+from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -1218,6 +1219,77 @@ def _translate_error(raw: str) -> str:
     # Nenhum padrão reconhecido — mostra o erro bruto truncado
     snippet = raw[:400].strip()
     return f"❌ *Erro do Claude CLI*\n```\n{snippet}\n```"
+
+
+# ---------------------------------------------------------------------------
+# Error Classification & Auto-Recovery
+# ---------------------------------------------------------------------------
+
+class ErrorKind(Enum):
+    OVERLOADED      = "overloaded"        # retry com backoff
+    RATE_LIMIT      = "rate_limit"        # retry com backoff longo
+    CONTEXT_TOO_LONG = "context_too_long" # compact + retry
+    TIMEOUT         = "timeout"           # retry 1x
+    CONNECTION      = "connection"        # retry 1x
+    CLI_CRASH       = "cli_crash"         # retry 1x
+    AUTH            = "auth"              # sem recovery
+    NOT_FOUND       = "not_found"         # sem recovery
+    CREDIT          = "credit"            # sem recovery
+    UNKNOWN         = "unknown"           # sem recovery
+
+
+class RecoveryAction(Enum):
+    RETRY               = "retry"
+    RETRY_AFTER_COMPACT = "retry_after_compact"
+    BACKOFF_RETRY       = "backoff_retry"
+    ABORT               = "abort"
+
+
+# (action, backoff_seconds, max_attempts)
+_RECOVERY_MAP: Dict[ErrorKind, tuple] = {
+    ErrorKind.OVERLOADED:        (RecoveryAction.BACKOFF_RETRY,       30, 1),
+    ErrorKind.RATE_LIMIT:        (RecoveryAction.BACKOFF_RETRY,       90, 1),
+    ErrorKind.CONTEXT_TOO_LONG:  (RecoveryAction.RETRY_AFTER_COMPACT,  0, 1),
+    ErrorKind.TIMEOUT:           (RecoveryAction.RETRY,                5, 1),
+    ErrorKind.CONNECTION:        (RecoveryAction.RETRY,                5, 1),
+    ErrorKind.CLI_CRASH:         (RecoveryAction.RETRY,                2, 1),
+    ErrorKind.AUTH:              (RecoveryAction.ABORT,                0, 0),
+    ErrorKind.NOT_FOUND:         (RecoveryAction.ABORT,                0, 0),
+    ErrorKind.CREDIT:            (RecoveryAction.ABORT,                0, 0),
+    ErrorKind.UNKNOWN:           (RecoveryAction.ABORT,                0, 0),
+}
+
+
+def classify_error(raw: str) -> ErrorKind:
+    """Classify a raw CLI error string into an ErrorKind."""
+    if not raw:
+        return ErrorKind.UNKNOWN
+    sl = raw.lower()
+    # More specific patterns first
+    if "context length" in sl or "too many tokens" in sl or "maximum context" in sl:
+        return ErrorKind.CONTEXT_TOO_LONG
+    if "overloaded" in sl:
+        return ErrorKind.OVERLOADED
+    if "rate limit" in sl or "429" in sl:
+        return ErrorKind.RATE_LIMIT
+    if "authentication" in sl or "401" in sl or "invalid api key" in sl or "x-api-key" in sl:
+        return ErrorKind.AUTH
+    if "credit" in sl or "billing" in sl or "quota" in sl or "insufficient" in sl:
+        return ErrorKind.CREDIT
+    if "not found" in sl or "404" in sl:
+        return ErrorKind.NOT_FOUND
+    if "timeout" in sl or "timed out" in sl:
+        return ErrorKind.TIMEOUT
+    if "connection" in sl or "network" in sl or "unreachable" in sl or "name or service not known" in sl:
+        return ErrorKind.CONNECTION
+    if "broken pipe" in sl or "killed" in sl or "segmentation fault" in sl:
+        return ErrorKind.CLI_CRASH
+    return ErrorKind.UNKNOWN
+
+
+def get_recovery_plan(kind: ErrorKind) -> tuple:
+    """Return (action, backoff_seconds, max_attempts) for an ErrorKind."""
+    return _RECOVERY_MAP.get(kind, (RecoveryAction.ABORT, 0, 0))
 
 
 # ---------------------------------------------------------------------------
@@ -3001,7 +3073,7 @@ class ClaudeTelegramBot:
             lines.append(f"• Workspace: `{s.workspace}`")
         else:
             lines.append("• Nenhuma sessão ativa")
-        lines.append(f"• Timeout: {self.timeout_seconds}s")
+        lines.append(f"• Inactivity timeout: {self.timeout_seconds}s")
         lines.append(f"• Effort: {self.effort or 'padrão'}")
         lines.append(f"• Claude rodando: {'✅ Sim' if self.runner.running else '❌ Não'}")
         if self.runner.running and self.runner.process:
@@ -3214,7 +3286,7 @@ class ClaudeTelegramBot:
     def cmd_timeout(self, val: str) -> None:
         try:
             self.timeout_seconds = int(val)
-            self.send_message(f"✅ Timeout alterado para {self.timeout_seconds}s")
+            self.send_message(f"✅ Timeout de inatividade alterado para {self.timeout_seconds}s")
         except ValueError:
             self.send_message("❌ Valor inválido. Use: `/timeout 300`")
 
