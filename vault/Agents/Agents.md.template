@@ -1,0 +1,26 @@
+---
+title: Agents
+description: Index of all specialized agents. Hub connecting agents to the main graph.
+type: index
+created: 2026-04-07
+updated: 2026-04-10
+tags: [index, agents]
+---
+
+# Agents
+
+Specialized agents with personality, instructions, and their own journal.
+
+## Available agents
+
+No custom agents yet. The bot always has a default "Main" agent that uses the shared vault context.
+
+## Creating agents
+
+- **Via Telegram:** `/agent new` — interactive skill that asks for name, personality, model, and icon
+- **Manually:** Create a directory in `Agents/{id}/` with `agent.md`, `CLAUDE.md`, and a `Journal/` folder. See `vault/CLAUDE.md` for the required structure.
+
+Once created, add an entry here:
+```
+- [[my-agent]] — Short description of the agent's focus and personality
+```

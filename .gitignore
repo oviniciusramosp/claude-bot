@@ -27,13 +27,13 @@ vault/Skills/*
 !vault/Skills/extract-knowledge.md
 vault/Routines/*
 !vault/Routines/.gitkeep
-!vault/Routines/Routines.md
+!vault/Routines/Routines.md.template
 !vault/Routines/update-check.md
 !vault/Routines/journal-audit.md
 !vault/Routines/vault-graph-update.md
 vault/Agents/*
 !vault/Agents/.gitkeep
-!vault/Agents/Agents.md
+!vault/Agents/Agents.md.template
 
 # Knowledge graph (generated)
 vault/.graphs/

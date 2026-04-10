@@ -1,0 +1,27 @@
+---
+title: Routines
+description: Index of all scheduled routines. Hub connecting routines to the main graph.
+type: index
+created: 2026-04-07
+updated: 2026-04-10
+tags: [index, routines]
+---
+
+# Routines
+
+Scheduled routines that execute prompts on Claude Code automatically.
+
+## Maintenance routines (shipped with the bot)
+
+- [[update-check]] — Checks daily for Claude Code or repo updates
+- [[journal-audit]] — Nightly audit that checks all agents' journals for completeness and fills gaps
+- [[vault-graph-update]] — Regenerates the vault knowledge graph daily at 4am
+
+## Your routines
+
+Add your own scheduled routines here as you create them. Use the `/routine` command in Telegram to launch the interactive `create-routine` skill, or create `.md` files directly in this folder.
+
+Example entry format:
+```
+- [[my-routine]] — Short description of what it does and when it runs
+```

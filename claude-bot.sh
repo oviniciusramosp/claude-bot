@@ -184,12 +184,28 @@ install_deps() {
     echo ""
 }
 
+init_vault_templates() {
+    # Copy vault index templates on first run (only if the real file doesn't exist)
+    local vault_dir="${SCRIPT_DIR}/vault"
+    for template_path in "${vault_dir}/Routines/Routines.md.template" "${vault_dir}/Agents/Agents.md.template"; do
+        [[ -f "$template_path" ]] || continue
+        local target="${template_path%.template}"
+        if [[ ! -f "$target" ]]; then
+            cp "$template_path" "$target"
+            echo -e "  vault: ${GREEN}initialized${NC} $(basename "$target")"
+        fi
+    done
+}
+
 case "${1:-help}" in
     install)
         echo -e "${CYAN}Installing Claude Bot service...${NC}"
 
         # Install dependencies
         install_deps
+
+        # Initialize vault index files from templates (first-run only)
+        init_vault_templates
 
         # Validate files exist
         if [[ ! -f "$PLIST_SRC" ]]; then
