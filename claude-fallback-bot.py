@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.15.1"  # fix: activity-aware timeouts — don't kill productive agents, detect real hangs
+BOT_VERSION = "2.17.0"  # feat: error classification + auto-recovery + vault checkpoints
 
 import http.server
 import json
@@ -674,6 +674,69 @@ def _cleanup_stale_pipeline_workspaces() -> None:
                 logger.info("Cleaned up stale pipeline workspace: %s", p)
         except OSError:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Vault Checkpoints (git stash of vault/ changes before routine execution)
+# ---------------------------------------------------------------------------
+
+def vault_checkpoint_create(label: str) -> Optional[str]:
+    """Stash uncommitted vault/ changes before a routine runs.
+
+    Runs git from the repo root targeting vault/ only, so changes to
+    bot code are never stashed. Returns the stash ref ("stash@{0}") or
+    None when there are no changes to stash / git not available.
+    """
+    repo_root = Path(__file__).resolve().parent
+    if not (repo_root / ".git").is_dir():
+        return None
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    msg = f"[checkpoint] {label} @ {ts}"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "stash", "push", "-u", "-m", msg, "--", "vault/"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            logger.warning("Checkpoint create failed: %s", result.stderr.strip())
+            return None
+        if "No local changes" in result.stdout or "nothing to save" in result.stdout:
+            return None  # clean working tree — nothing to checkpoint
+        logger.info("Checkpoint created for '%s': %s", label, msg)
+        return "stash@{0}"
+    except Exception as exc:
+        logger.warning("Checkpoint create error: %s", exc)
+        return None
+
+
+def vault_checkpoint_restore(stash_ref: str) -> bool:
+    """Pop a vault checkpoint to roll back failed routine changes."""
+    repo_root = Path(__file__).resolve().parent
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_root), "stash", "pop", stash_ref],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            logger.info("Checkpoint restored: %s", stash_ref)
+            return True
+        logger.error("Checkpoint restore failed: %s", result.stderr.strip())
+        return False
+    except Exception as exc:
+        logger.error("Checkpoint restore error: %s", exc)
+        return False
+
+
+def vault_checkpoint_drop(stash_ref: str) -> None:
+    """Drop a checkpoint after a successful routine (keeps stash list clean)."""
+    repo_root = Path(__file__).resolve().parent
+    try:
+        subprocess.run(
+            ["git", "-C", str(repo_root), "stash", "drop", stash_ref],
+            capture_output=True, timeout=10,
+        )
+    except Exception:
+        pass
 
 
 class RoutineScheduler:
@@ -1670,12 +1733,17 @@ class PipelineExecutor:
         # Send live progress message to Telegram
         self._send_progress_message()
 
+        # Checkpoint vault state before pipeline execution
+        checkpoint_ref = vault_checkpoint_create(f"pipeline-{self.task.name}")
+
         start_time = time.time()
         self._start_time = start_time
         try:
             self._run_dag_loop(data_dir)
         except Exception as exc:
             logger.error("Pipeline %s error: %s", self.task.name, exc)
+            if checkpoint_ref:
+                vault_checkpoint_restore(checkpoint_ref)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=str(exc)[:200])
             self._finalize_progress(success=False, error=str(exc), elapsed=int(time.time() - start_time))
             return False
@@ -1685,6 +1753,8 @@ class PipelineExecutor:
         elapsed = int(time.time() - start_time)
 
         if all_completed:
+            if checkpoint_ref:
+                vault_checkpoint_drop(checkpoint_ref)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "completed")
             self._finalize_progress(success=True, elapsed=elapsed)
             self._notify_success(elapsed)
@@ -1699,6 +1769,10 @@ class PipelineExecutor:
                 parts.append(f"skipped: {', '.join(skipped_steps)}")
             err = f"Steps {'; '.join(parts)}" if parts else "Pipeline did not complete (unknown state)"
             status = "cancelled" if self._cancelled.is_set() else "failed"
+            if checkpoint_ref and status == "failed":
+                vault_checkpoint_restore(checkpoint_ref)
+            elif checkpoint_ref:
+                vault_checkpoint_drop(checkpoint_ref)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, status, error=err)
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
             logger.warning("Pipeline %s %s: %s", self.task.name, status, err)
@@ -4588,6 +4662,9 @@ class ClaudeTelegramBot:
         progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._",
                                                    disable_notification=True)
 
+        # Checkpoint vault state before execution — allows rollback on failure
+        checkpoint_ref = vault_checkpoint_create(f"routine-{task.name}")
+
         try:
             self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=3600,
                                     inactivity_timeout=300,
@@ -4597,21 +4674,31 @@ class ClaudeTelegramBot:
             # Check if there was an error or cancellation
             runner = self.runner
             if runner.exit_code == 130:
-                # Manually cancelled
+                # Manually cancelled — restore checkpoint
+                if checkpoint_ref:
+                    vault_checkpoint_restore(checkpoint_ref)
                 self.routine_state.set_status(task.name, task.time_slot, "cancelled")
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"🛑 Rotina *{task.name}* cancelada.")
             elif runner.error_text:
+                # Error — restore checkpoint
+                if checkpoint_ref:
+                    vault_checkpoint_restore(checkpoint_ref)
                 self.routine_state.set_status(task.name, task.time_slot, "failed", runner.error_text[:200])
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {runner.error_text[:200]}")
             else:
+                # Success — commit checkpoint (drop stash, keep new state)
+                if checkpoint_ref:
+                    vault_checkpoint_drop(checkpoint_ref)
                 self.routine_state.set_status(task.name, task.time_slot, "completed")
                 # Success: delete progress message (output was already sent by _finalize_response)
                 if progress_msg_id:
                     self.delete_message(progress_msg_id)
         except Exception as exc:
             logger.error("Routine %s failed: %s", task.name, exc)
+            if checkpoint_ref:
+                vault_checkpoint_restore(checkpoint_ref)
             self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
             if progress_msg_id:
                 self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
