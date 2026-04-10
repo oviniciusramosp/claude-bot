@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.22.0"  # refactor: distributability pass — neutral bundle ids, auto-detect Claude CLI, clean vault placeholders
+BOT_VERSION = "2.22.1"  # fix: smarter skill matching (accent norm + substring) + journal staleness detection
 
 import hmac
 import hashlib
@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import urllib.error
+import unicodedata
 import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -2504,6 +2505,9 @@ class ClaudeTelegramBot:
         # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
         self._pending_approvals: Dict[str, dict] = {}
         self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
+        # Tracks mtime of today's journal at session start, per session name.
+        # Used to detect journal updates mid-session and nudge Claude without breaking prefix cache.
+        self._journal_mtimes: Dict[str, float] = {}
 
         # Voice transcription tools
         self._voice_tools = self._check_voice_tools()
@@ -3451,14 +3455,16 @@ class ClaudeTelegramBot:
     def cmd_compact(self) -> None:
         self._run_claude_prompt("/compact")
 
-    def _build_frozen_context(self, session: Session) -> str:
+    def _build_frozen_context(self, session: Session) -> tuple:
         """Build a compact context snapshot to inject once on the first message of a session.
 
         Includes agent CLAUDE.md (truncated) and the last portion of today's journal.
         Frozen at session start — does not change mid-session — to preserve prefix cache hits.
-        Only injected when there is actually content to add (no-op for empty journals).
+
+        Returns (context_str, journal_mtime) where journal_mtime is 0.0 if no journal exists.
         """
         parts = []
+        journal_mtime = 0.0
 
         # Agent instructions (up to 2000 chars to keep it tight)
         if session.agent:
@@ -3475,6 +3481,7 @@ class ClaudeTelegramBot:
         journal_path = Path(self._get_journal_path())
         if journal_path.is_file():
             try:
+                journal_mtime = journal_path.stat().st_mtime
                 journal_text = journal_path.read_text(encoding="utf-8")
                 if journal_text.strip():
                     excerpt = journal_text[-1500:].strip()
@@ -3482,20 +3489,34 @@ class ClaudeTelegramBot:
             except OSError:
                 pass
 
-        if not parts:
-            return ""
-        return "\n\n---\n\n".join(parts)
+        context_str = "\n\n---\n\n".join(parts) if parts else ""
+        return context_str, journal_mtime
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Normalize text for fuzzy matching: lowercase, strip accents, split on separators."""
+        # Strip accents: 'diário' → 'diario', 'création' → 'creation'
+        nfkd = unicodedata.normalize("NFKD", text)
+        ascii_text = "".join(c for c in nfkd if not unicodedata.combining(c))
+        # Replace hyphens/underscores/slashes with spaces so 'journal-entry' → 'journal entry'
+        for sep in ("-", "_", "/", "."):
+            ascii_text = ascii_text.replace(sep, " ")
+        return ascii_text.lower()
 
     def _find_relevant_skills(self, prompt: str, limit: int = 3) -> List[Dict[str, str]]:
-        """Return up to `limit` skills whose name/description keyword-match the prompt.
+        """Return up to `limit` skills that match the prompt.
 
-        Simple word-overlap scoring — zero LLM cost. Short words (<= 3 chars) are ignored.
+        Scoring (zero LLM cost):
+          +2 per prompt word that exactly matches a skill word (after normalization)
+          +1 per prompt word that is a substring of any skill word (catches partial matches)
+        Short words (<= 3 chars) are ignored to avoid noise.
         Returns list of {name, description, path}.
         """
         skills_dir = VAULT_DIR / "Skills"
         if not skills_dir.is_dir():
             return []
-        prompt_words = {w.lower() for w in prompt.split() if len(w) > 3}
+        norm_prompt = self._normalize_text(prompt)
+        prompt_words = {w for w in norm_prompt.split() if len(w) > 3}
         if not prompt_words:
             return []
         scored: List[tuple] = []
@@ -3504,8 +3525,14 @@ class ClaudeTelegramBot:
                 fm, _ = get_frontmatter_and_body(md_file)
                 name = fm.get("name", md_file.stem)
                 desc = fm.get("description", "")
-                text_words = set((f"{name} {desc}").lower().split())
-                score = len(prompt_words & text_words)
+                skill_text = self._normalize_text(f"{name} {desc}")
+                skill_words = set(skill_text.split())
+                score = 0
+                for pw in prompt_words:
+                    if pw in skill_words:
+                        score += 2          # exact word match
+                    elif any(pw in sw for sw in skill_words):
+                        score += 1          # substring match (e.g. "journal" in "journaling")
                 if score > 0:
                     scored.append((score, {
                         "name": name,
@@ -4617,9 +4644,27 @@ class ClaudeTelegramBot:
         # Inject frozen context snapshot on the first message of an interactive session.
         # Frozen = built once, never updated mid-session, so prefix cache hits are preserved.
         if not _retry and not routine_mode and session.message_count == 1:
-            frozen = self._build_frozen_context(session)
+            frozen, journal_mtime = self._build_frozen_context(session)
             if frozen:
                 effective_sp = (effective_sp + "\n\n" + frozen) if effective_sp else frozen
+            # Record journal mtime so we can detect updates in later turns
+            self._journal_mtimes[session.name] = journal_mtime
+
+        # Detect journal updates mid-session: append a lightweight nudge to the USER PROMPT
+        # (not system prompt) so prefix cache on the system prompt is preserved.
+        elif not _retry and not routine_mode and session.message_count > 1:
+            journal_path = Path(self._get_journal_path())
+            try:
+                current_mtime = journal_path.stat().st_mtime if journal_path.is_file() else 0.0
+                recorded_mtime = self._journal_mtimes.get(session.name, 0.0)
+                if current_mtime > recorded_mtime + 1:  # >1s tolerance for fs precision
+                    self._journal_mtimes[session.name] = current_mtime
+                    prompt = (
+                        f"[Nota: o journal de hoje foi atualizado desde o início desta sessão. "
+                        f"Se precisar de contexto recente, consulte {journal_path}]\n\n{prompt}"
+                    )
+            except OSError:
+                pass
 
         # Inject relevant skills metadata for every interactive message (zero LLM cost).
         # Keyword match helps the agent discover and invoke skills proactively.
