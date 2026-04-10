@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.22.1"  # fix: smarter skill matching (accent norm + substring) + journal staleness detection
+BOT_VERSION = "2.22.2"  # fix: pipeline progress message not sent when notify=none
 
 import hmac
 import hashlib
@@ -140,6 +140,7 @@ CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
 WEBHOOK_PORT = 27183                                # public via Tailscale Funnel; control server stays on CONTROL_PORT (local-only)
 REACTIONS_DIR = VAULT_DIR / "Reactions"
 REACTION_SECRETS_FILE = DATA_DIR / "reaction-secrets.json"
+REACTION_STATS_FILE = DATA_DIR / "reaction-stats.json"
 WEBHOOK_MAX_BODY_BYTES = 1_048_576                  # 1 MB cap on webhook payloads
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
@@ -357,8 +358,26 @@ logger.addHandler(_sh)
 # ---------------------------------------------------------------------------
 
 
+def _indent_of(line: str) -> int:
+    """Count leading spaces (tabs expanded to 4)."""
+    n = 0
+    for ch in line:
+        if ch == " ":
+            n += 1
+        elif ch == "\t":
+            n += 4
+        else:
+            break
+    return n
+
+
 def parse_frontmatter(text: str) -> Dict[str, Any]:
-    """Parse YAML frontmatter from a markdown file. Handles scalars, flow lists, and one nested block (schedule:)."""
+    """Parse YAML frontmatter from a markdown file.
+
+    Supports scalars, quoted strings (with `\\n` escapes), flow lists, nested
+    blocks (one level), and block scalars (`|` literal and `>` folded) for
+    multi-line string values.
+    """
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
         return {}
@@ -369,33 +388,84 @@ def parse_frontmatter(text: str) -> Dict[str, Any]:
             break
     if end < 0:
         return {}
+
     result: Dict[str, Any] = {}
     current_block: Optional[str] = None
-    for line in lines[1:end]:
+    i = 1
+    while i < end:
+        line = lines[i]
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
+            i += 1
             continue
-        # Detect indented sub-key (for schedule: block)
-        if current_block and line.startswith("  ") and ":" in stripped:
+
+        # Indented sub-key of an open nested block
+        if current_block and line.startswith("  ") and ":" in stripped and not stripped.startswith("-"):
             key, _, val = stripped.partition(":")
             key = key.strip()
             val = val.strip()
+            # Block scalar at nested level
+            if val in ("|", "|-", ">", ">-"):
+                scalar, consumed = _read_block_scalar(lines, i + 1, end, _indent_of(line))
+                if isinstance(result.get(current_block), dict):
+                    result[current_block][key] = scalar if val.startswith("|") else scalar.replace("\n", " ").strip()
+                i += 1 + consumed
+                continue
             if isinstance(result.get(current_block), dict):
                 result[current_block][key] = _parse_yaml_value(val)
+            i += 1
             continue
+
         # Top-level key
         if ":" in stripped and not stripped.startswith("-"):
             key, _, val = stripped.partition(":")
             key = key.strip()
             val = val.strip()
             if val == "":
-                # Start of a block (e.g., schedule:)
+                # Start of a nested block (e.g., schedule:, auth:, action:)
                 result[key] = {}
                 current_block = key
+            elif val in ("|", "|-", ">", ">-"):
+                # Top-level block scalar
+                scalar, consumed = _read_block_scalar(lines, i + 1, end, _indent_of(line))
+                result[key] = scalar if val.startswith("|") else scalar.replace("\n", " ").strip()
+                i += 1 + consumed
+                current_block = None
+                continue
             else:
                 result[key] = _parse_yaml_value(val)
                 current_block = None
+        i += 1
     return result
+
+
+def _read_block_scalar(lines: List[str], start: int, end: int, parent_indent: int) -> tuple:
+    """Collect a YAML block scalar starting at `start`.
+
+    Returns (joined_text, consumed_lines). Only lines indented strictly deeper
+    than `parent_indent` are included. Strips the minimum indent from each line.
+    """
+    collected: List[str] = []
+    j = start
+    while j < end:
+        line = lines[j]
+        if line.strip() == "":
+            collected.append("")
+            j += 1
+            continue
+        if _indent_of(line) <= parent_indent:
+            break
+        collected.append(line)
+        j += 1
+    if not collected:
+        return "", j - start
+    # Find minimum indent among non-empty collected lines
+    min_indent = min(_indent_of(ln) for ln in collected if ln.strip())
+    dedented = [ln[min_indent:] if len(ln) >= min_indent else ln for ln in collected]
+    # Strip trailing empty lines
+    while dedented and dedented[-1] == "":
+        dedented.pop()
+    return "\n".join(dedented), j - start
 
 
 def _parse_yaml_value(val: str) -> Any:
@@ -1859,8 +1929,9 @@ class PipelineExecutor:
         self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
                                         steps_init=steps_info, workspace=str(self.workspace))
 
-        # Send live progress message to Telegram
-        self._send_progress_message()
+        # Send live progress message to Telegram (skip if notify=none)
+        if self.task.notify != "none":
+            self._send_progress_message()
 
         # Checkpoint vault state before pipeline execution
         checkpoint_ref = vault_checkpoint_create(f"pipeline-{self.task.name}")
