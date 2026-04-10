@@ -487,6 +487,7 @@ class RoutineTask:
     agent: Optional[str] = None
     minimal_context: bool = False
     voice: bool = False
+    effort: Optional[str] = None
 
 
 @dataclass
@@ -504,6 +505,7 @@ class PipelineStep:
     output_type: str = "file"  # "none", "file", "telegram", or vault-relative path
     output_file: Optional[str] = None  # custom output filename (default: {id}.md)
     engine: str = "claude"
+    effort: Optional[str] = None
 
     @property
     def resolved_filename(self) -> str:
@@ -522,6 +524,7 @@ class PipelineTask:
     notify: str = "final"
     minimal_context: bool = False
     voice: bool = False
+    effort: Optional[str] = None
 
 
 class RoutineStateManager:
@@ -860,6 +863,7 @@ class RoutineScheduler:
                             self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
                         else:
                             self.state.set_status(routine_name, t_str, "running")
+                            _effort_raw = str(fm.get("effort", "")).lower().strip()
                             task = RoutineTask(
                                 name=routine_name,
                                 prompt=body,
@@ -868,6 +872,7 @@ class RoutineScheduler:
                                 agent=fm.get("agent"),
                                 minimal_context=bool(fm.get("context") == "minimal"),
                                 voice=bool(fm.get("voice", False)),
+                                effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
                             )
                             self._enqueue(task)
             except Exception as exc:
@@ -924,6 +929,7 @@ class RoutineScheduler:
             else:
                 out_type = "file"
 
+            _step_effort = str(s.get("effort", "")).lower().strip()
             steps.append(PipelineStep(
                 id=step_id,
                 name=str(s.get("name", step_id)),
@@ -938,6 +944,7 @@ class RoutineScheduler:
                 output_type=out_type,
                 output_file=s.get("output_file") or None,
                 engine=str(s.get("engine", "claude")),
+                effort=_step_effort if _step_effort in ("low", "medium", "high") else None,
             ))
 
         if not steps:
@@ -973,6 +980,7 @@ class RoutineScheduler:
                     logger.error("Pipeline %s has dependency cycle: %s", routine_name, cycle_str)
                     return
 
+        _effort_raw = str(fm.get("effort", "")).lower().strip()
         task = PipelineTask(
             name=routine_name,
             title=str(fm.get("title", routine_name)),
@@ -983,6 +991,7 @@ class RoutineScheduler:
             notify=str(fm.get("notify", "final")),
             minimal_context=bool(fm.get("context") == "minimal"),
             voice=bool(fm.get("voice", False)),
+            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
         )
         steps_info = [{"id": s.id, "output_type": s.output_type} for s in steps]
         self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=steps_info)
@@ -2008,7 +2017,8 @@ class PipelineExecutor:
             runner_thread = threading.Thread(
                 target=runner.run,
                 kwargs={"prompt": prompt, "model": step.model, "workspace": ws,
-                         "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT},
+                         "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT,
+                         "effort": step.effort or self.task.effort},
                 daemon=True, name=f"pipeline-runner-{step.id}")
             runner_thread.start()
 
@@ -3381,6 +3391,37 @@ class ClaudeTelegramBot:
             return ""
         return "\n\n---\n\n".join(parts)
 
+    def _find_relevant_skills(self, prompt: str, limit: int = 3) -> List[Dict[str, str]]:
+        """Return up to `limit` skills whose name/description keyword-match the prompt.
+
+        Simple word-overlap scoring — zero LLM cost. Short words (<= 3 chars) are ignored.
+        Returns list of {name, description, path}.
+        """
+        skills_dir = VAULT_DIR / "Skills"
+        if not skills_dir.is_dir():
+            return []
+        prompt_words = {w.lower() for w in prompt.split() if len(w) > 3}
+        if not prompt_words:
+            return []
+        scored: List[tuple] = []
+        for md_file in skills_dir.glob("*.md"):
+            try:
+                fm, _ = get_frontmatter_and_body(md_file)
+                name = fm.get("name", md_file.stem)
+                desc = fm.get("description", "")
+                text_words = set((f"{name} {desc}").lower().split())
+                score = len(prompt_words & text_words)
+                if score > 0:
+                    scored.append((score, {
+                        "name": name,
+                        "description": desc,
+                        "path": str(md_file),
+                    }))
+            except Exception:
+                continue
+        scored.sort(key=lambda x: -x[0])
+        return [s[1] for s in scored[:limit]]
+
     def _snapshot_session_to_journal(self, session: Session) -> None:
         """Generate a structured snapshot of the session and append it to today's journal.
 
@@ -3735,6 +3776,7 @@ class ClaudeTelegramBot:
             self.send_message(f"🚀 Pipeline `{name}` disparada manualmente.")
         else:
             self.routine_state.set_status(name, time_slot, "running")
+            _effort_raw = str(fm.get("effort", "")).lower().strip()
             task = RoutineTask(
                 name=name,
                 prompt=body,
@@ -3743,6 +3785,7 @@ class ClaudeTelegramBot:
                 agent=fm.get("agent"),
                 minimal_context=bool(fm.get("context") == "minimal"),
                 voice=bool(fm.get("voice", False)),
+                effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
             )
             self._enqueue_routine(task)
             self.send_message(f"🚀 Rotina `{name}` disparada manualmente.")
@@ -4844,6 +4887,9 @@ class ClaudeTelegramBot:
         # Checkpoint vault state before execution — allows rollback on failure
         checkpoint_ref = vault_checkpoint_create(f"routine-{task.name}")
 
+        saved_effort = self.effort
+        if task.effort:
+            self.effort = task.effort
         try:
             self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=3600,
                                     inactivity_timeout=300,
@@ -4883,6 +4929,8 @@ class ClaudeTelegramBot:
                 self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
             else:
                 self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+        finally:
+            self.effort = saved_effort
 
         # Restore original model, agent, workspace, and session_id
         session.model = original_model
@@ -5352,6 +5400,7 @@ class ClaudeTelegramBot:
                                 str(fm.get("model", "sonnet")), time_slot)
                             self._respond(200, {"ok": True, "type": "pipeline"})
                             return
+                        _effort_raw = str(fm.get("effort", "")).lower().strip()
                         task = RoutineTask(
                             name=name,
                             prompt=routine_body,
@@ -5359,6 +5408,7 @@ class ClaudeTelegramBot:
                             time_slot=time_slot,
                             agent=fm.get("agent"),
                             minimal_context=bool(fm.get("context") == "minimal"),
+                            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
                         )
                         bot.routine_state.set_status(name, time_slot, "running")
                         bot._enqueue_routine(task)

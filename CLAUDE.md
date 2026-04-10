@@ -227,6 +227,7 @@ Commit immediately after:
 | `agent` | string | — | Agent to route execution to |
 | `enabled` | bool | `true` | Enable/disable the routine |
 | `context` | string | `full` | `minimal` = skip vault system prompt, use only CLAUDE.md |
+| `effort` | string | — | Reasoning effort: `low`, `medium`, or `high` (CLI default if omitted) |
 | `voice` | bool | `false` | Also send response as audio (TTS) |
 | `notify` | string | `final` | Pipeline only: `final\|all\|summary\|none` |
 
