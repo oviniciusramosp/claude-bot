@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.19.0"  # feat: merge journal audit + effort level from claude branches
+BOT_VERSION = "2.19.1"  # feat: auto-inject relevant skills into system prompt via keyword match
 
 import http.server
 import json
@@ -4467,6 +4467,16 @@ class ClaudeTelegramBot:
             frozen = self._build_frozen_context(session)
             if frozen:
                 effective_sp = (effective_sp + "\n\n" + frozen) if effective_sp else frozen
+
+        # Inject relevant skills metadata for every interactive message (zero LLM cost).
+        # Keyword match helps the agent discover and invoke skills proactively.
+        if not _retry and not routine_mode and system_prompt is not None:
+            relevant_skills = self._find_relevant_skills(prompt)
+            if relevant_skills:
+                skills_block = "\n\n## Available Skills (consider invoking if relevant):\n"
+                for s in relevant_skills:
+                    skills_block += f"- **{s['name']}**: {s['description']} (`{s['path']}`)\n"
+                effective_sp = (effective_sp + skills_block) if effective_sp else skills_block
 
         # All paths use the same session/model/effort
         effective_session_id = session.session_id
