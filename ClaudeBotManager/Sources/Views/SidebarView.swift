@@ -13,6 +13,7 @@ struct SidebarView: View {
                 sidebarLabel(.agents)
                 sidebarLabel(.routines)
                 sidebarLabel(.skills)
+                sidebarLabel(.reactions)
             }
             Section("System") {
                 sidebarLabel(.sessions)
@@ -55,6 +56,9 @@ struct SidebarView: View {
             return c > 0 ? "\(c)" : nil
         case .skills:
             let c = appState.skills.count
+            return c > 0 ? "\(c)" : nil
+        case .reactions:
+            let c = appState.reactions.count
             return c > 0 ? "\(c)" : nil
         case .logs:
             let errors = appState.routines.flatMap { $0.todayExecutions }.filter { $0.status == .failed }.count

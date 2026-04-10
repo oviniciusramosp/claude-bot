@@ -684,6 +684,9 @@ struct SettingsView: View {
             }
         }
     }
+
+    // MARK: - Webhooks Tab
+
 }
 
 struct PathRow: View {

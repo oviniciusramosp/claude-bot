@@ -455,6 +455,193 @@ actor VaultService {
         try content.write(to: indexURL, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - Reactions
+
+    /// Path to the reaction secrets file (~/.claude-bot/reaction-secrets.json).
+    /// Lives outside the vault so vault/ can be committed/synced safely.
+    private var reactionSecretsURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appending(component: ".claude-bot").appending(component: "reaction-secrets.json")
+    }
+
+    private func loadReactionSecrets() -> [String: [String: String]] {
+        guard let data = try? Data(contentsOf: reactionSecretsURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            return [:]
+        }
+        var result: [String: [String: String]] = [:]
+        for (key, value) in json {
+            if let dict = value as? [String: Any] {
+                var entry: [String: String] = [:]
+                for (k, v) in dict {
+                    if let s = v as? String { entry[k] = s }
+                }
+                result[key] = entry
+            }
+        }
+        return result
+    }
+
+    private func saveReactionSecrets(_ secrets: [String: [String: String]]) throws {
+        let dir = reactionSecretsURL.deletingLastPathComponent()
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Filter empty entries so we don't write {"id":{}}
+        let cleaned = secrets.mapValues { entry -> [String: String] in
+            entry.filter { !$0.value.isEmpty }
+        }.filter { !$0.value.isEmpty }
+        let data = try JSONSerialization.data(withJSONObject: cleaned, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: reactionSecretsURL, options: .atomic)
+        // Restrict permissions to 600
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reactionSecretsURL.path)
+    }
+
+    func loadReactions() throws -> [Reaction] {
+        let dir = vaultURL.appending(component: "Reactions", directoryHint: .isDirectory)
+        guard fm.fileExists(atPath: dir.path) else { return [] }
+
+        let entries = try fm.contentsOfDirectory(atPath: dir.path)
+        let secrets = loadReactionSecrets()
+        var reactions: [Reaction] = []
+
+        for entry in entries {
+            guard entry.hasSuffix(".md") && entry != "Reactions.md" else { continue }
+            let fileURL = dir.appending(component: entry)
+            let content = try String(contentsOf: fileURL, encoding: .utf8)
+            let (fm_data, body) = FrontmatterParser.parse(content)
+
+            // Only load files that are actually reactions (guard against stray md files)
+            guard (fm_data["type"] as? String) == "reaction" else { continue }
+
+            let name = String(entry.dropLast(3))
+            let authDict = fm_data["auth"] as? [String: Any] ?? [:]
+            let actionDict = fm_data["action"] as? [String: Any] ?? [:]
+            let modeStr = (authDict["mode"] as? String) ?? "token"
+            let mode = Reaction.AuthMode(rawValue: modeStr) ?? .token
+            let mySecrets = secrets[name] ?? [:]
+
+            let cleanBody = body
+                .replacingOccurrences(of: "[[Reactions]]\n", with: "")
+                .replacingOccurrences(of: "[[Reactions]]", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let reaction = Reaction(
+                id: name,
+                title: fm_data["title"] as? String ?? name,
+                description: fm_data["description"] as? String ?? "",
+                enabled: fm_data["enabled"] as? Bool ?? true,
+                created: fm_data["created"] as? String ?? today(),
+                updated: fm_data["updated"] as? String ?? today(),
+                tags: fm_data["tags"] as? [String] ?? ["reaction"],
+                authMode: mode,
+                hmacHeader: (authDict["hmac_header"] as? String) ?? "X-Signature",
+                hmacAlgo: (authDict["hmac_algo"] as? String) ?? "sha256",
+                routineName: (actionDict["routine"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                forward: actionDict["forward"] as? Bool ?? false,
+                forwardTemplate: (actionDict["forward_template"] as? String) ?? "{{raw}}",
+                agentId: (actionDict["agent"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                body: cleanBody,
+                token: mySecrets["token"],
+                hmacSecret: mySecrets["hmac_secret"]
+            )
+            reactions.append(reaction)
+        }
+        return reactions.sorted { $0.title < $1.title }
+    }
+
+    func saveReaction(_ reaction: Reaction) throws {
+        let dir = vaultURL.appending(component: "Reactions", directoryHint: .isDirectory)
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        var authDict: [String: Any] = ["mode": reaction.authMode.rawValue]
+        if reaction.authMode == .hmac {
+            authDict["hmac_header"] = reaction.hmacHeader
+            authDict["hmac_algo"] = reaction.hmacAlgo
+        }
+
+        var actionDict: [String: Any] = ["forward": reaction.forward]
+        if let r = reaction.routineName, !r.isEmpty { actionDict["routine"] = r }
+        if reaction.forward { actionDict["forward_template"] = reaction.forwardTemplate }
+        if let a = reaction.agentId, !a.isEmpty { actionDict["agent"] = a }
+
+        let frontmatter: [String: Any] = [
+            "title": reaction.title,
+            "description": reaction.description,
+            "type": "reaction",
+            "created": reaction.created,
+            "updated": today(),
+            "tags": reaction.tags.isEmpty ? ["reaction"] : reaction.tags,
+            "enabled": reaction.enabled,
+            "auth": authDict,
+            "action": actionDict
+        ]
+        let orderedKeys = ["title", "description", "type", "created", "updated", "tags", "enabled", "auth", "action"]
+        let body = "\n[[Reactions]]\n\n\(reaction.body)\n"
+        let content = FrontmatterParser.serialize(frontmatter, orderedKeys: orderedKeys, body: body)
+        let fileURL = dir.appending(component: "\(reaction.id).md")
+        try content.write(to: fileURL, atomically: true, encoding: .utf8)
+
+        // Save secrets separately (only token/hmac_secret that are non-empty)
+        var secrets = loadReactionSecrets()
+        var entry: [String: String] = [:]
+        if let t = reaction.token, !t.isEmpty { entry["token"] = t }
+        if let h = reaction.hmacSecret, !h.isEmpty { entry["hmac_secret"] = h }
+        if entry.isEmpty {
+            secrets.removeValue(forKey: reaction.id)
+        } else {
+            secrets[reaction.id] = entry
+        }
+        try saveReactionSecrets(secrets)
+
+        // Update index
+        try updateReactionsIndex(reaction)
+    }
+
+    func deleteReaction(id: String) throws {
+        let dir = vaultURL.appending(component: "Reactions", directoryHint: .isDirectory)
+        let fileURL = dir.appending(component: "\(id).md")
+        if fm.fileExists(atPath: fileURL.path) {
+            try fm.trashItem(at: fileURL, resultingItemURL: nil)
+        }
+        var secrets = loadReactionSecrets()
+        if secrets.removeValue(forKey: id) != nil {
+            try saveReactionSecrets(secrets)
+        }
+        try removeFromReactionsIndex(id: id)
+    }
+
+    /// Generate a fresh random token for a reaction. Prefix `rxn_` + 32 hex chars.
+    nonisolated func generateReactionToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        return "rxn_\(hex)"
+    }
+
+    /// Generate a fresh HMAC secret (256-bit hex string).
+    nonisolated func generateHmacSecret() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func updateReactionsIndex(_ reaction: Reaction) throws {
+        let indexURL = vaultURL.appending(component: "Reactions").appending(component: "Reactions.md")
+        var content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+        if !content.contains("[[\(reaction.id)]]") {
+            content += "\n- [[\(reaction.id)]] — \(reaction.description)"
+            try content.write(to: indexURL, atomically: true, encoding: .utf8)
+        }
+    }
+
+    private func removeFromReactionsIndex(id: String) throws {
+        let indexURL = vaultURL.appending(component: "Reactions").appending(component: "Reactions.md")
+        guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)]]") }
+        content = lines.joined(separator: "\n")
+        try content.write(to: indexURL, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - Main Agent (project CLAUDE.md)
 
     private var projectCLAUDEURL: URL {

@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import Combine
 
 @MainActor
 final class AppState: ObservableObject {
@@ -16,6 +17,8 @@ final class AppState: ObservableObject {
     @Published var agents: [Agent] = []
     @Published var routines: [Routine] = []
     @Published var skills: [Skill] = []
+    @Published var reactions: [Reaction] = []
+    @Published var tunnel: TunnelService
     @Published var sessions: SessionsFile = SessionsFile(sessions: [:], activeSession: nil, cumulativeTurns: 0)
     @Published var contexts: [ContextService.TopicContext] = []
     @Published var recentLogs: [LogEntry] = []
@@ -43,10 +46,38 @@ final class AppState: ObservableObject {
     private var statusTimer: Timer?
     private var usageTimer: Timer?
 
+    // Combine
+    private var cancellables = Set<AnyCancellable>()
+
     init() {
+        // Derive the tailscale-funnel.sh script path from the vault path.
+        // AppState.setupPaths() may update vaultPath later, but TunnelService
+        // only reads the script when invoked, so this resolves correctly as long
+        // as ~/claude-bot is the repo root.
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let scriptPath = "\(home)/claude-bot/scripts/tailscale-funnel.sh"
+        let installPath = "\(home)/claude-bot/scripts/tailscale-install.sh"
+        self.tunnel = TunnelService(
+            webhookPort: 27183,
+            scriptPath: scriptPath,
+            installScriptPath: installPath
+        )
         setupPaths()
         setupServices()
+        // Forward nested ObservableObject changes so SwiftUI views that observe
+        // AppState also re-render when `tunnel`'s @Published properties change.
+        tunnel.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        // Auto-redetect tunnel state when the app becomes active (e.g. user came
+        // back from installing/logging into Tailscale in another app).
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .sink { [weak self] _ in
+                Task { @MainActor in await self?.tunnel.detect() }
+            }
+            .store(in: &cancellables)
         Task { await self.loadAll() }
+        Task { await tunnel.detect() }
         startTimers()
     }
 
@@ -89,7 +120,8 @@ final class AppState: ObservableObject {
             "\(dataDir)/contexts.json",
             "\(vaultPath)/Agents",
             "\(vaultPath)/Routines",
-            "\(vaultPath)/Skills"
+            "\(vaultPath)/Skills",
+            "\(vaultPath)/Reactions"
         ] {
             fileWatcher.watch(path: path, onChange: refresh)
         }
@@ -118,6 +150,7 @@ final class AppState: ObservableObject {
         await loadAgents()
         await loadRoutines()
         await loadSkills()
+        await loadReactions()
         await loadSessions()
         await loadContexts()
         await refreshBotStatus()
@@ -318,6 +351,39 @@ final class AppState: ObservableObject {
     func deleteSkill(id: String) async throws {
         try await vaultService?.deleteSkill(id: id)
         await loadSkills()
+    }
+
+    // MARK: - Reactions
+
+    func loadReactions() async {
+        guard let vs = vaultService else { return }
+        do {
+            reactions = try await vs.loadReactions()
+        } catch {}
+    }
+
+    func saveReaction(_ reaction: Reaction) async throws {
+        try await vaultService?.saveReaction(reaction)
+        await loadReactions()
+    }
+
+    func deleteReaction(id: String) async throws {
+        try await vaultService?.deleteReaction(id: id)
+        await loadReactions()
+    }
+
+    /// Generate a fresh random reaction token (synchronous, no vault access).
+    nonisolated func generateReactionToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let hex = bytes.map { String(format: "%02x", $0) }.joined()
+        return "rxn_\(hex)"
+    }
+
+    nonisolated func generateHmacSecret() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
     func routineHistory(id: String) async -> [RoutineExecution] {

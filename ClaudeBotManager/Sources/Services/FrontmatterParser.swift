@@ -106,12 +106,63 @@ struct FrontmatterParser {
 
     private static func parseBlock(_ lines: [String]) -> [String: Any] {
         var result: [String: Any] = [:]
-        for line in lines {
+        var i = 0
+        while i < lines.count {
+            let line = lines[i]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Detect block scalar: `key: |` or `key: >` with nothing else after
+            if let colon = trimmed.firstIndex(of: ":") {
+                let rest = String(trimmed[trimmed.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+                if rest == "|" || rest == ">" || rest == "|-" || rest == ">-" {
+                    let key = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+                    let parentIndent = leadingSpaces(line)
+                    var collected: [String] = []
+                    var j = i + 1
+                    while j < lines.count {
+                        let ln = lines[j]
+                        if ln.trimmingCharacters(in: .whitespaces).isEmpty {
+                            collected.append("")
+                            j += 1
+                            continue
+                        }
+                        if leadingSpaces(ln) <= parentIndent { break }
+                        collected.append(ln)
+                        j += 1
+                    }
+                    // Dedent by the minimum indent of non-empty lines
+                    let minIndent = collected
+                        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                        .map { leadingSpaces($0) }
+                        .min() ?? 0
+                    var dedented = collected.map { ln -> String in
+                        if ln.count >= minIndent {
+                            return String(ln.dropFirst(minIndent))
+                        }
+                        return ln
+                    }
+                    while dedented.last == "" { dedented.removeLast() }
+                    let joined = dedented.joined(separator: "\n")
+                    result[key] = rest.hasPrefix("|") ? joined : joined.replacingOccurrences(of: "\n", with: " ")
+                    i = j
+                    continue
+                }
+            }
             if let (k, v) = parseKeyValue(line) {
                 result[k] = v
             }
+            i += 1
         }
         return result
+    }
+
+    private static func leadingSpaces(_ line: String) -> Int {
+        var n = 0
+        for ch in line {
+            if ch == " " { n += 1 }
+            else if ch == "\t" { n += 4 }
+            else { break }
+        }
+        return n
     }
 
     private static func parseKeyValue(_ line: String) -> (String, Any)? {
@@ -156,32 +207,42 @@ struct FrontmatterParser {
             // Nested block
             var lines = ["\(key):"]
             for (k, v) in dict.sorted(by: { $0.key < $1.key }) {
-                lines.append("  \(serializeScalar(key: k, value: v))")
+                lines.append(serializeScalar(key: k, value: v, indent: 2))
             }
             return lines.joined(separator: "\n")
         }
-        return serializeScalar(key: key, value: value)
+        return serializeScalar(key: key, value: value, indent: 0)
     }
 
-    private static func serializeScalar(key: String, value: Any) -> String {
+    private static func serializeScalar(key: String, value: Any, indent: Int = 0) -> String {
+        let pad = String(repeating: " ", count: indent)
         switch value {
         case let b as Bool:
-            return "\(key): \(b ? "true" : "false")"
+            return "\(pad)\(key): \(b ? "true" : "false")"
         case let arr as [String]:
             let items = arr.map { quoteIfNeeded($0) }.joined(separator: ", ")
-            return "\(key): [\(items)]"
+            return "\(pad)\(key): [\(items)]"
         case let arr as [Any]:
             let items = arr.map { "\($0)" }.joined(separator: ", ")
-            return "\(key): [\(items)]"
+            return "\(pad)\(key): [\(items)]"
         case let s as String:
-            // Quote if contains emoji or special chars
+            // Multi-line strings are emitted as YAML block scalars (`|`) so that
+            // newlines survive a round-trip through both our hand-rolled Python
+            // and Swift parsers. Single-line strings use the existing quoting rules.
+            if s.contains("\n") {
+                let childPad = String(repeating: " ", count: indent + 2)
+                let body = s.components(separatedBy: "\n")
+                    .map { "\(childPad)\($0)" }
+                    .joined(separator: "\n")
+                return "\(pad)\(key): |\n\(body)"
+            }
             if needsQuoting(s) {
                 let escaped = s.replacingOccurrences(of: "\"", with: "\\\"")
-                return "\(key): \"\(escaped)\""
+                return "\(pad)\(key): \"\(escaped)\""
             }
-            return "\(key): \(s)"
+            return "\(pad)\(key): \(s)"
         default:
-            return "\(key): \(value)"
+            return "\(pad)\(key): \(value)"
         }
     }
 
