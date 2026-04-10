@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.17.1"  # fix: path locking prevents concurrent writes to same file in pipeline
+BOT_VERSION = "2.18.0"  # feat: session snapshot to journal before auto-compact
 
 import http.server
 import json
@@ -3305,8 +3305,53 @@ class ClaudeTelegramBot:
     def cmd_compact(self) -> None:
         self._run_claude_prompt("/compact")
 
+    def _snapshot_session_to_journal(self, session: Session) -> None:
+        """Generate a structured snapshot of the session and append it to today's journal.
+
+        Called synchronously from within the auto-compact background thread — runs before
+        /compact so the summary reflects the full context while it still exists.
+        """
+        if not session.session_id:
+            return
+        journal_path = Path(self._get_journal_path())
+        journal_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = time.strftime("%Y-%m-%d %H:%M")
+        snapshot_prompt = (
+            "Gere um snapshot compacto desta sessão em markdown puro (sem preâmbulo), "
+            "com estes blocos (máx 8 linhas cada):\n"
+            "## Goal\n## Progress\n## Decisions\n## Files\n## Next Steps\n\n"
+            "Responda APENAS com o markdown do snapshot."
+        )
+        try:
+            runner = ClaudeRunner()
+            runner.run(
+                prompt=snapshot_prompt,
+                model=session.model,
+                session_id=session.session_id,
+                workspace=session.workspace,
+                system_prompt=None,
+            )
+            snapshot = (runner.result_text or runner.accumulated_text or "").strip()
+            if not snapshot:
+                return
+            header = (
+                f"\n\n---\n\n"
+                f"## Session Snapshot — {timestamp}\n\n"
+                f"_Agent: {session.agent or 'main'} | Session: {session.name} | "
+                f"Turns: {session.message_count}_\n\n"
+            )
+            with journal_path.open("a", encoding="utf-8") as f:
+                f.write(header + snapshot + "\n")
+            logger.info("Session snapshot appended to %s (%d chars)", journal_path, len(snapshot))
+        except Exception as exc:
+            logger.error("Session snapshot failed: %s", exc)
+            # Non-fatal — compact proceeds regardless
+
     def _auto_compact(self, session: Session) -> None:
-        """Run /compact in background to keep session context manageable."""
+        """Run /compact in background to keep session context manageable.
+
+        First snapshots the session to today's journal, then compacts.
+        """
         if not session.session_id:
             return
         sid = session.session_id
@@ -3317,6 +3362,9 @@ class ClaudeTelegramBot:
             try:
                 logger.info("Auto-compact starting for session %s (turns=%d)",
                             session.name, session.message_count)
+                # 1. Snapshot to journal before compacting (preserves episodic memory)
+                self._snapshot_session_to_journal(session)
+                # 2. Compact
                 runner = ClaudeRunner()
                 runner.run(
                     prompt="/compact",
