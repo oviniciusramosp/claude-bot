@@ -153,6 +153,7 @@ PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
+SKILL_HINTS_ENABLED = True   # inject top-N skill hints from vault/.graphs/graph.json
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
@@ -1679,6 +1680,101 @@ def record_lesson_draft(trigger_name: str, error_summary: str,
     except Exception as exc:
         logger.error("Failed to record lesson draft for %s: %s", trigger_name, exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Skill hint injection — graph.json-based keyword scoring
+# ---------------------------------------------------------------------------
+
+# Short common words that must not contribute to the skill match score.
+# English + Portuguese — the bot runs bilingual by default.
+_SKILL_HINT_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for",
+    "on", "at", "by", "be", "as", "are", "was", "with", "that", "this",
+    "from", "but", "not", "can", "you", "me", "my", "we", "us", "your",
+    "o", "os", "a", "as", "um", "uma", "uns", "umas", "e", "ou", "de",
+    "do", "da", "dos", "das", "em", "no", "na", "nos", "nas", "por",
+    "para", "com", "como", "que", "se", "foi", "ser", "estar", "ter",
+    "isso", "esse", "essa", "eu", "eu", "voce", "você", "ele", "ela",
+})
+
+
+def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
+    """Return up to `max_n` skill names scored against the prompt via graph.json.
+
+    Reads ``vault/.graphs/graph.json`` (zero LLM cost) and scores each skill
+    node by simple keyword overlap between the prompt and the skill's
+    name/description/tags. Stopwords are ignored and short words (<=3 chars)
+    are ignored to keep the signal-to-noise ratio high.
+
+    Returns an empty list when:
+    - SKILL_HINTS_ENABLED is False
+    - graph.json does not exist (expected for new users — not an error)
+    - graph.json is malformed or unreadable (logged, not raised)
+    - no skills score above 0
+
+    All I/O is wrapped in try/except and errors are logged via
+    ``logger.warning`` — the caller should NOT expect exceptions.
+    """
+    if not SKILL_HINTS_ENABLED:
+        return []
+    if not prompt or not prompt.strip():
+        return []
+    graph_path = VAULT_DIR / ".graphs" / "graph.json"
+    if not graph_path.is_file():
+        return []  # New users won't have a graph yet — silent, expected
+    try:
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Skill hint: could not read %s: %s", graph_path, exc)
+        return []
+    nodes = data.get("nodes") if isinstance(data, dict) else None
+    if not isinstance(nodes, list):
+        logger.warning("Skill hint: graph.json has no 'nodes' list — got %s", type(nodes).__name__)
+        return []
+
+    # Tokenize prompt → filtered lowercase word set
+    tokens = re.findall(r"[\w-]+", prompt.lower())
+    prompt_words = {
+        t for t in tokens
+        if len(t) > 3 and t not in _SKILL_HINT_STOPWORDS
+    }
+    if not prompt_words:
+        return []
+
+    scored: List[tuple] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        # Filter to skills — graph.json uses type=="skill" OR source_file starts with "Skills/"
+        node_type = str(node.get("type", "")).lower()
+        source_file = str(node.get("source_file", ""))
+        if node_type != "skill" and not source_file.startswith("Skills/"):
+            continue
+        # Build a haystack from name/label/description/tags
+        name = str(node.get("label") or node.get("name") or "")
+        if not name and source_file:
+            name = Path(source_file).stem
+        description = str(node.get("description", ""))
+        tags = node.get("tags", []) or []
+        if not isinstance(tags, list):
+            tags = []
+        haystack = " ".join([name, description, " ".join(str(t) for t in tags)]).lower()
+        haystack_tokens = set(re.findall(r"[\w-]+", haystack))
+        # Score: +2 exact token hit, +1 substring hit
+        score = 0
+        for w in prompt_words:
+            if w in haystack_tokens:
+                score += 2
+            elif any(w in ht for ht in haystack_tokens):
+                score += 1
+        if score > 0:
+            # Prefer the stem (matches filename used in vault/Skills/) for display.
+            display_name = Path(source_file).stem if source_file else name
+            scored.append((score, display_name))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [s[1] for s in scored[:max_n]]
 
 
 def record_manual_lesson(text: str) -> Optional[Path]:
@@ -5531,6 +5627,23 @@ class ClaudeTelegramBot:
                 for s in relevant_skills:
                     skills_block += f"- **{s['name']}**: {s['description']} (`{s['path']}`)\n"
                 effective_sp = (effective_sp + skills_block) if effective_sp else skills_block
+
+        # Graph-based skill hint (user-prompt prefix) — lightweight nudge sourced
+        # from vault/.graphs/graph.json. Skipped for routines/pipelines (they
+        # carry their own context) and for retries (already tagged).
+        if (SKILL_HINTS_ENABLED and not _retry and not routine_mode
+                and prompt is not None):
+            try:
+                hinted = _select_relevant_skills(prompt, max_n=3)
+            except Exception as exc:
+                logger.warning("Skill hint injection failed: %s", exc)
+                hinted = []
+            if hinted:
+                hint_line = (
+                    f"<hint>Relevant skills for this task: {', '.join(hinted)}. "
+                    f"See vault/Skills/ for details.</hint>\n\n"
+                )
+                prompt = hint_line + prompt
 
         # All paths use the same session/model/effort
         effective_session_id = session.session_id
