@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.33.0"  # feat: /clone session branching + Lessons (compound engineering) + graph-based skill hints + pipeline Ralph loops
+BOT_VERSION = "2.34.0"  # feat: Active Memory — proactive vault context injection (OpenClaw v2026.4.10 inspired)
 
 import hmac
 import hashlib
@@ -212,6 +212,21 @@ DANGEROUS_PATTERNS = [
     (r'\bcurl\s+.*\|\s*(ba)?sh', "pipe URL to shell"),
 ]
 
+# --- Active Memory (inspired by OpenClaw v2026.4.10) ---
+# Proactive vault context injection: before each interactive turn we score
+# non-skill nodes in vault/.graphs/graph.json against the user's prompt and
+# append a compact "## Active Memory" block with short excerpts from the top
+# matches. Deterministic, no LLM cost, fail-open. Complements SKILL_HINTS_ENABLED
+# which only surfaces skill names — Active Memory surfaces notes, references,
+# indexes, routines, and pipelines, with actual content excerpts.
+ACTIVE_MEMORY_ENABLED = True            # global default; can be flipped per session
+ACTIVE_MEMORY_MAX_NODES = 3             # how many graph nodes to include per turn
+ACTIVE_MEMORY_MAX_CHARS_PER_NODE = 400  # excerpt size from each matched file body
+ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget => None
+# Node types EXCLUDED from Active Memory: "skill" is already handled by
+# _select_relevant_skills (SKILL_HINTS_ENABLED); "history" is churn-y log data.
+ACTIVE_MEMORY_EXCLUDED_TYPES = frozenset({"skill", "history"})
+
 SYSTEM_PROMPT = (
     "You are being accessed via a Telegram bot as a remote fallback. "
     "Your knowledge base is the vault (your working directory) — always check it first for context. "
@@ -316,9 +331,10 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/effort <low|medium|high>` — Nível de esforço de raciocínio
 • `/btw <msg>` — Injetar mensagem ao Claude em execução (nativo)
 
-📓 *Journal*
+📓 *Journal & Memory*
 • `/important` — Registrar pontos importantes da sessão no diário
 • `/lesson <texto>` — Registrar lição manual em `vault/Lessons/`
+• `/active-memory [on|off|status]` — Injeção proativa de contexto do vault (padrão: on)
 
 🔁 *Rotinas*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
@@ -1811,6 +1827,179 @@ def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
     return [s[1] for s in scored[:max_n]]
 
 
+# ---------------------------------------------------------------------------
+# Active Memory — proactive vault context injection (OpenClaw v2026.4.10 idea)
+# ---------------------------------------------------------------------------
+
+# In-process cache for graph.json — mtime-checked so the daily vault-graph-update
+# routine transparently refreshes us. Keyed by absolute path so tests pointing
+# at different VAULT_DIRs don't collide.
+_active_memory_graph_cache: Dict[str, Dict[str, Any]] = {}
+
+
+def _active_memory_load_graph(graph_path: Path) -> Optional[Dict[str, Any]]:
+    """Load graph.json with mtime-based caching. Returns None if missing/broken."""
+    try:
+        mtime = graph_path.stat().st_mtime
+    except OSError:
+        return None
+    key = str(graph_path)
+    cached = _active_memory_graph_cache.get(key)
+    if cached and cached.get("mtime") == mtime:
+        return cached.get("data")
+    try:
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Active Memory: could not read %s: %s", graph_path, exc)
+        return None
+    _active_memory_graph_cache[key] = {"mtime": mtime, "data": data}
+    return data
+
+
+def _active_memory_read_excerpt(source_file: str, max_chars: int) -> str:
+    """Read up to max_chars from the BODY of a vault file (stripping frontmatter).
+
+    Best-effort: returns empty string on any error. Files that start with '---'
+    have their YAML frontmatter block skipped so the excerpt contains actual prose.
+    """
+    try:
+        path = VAULT_DIR / source_file
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    # Strip YAML frontmatter block if present
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            text = text[end + 4:].lstrip()
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip() + "…"
+    # Collapse internal whitespace so the block stays compact in the prompt
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def _active_memory_lookup(prompt: str) -> Optional[str]:
+    """Active Memory: deterministic vault graph lookup before main Claude turn.
+
+    Returns a compact "## Active Memory" block to append to the system prompt,
+    or None if disabled / no matches / any error / over budget.
+
+    Inspired by OpenClaw v2026.4.10 Active Memory plugin — but deterministic:
+    no LLM call, no token cost, ~50ms typical. Reuses vault/.graphs/graph.json
+    (regenerated daily by vault-graph-update). Filters out node types already
+    covered elsewhere (skills → _select_relevant_skills; history → churn).
+
+    Fail-open: any exception is logged at WARNING and the helper returns None
+    so the main Claude turn proceeds unchanged.
+    """
+    if not ACTIVE_MEMORY_ENABLED:
+        return None
+    if not prompt or not prompt.strip():
+        return None
+    t0 = time.monotonic()
+
+    def _over_budget() -> bool:
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if elapsed_ms > ACTIVE_MEMORY_BUDGET_MS:
+            logger.warning("Active Memory: budget exceeded (%.1fms)", elapsed_ms)
+            return True
+        return False
+
+    graph_path = VAULT_DIR / ".graphs" / "graph.json"
+    if not graph_path.is_file():
+        return None  # New users without a graph — expected, not an error.
+    data = _active_memory_load_graph(graph_path)
+    if not isinstance(data, dict):
+        return None
+    nodes = data.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+
+    # Tokenize prompt, reusing the same stopword set and rules as the skill hint
+    # helper so the two stay aligned without duplicating logic.
+    tokens = re.findall(r"[\w-]+", prompt.lower())
+    prompt_words = {
+        t for t in tokens
+        if len(t) > 3 and t not in _SKILL_HINT_STOPWORDS
+    }
+    if not prompt_words:
+        return None
+
+    scored: List[tuple] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        node_type = str(node.get("type", "")).lower()
+        if node_type in ACTIVE_MEMORY_EXCLUDED_TYPES:
+            continue
+        source_file = str(node.get("source_file", ""))
+        if not source_file:
+            continue
+        # Skill files live under Skills/ — exclude even if type=="unknown".
+        if source_file.startswith("Skills/"):
+            continue
+        label = str(node.get("label") or node.get("id") or Path(source_file).stem)
+        description = str(node.get("description", ""))
+        tags = node.get("tags", []) or []
+        if not isinstance(tags, list):
+            tags = []
+        haystack = " ".join([label, description, " ".join(str(t) for t in tags)]).lower()
+        haystack_tokens = set(re.findall(r"[\w-]+", haystack))
+        score = 0
+        for w in prompt_words:
+            if w in haystack_tokens:
+                score += 2
+            elif any(w in ht for ht in haystack_tokens):
+                score += 1
+        if score > 0:
+            scored.append((score, {
+                "source_file": source_file,
+                "label": label,
+                "description": description,
+                "type": node_type or "note",
+            }))
+
+    if not scored:
+        return None
+    if _over_budget():
+        return None
+
+    scored.sort(key=lambda x: (-x[0], x[1]["source_file"]))
+    top = [s[1] for s in scored[:ACTIVE_MEMORY_MAX_NODES]]
+
+    lines: List[str] = [
+        "## Active Memory",
+        "",
+        "The vault has these entries that may be relevant to the user's message — "
+        "read the full file only if you actually need it:",
+        "",
+    ]
+    for item in top:
+        if _over_budget():
+            return None
+        excerpt = _active_memory_read_excerpt(
+            item["source_file"], ACTIVE_MEMORY_MAX_CHARS_PER_NODE
+        )
+        desc = item["description"] or item["label"]
+        if excerpt:
+            lines.append(
+                f"- [[{item['source_file']}]] ({item['type']}) — {desc} "
+                f"· excerpt: \"{excerpt}\""
+            )
+        else:
+            lines.append(
+                f"- [[{item['source_file']}]] ({item['type']}) — {desc}"
+            )
+
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    logger.info(
+        "Active Memory: injected %d entries in %.1fms", len(top), elapsed_ms
+    )
+    return "\n".join(lines)
+
+
 def record_manual_lesson(text: str) -> Optional[Path]:
     """Append a user-supplied lesson to vault/Lessons/manual-YYYY-MM-DD-HHMM.md.
 
@@ -1886,6 +2075,10 @@ class Session:
     created_at: float = field(default_factory=time.time)
     message_count: int = 0
     total_turns: int = 0
+    # Active Memory (OpenClaw v2026.4.10 inspired) — per-session toggle for
+    # the proactive vault context injection. Default True; users can disable
+    # with /active-memory off when they want zero auto-injection.
+    active_memory: bool = True
 
 
 class SessionManager:
@@ -4276,6 +4469,42 @@ class ClaudeTelegramBot:
             reply_markup=markup,
         )
 
+    def cmd_active_memory(self, arg: str = "") -> None:
+        """Toggle Active Memory (proactive vault context injection) for the current session.
+
+        Usage:
+          /active-memory           → show status
+          /active-memory status    → show status
+          /active-memory on        → enable for current session
+          /active-memory off       → disable for current session
+        """
+        session = self._get_session()
+        if not session:
+            self.send_message("❌ Nenhuma sessão ativa.")
+            return
+        arg_norm = (arg or "").strip().lower()
+        if arg_norm in ("on", "1", "sim"):
+            session.active_memory = True
+            self.sessions.save()
+            state = "✅ ativada"
+        elif arg_norm in ("off", "0", "nao", "não"):
+            session.active_memory = False
+            self.sessions.save()
+            state = "❌ desativada"
+        elif arg_norm in ("", "status"):
+            state = "✅ ativada" if session.active_memory else "❌ desativada"
+        else:
+            self.send_message(
+                "❌ Uso: `/active-memory [on|off|status]`"
+            )
+            return
+        global_default = "on" if ACTIVE_MEMORY_ENABLED else "off"
+        self.send_message(
+            f"🧠 *Active Memory*: {state} para sessão `{session.name}`\n"
+            f"_Padrão global: {global_default}. "
+            f"Injeta contexto relevante do vault antes de cada resposta._"
+        )
+
     def cmd_voice(self, arg: str = "") -> None:
         """Toggle TTS voice responses on/off."""
         ctx = self._ctx
@@ -5849,6 +6078,25 @@ class ClaudeTelegramBot:
                     skills_block += f"- **{s['name']}**: {s['description']} (`{s['path']}`)\n"
                 effective_sp = (effective_sp + skills_block) if effective_sp else skills_block
 
+        # Active Memory (inspired by OpenClaw v2026.4.10) — proactive vault
+        # context injection. Skipped for routines/pipelines (their `context:
+        # minimal` already sets system_prompt=None), retries, and sessions
+        # where the user ran /active-memory off. Fail-open: any error returns
+        # None and this injection is simply skipped.
+        if (not _retry
+                and not routine_mode
+                and system_prompt is not None
+                and getattr(session, "active_memory", True)):
+            try:
+                am_block = _active_memory_lookup(prompt)
+            except Exception as exc:
+                logger.warning("Active Memory lookup raised: %s", exc)
+                am_block = None
+            if am_block:
+                effective_sp = (
+                    (effective_sp + "\n\n" + am_block) if effective_sp else am_block
+                )
+
         # Graph-based skill hint (user-prompt prefix) — lightweight nudge sourced
         # from vault/.graphs/graph.json. Skipped for routines/pipelines (they
         # carry their own context) and for retries (already tagged).
@@ -6429,6 +6677,7 @@ class ClaudeTelegramBot:
                 "/skill": lambda: self.cmd_skill(arg),
                 "/audio": lambda: self.cmd_audio(),
                 "/voice": lambda: self.cmd_voice(arg),
+                "/active-memory": lambda: self.cmd_active_memory(arg),
             }
 
             fn = handler_map.get(cmd)
