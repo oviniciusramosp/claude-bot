@@ -356,10 +356,61 @@ steps:
 - Steps without `depends_on` run in parallel
 - Shared workspace at `/tmp/claude-pipeline-{name}-{ts}/data/` — each step reads previous outputs automatically
 - Step prompts DO NOT need to mention files — the orchestrator injects workspace context
-- Each step file MUST end with `routine: [[pipeline-name]]` to connect to the pipeline in the Obsidian graph. The bot filters this line automatically — it is not sent to Claude CLI. The macOS app manages this automatically (append on save, strip on load)
 - Dual timeout: `inactivity_timeout` kills idle steps, `timeout` is the hard limit
 - Failure without retry cascades SKIPPED to dependents
 - `notify: final|all|summary|none` controls notifications (failures always notify)
+
+### Pipeline graph: parent owns the relationship to its steps
+
+Step files (`Routines/{name}/steps/*.md`) are **pure prompt files** for Claude — not knowledge nodes. They follow special rules:
+
+- **No frontmatter** — read as raw prompt text
+- **No wikilinks anywhere in the body** — wikilink syntax can leak into the LLM response and break downstream parsing
+- **No backlink to the parent pipeline** — the parent owns the relationship
+
+The **parent pipeline file** owns the parent→step edges via an explicit `## Steps` section placed AFTER the ` ```pipeline ` block:
+
+```markdown
+[[Routines]]
+
+```pipeline
+steps:
+  - id: collect-binance
+    ...
+```
+
+## Steps
+
+- [[collect-binance]]
+- [[collect-sentiment]]
+- [[analyst]]
+- [[writer]]
+- [[publisher]]
+```
+
+**Why this direction (parent → step, not step → parent):**
+- Step prompts stay clean (zero wikilinks → zero risk of leaking to the model)
+- The graph stays a clean tree (one edge per relationship, owned by the side that decides which steps exist)
+- The `## Steps` section doubles as a human-readable execution order summary
+
+**Auto-managed.** The macOS app regenerates `## Steps` from the actual pipeline block on save (in execution order: parallel collectors first, then dependent steps). When pipelines are created via Telegram, the [[create-pipeline]] skill writes the section. **You should not edit `## Steps` manually** — edit the steps in the pipeline block and let the section regenerate.
+
+**Bot safety net.** The bot strips any trailing wikilink line from step prompts before sending them to the Claude CLI (handles legacy `routine: [[name]]` / `rotina: [[name]]` formats). This is a fallback — new step files should have zero wikilinks, period.
+
+### Wikilink discipline (general)
+
+**Use `[[wikilink]]` only for direct, structural relationships:**
+- Index → its direct children (`Routines.md` → each routine)
+- Pipeline parent → its steps (`## Steps` section)
+- Skill → its own sub-files
+- Leaf → parent index (first line of body)
+
+**Use plain text (filename with extension) for everything else:**
+- Cross-references that aren't dependencies: `see analyst.md for the format`
+- Runtime file paths in step prompts: `data/collect-github.md`
+- Mentions of skills/notes for context
+
+Each `[[wikilink]]` adds an edge to the Obsidian graph. Edges should represent meaningful structural relationships, not casual mentions. Fewer edges = a more navigable graph.
 
 ## Agents (`Agents/`)
 

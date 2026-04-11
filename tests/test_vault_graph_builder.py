@@ -57,6 +57,38 @@ class ExtractWikilinks(unittest.TestCase):
         text = "---\nrelated: [[X]]\n---\nbody [[Y]]"
         self.assertEqual(self.gb.extract_wikilinks(text), ["Y"])
 
+    def test_skips_fenced_code_blocks(self):
+        # Wikilinks inside ``` ... ``` are example code, not real graph edges.
+        # See vault/CLAUDE.md "Pipeline graph" — examples shouldn't pollute.
+        text = (
+            "real link [[A]]\n"
+            "\n"
+            "```markdown\n"
+            "example [[B]]\n"
+            "```\n"
+            "\n"
+            "another real [[C]]\n"
+        )
+        self.assertEqual(self.gb.extract_wikilinks(text), ["A", "C"])
+
+    def test_skips_nested_code_block(self):
+        # Two adjacent fences must toggle in/out correctly.
+        text = (
+            "[[outside1]]\n"
+            "```yaml\n"
+            "[[hidden1]]\n"
+            "```\n"
+            "[[between]]\n"
+            "```python\n"
+            "[[hidden2]]\n"
+            "```\n"
+            "[[outside2]]\n"
+        )
+        self.assertEqual(
+            self.gb.extract_wikilinks(text),
+            ["outside1", "between", "outside2"],
+        )
+
 
 class NormalizeId(unittest.TestCase):
     @classmethod

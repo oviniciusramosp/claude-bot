@@ -294,7 +294,7 @@ def format_session_block(sg: dict) -> list[str]:
 
 def format_report(vault: Path, target_date: str, entries: list[dict]) -> str:
     """Generate the full audit report."""
-    agents = sorted(discover_agents(entries))
+    agents = set(discover_agents(entries))
 
     # Also check for agent journal directories that might exist even without activity
     agents_dir = vault / "Agents"
@@ -304,7 +304,7 @@ def format_report(vault: Path, target_date: str, entries: list[dict]) -> str:
                 journal_path = get_journal_path(vault, agent_dir.name, target_date)
                 if journal_path.exists() and agent_dir.name not in agents:
                     agents.add(agent_dir.name)
-        agents = sorted(agents)
+    agents = sorted(agents)
 
     lines = [f"# Journal Audit {target_date}", ""]
 

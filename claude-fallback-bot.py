@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.24.0"  # feat: interval scheduling (every Nm/Nh/Nd/Nw) + monthdays filter
+BOT_VERSION = "2.25.0"  # feat: parent-owned pipeline ## Steps section + safer wikilink stripping in step prompts
 
 import hmac
 import hashlib
@@ -1224,11 +1224,21 @@ class RoutineScheduler:
                 prompt_path = pipeline_dir / str(pf)
                 if prompt_path.exists():
                     prompt_text = prompt_path.read_text(encoding="utf-8").strip()
-                    # Strip trailing vault wikilink (Obsidian graph metadata, not prompt)
+                    # Safety net: strip any trailing wikilink lines (legacy Obsidian
+                    # graph metadata). New step files MUST NOT contain wikilinks at
+                    # all — the parent pipeline owns the relationship via its
+                    # `## Steps` section. See vault/CLAUDE.md "Pipeline graph".
                     if prompt_text:
                         _lines = prompt_text.split("\n")
-                        while _lines and re.match(r'^\s*(\(.*\[\[.+\]\].*\)|(?:rotina:\s*)?\[\[.+\]\])\s*$', _lines[-1]):
-                            _lines.pop()
+                        while _lines:
+                            _last = _lines[-1].strip()
+                            if not _last:
+                                _lines.pop()
+                                continue
+                            if re.match(r'^(?:\(.*\[\[.+\]\].*\)|(?:[\w-]+\s*:\s*)?\[\[.+\]\])$', _last):
+                                _lines.pop()
+                                continue
+                            break
                         prompt_text = "\n".join(_lines).rstrip()
                 else:
                     logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)

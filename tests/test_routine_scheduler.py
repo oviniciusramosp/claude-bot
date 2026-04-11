@@ -334,6 +334,134 @@ class SchedulerPipelineCycle(unittest.TestCase):
         self.assertEqual(self.enqueued_pipelines, [])
 
 
+class PipelineStepWikilinkStripping(unittest.TestCase):
+    """Trailing wikilinks in step prompt files must be stripped before being
+    sent to the Claude CLI. The parent pipeline's `## Steps` section owns the
+    parent->step graph edges; step files must reach the model wikilink-free.
+
+    This is a safety net for legacy files. New step files (created via the
+    macOS app or the create-pipeline skill) should contain zero wikilinks.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        self.fake_time = _FakeTime()
+        self._real_time = self.bot.time
+        self.bot.time = self.fake_time
+        self.enqueued_pipelines = []
+        self.state = self.bot.RoutineStateManager()
+        self.scheduler = self.bot.RoutineScheduler(
+            self.state,
+            enqueue_fn=lambda task: None,
+            enqueue_pipeline_fn=lambda task: self.enqueued_pipelines.append(task),
+            notify_fn=lambda msg: None,
+        )
+
+    def tearDown(self):
+        self.bot.time = self._real_time
+        self._td.cleanup()
+
+    def _write_pipeline_with_step(self, name: str, step_id: str, step_body: str):
+        """Write a pipeline routine with a single step loaded from a file."""
+        pipeline_md = (
+            "---\n"
+            f"title: {name}\n"
+            "type: pipeline\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "schedule:\n"
+            '  times: ["08:00"]\n'
+            "---\n"
+            "```pipeline\n"
+            "steps:\n"
+            f"  - id: {step_id}\n"
+            f"    name: {step_id}\n"
+            f"    prompt_file: steps/{step_id}.md\n"
+            "    output: telegram\n"
+            "```\n"
+        )
+        (self.bot.ROUTINES_DIR / f"{name}.md").write_text(pipeline_md, encoding="utf-8")
+        steps_dir = self.bot.ROUTINES_DIR / name / "steps"
+        steps_dir.mkdir(parents=True, exist_ok=True)
+        (steps_dir / f"{step_id}.md").write_text(step_body, encoding="utf-8")
+
+    def _loaded_prompt(self) -> str:
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued_pipelines), 1, "pipeline not enqueued")
+        task = self.enqueued_pipelines[0]
+        self.assertEqual(len(task.steps), 1)
+        return task.steps[0].prompt
+
+    def test_strips_legacy_rotina_prefix(self):
+        """`rotina: [[name]]` (Portuguese, current legacy format)."""
+        self._write_pipeline_with_step("p1", "scout",
+            "Do a thing.\n\nMore detail.\n\nrotina: [[p1]]\n")
+        prompt = self._loaded_prompt()
+        self.assertNotIn("[[", prompt)
+        self.assertNotIn("rotina:", prompt)
+        self.assertTrue(prompt.endswith("More detail."))
+
+    def test_strips_english_routine_prefix(self):
+        """`routine: [[name]]` (English) — was NOT stripped pre-2.25."""
+        self._write_pipeline_with_step("p2", "scout",
+            "Do another thing.\n\nrouting note\n\nroutine: [[p2]]\n")
+        prompt = self._loaded_prompt()
+        self.assertNotIn("[[", prompt)
+        self.assertNotIn("routine: [[", prompt)
+        self.assertTrue(prompt.endswith("routing note"))
+
+    def test_strips_bare_wikilink(self):
+        """`[[name]]` with no key prefix."""
+        self._write_pipeline_with_step("p3", "scout",
+            "Step body here.\n\n[[p3]]\n")
+        prompt = self._loaded_prompt()
+        self.assertNotIn("[[", prompt)
+        self.assertEqual(prompt.strip(), "Step body here.")
+
+    def test_strips_parenthesized_wikilink(self):
+        """`(part of [[name]])` style."""
+        self._write_pipeline_with_step("p4", "scout",
+            "Real prompt content.\n\n(part of [[p4]])\n")
+        prompt = self._loaded_prompt()
+        self.assertNotIn("[[", prompt)
+        self.assertTrue(prompt.endswith("Real prompt content."))
+
+    def test_strips_multiple_trailing_wikilinks(self):
+        """Multiple trailing wikilink lines all get stripped."""
+        self._write_pipeline_with_step("p5", "scout",
+            "Body.\n\nrotina: [[p5]]\n\nrelated: [[other]]\n")
+        prompt = self._loaded_prompt()
+        self.assertNotIn("[[", prompt)
+        self.assertEqual(prompt.strip(), "Body.")
+
+    def test_preserves_internal_wikilink(self):
+        """Wikilinks in the middle of the prompt MUST be preserved.
+
+        We only strip TRAILING wikilink lines. If a step body legitimately
+        references a vault file via wikilink syntax mid-content, leave it.
+        (Edge case — new step files should not have any wikilinks at all.)
+        """
+        self._write_pipeline_with_step("p6", "scout",
+            "Read [[some-note]] before doing this.\n\nThen finish.\n\nrotina: [[p6]]\n")
+        prompt = self._loaded_prompt()
+        self.assertIn("[[some-note]]", prompt)
+        self.assertNotIn("rotina:", prompt)
+        self.assertTrue(prompt.endswith("Then finish."))
+
+    def test_clean_step_unchanged(self):
+        """A step file with no wikilinks is loaded as-is."""
+        self._write_pipeline_with_step("p7", "scout",
+            "Just a clean prompt.\n\nWith multiple paragraphs.\n")
+        prompt = self._loaded_prompt()
+        self.assertEqual(prompt.strip(),
+                         "Just a clean prompt.\n\nWith multiple paragraphs.")
+
+
 class ListTodayRoutines(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()

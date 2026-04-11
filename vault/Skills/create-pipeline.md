@@ -199,7 +199,15 @@ steps:
     prompt_file: steps/{final-step-id}.md
     output: telegram
 ```
+
+## Steps
+
+- [[{name}/steps/{step-1-id}|{step-1-id}]]
+- [[{name}/steps/{step-2-id}|{step-2-id}]]
+- [[{name}/steps/{final-step-id}|{final-step-id}]]
 ```
+
+**About the `## Steps` section:** this is a graph artifact that owns the parent→step edges in the Obsidian graph. List the steps in execution order (parallel collectors first, dependent steps after). The macOS app regenerates this automatically when saving a pipeline; when you create a pipeline via this skill, you write it once at creation. Step files MUST NOT contain backlinks to the parent — see `vault/CLAUDE.md` "Pipeline graph" section.
 
 **Additional optional fields in frontmatter:**
 
@@ -220,7 +228,9 @@ IMPORTANT about step prompts:
 - Focus only on the step's TASK: "Analyze the collected data and produce a technical analysis"
 - The step automatically receives: list of available files, instruction on where to write output
 - Write short and direct prompts — the pipeline context is already injected by the orchestrator
-- The LAST LINE of each step file MUST be `routine: [[{pipeline-name}]]` — this wikilink connects the step to the pipeline in the Obsidian graph. The bot automatically filters this line when sending the prompt to the Claude CLI, so it never reaches the model. The macOS app also manages this automatically (append on save, strip on load)
+- **NO frontmatter** in step files — they are read as raw prompts
+- **NO wikilinks anywhere** in step files — `[[...]]` syntax can leak into the LLM response and break downstream parsing. The parent→step relationship lives in the parent pipeline file's `## Steps` section, not in the step (parent owns the relationship)
+- When a step needs to mention another step's output file, use the plain path: `data/<other-step>.md` — never wrap it in wikilink brackets
 
 #### 10. Update the index
 
@@ -311,6 +321,15 @@ steps:
     inactivity_timeout: 60
     output: telegram
 ```
+
+## Steps
+
+- [[weekly-newsletter/steps/collect-blogs|collect-blogs]]
+- [[weekly-newsletter/steps/collect-reddit|collect-reddit]]
+- [[weekly-newsletter/steps/collect-hn|collect-hn]]
+- [[weekly-newsletter/steps/write-newsletter|write-newsletter]]
+- [[weekly-newsletter/steps/review|review]]
+- [[weekly-newsletter/steps/send-email|send-email]]
 ```
 
 ### Visual DAG
@@ -453,6 +472,7 @@ Append to today's journal with the applied changes.
 | Uniform timeout | All steps with 1200s | Adjust by type: short for collectors, long for analysis |
 | Sequential cover | Cover generation waits for entire analysis | Parallelize if cover only depends on raw data |
 | Prompt with `data/` | Step mentions workspace | Remove — orchestrator injects automatically |
+| Wikilink in step file | `[[...]]` leaks to LLM, pollutes graph | Keep step prompts free of wikilinks; parent owns the `## Steps` section |
 
 ---
 

@@ -214,7 +214,15 @@ actor VaultService {
         let body: String
         if isPipeline && !routine.pipelineStepDefs.isEmpty {
             let pipelineBlock = PipelineStepDef.buildPipelineBody(routine.pipelineStepDefs)
-            body = "\n[[Routines]]\n\n\(pipelineBlock)\n"
+            // Auto-generated `## Steps` section: parent owns the parent->step edges
+            // in the Obsidian graph. Step files MUST NOT contain wikilinks.
+            // See vault/CLAUDE.md "Pipeline graph: parent owns the relationship".
+            let stepLinks = routine.pipelineStepDefs
+                .filter { !$0.stepId.isEmpty }
+                .map { "- [[\(routine.id)/steps/\($0.stepId)|\($0.stepId)]]" }
+                .joined(separator: "\n")
+            let stepsSection = stepLinks.isEmpty ? "" : "\n\n## Steps\n\n\(stepLinks)\n"
+            body = "\n[[Routines]]\n\n\(pipelineBlock)\(stepsSection)"
         } else {
             body = "\n[[Routines]]\n\n\(routine.promptBody)\n"
         }
@@ -237,11 +245,12 @@ actor VaultService {
             .appending(component: "steps", directoryHint: .isDirectory)
         try fm.createDirectory(at: stepsDir, withIntermediateDirectories: true)
 
-        // Write each step file (auto-append vault wikilink for Obsidian graph)
+        // Write each step file as a clean prompt — NO wikilinks, NO frontmatter.
+        // The parent->step edge is owned by the parent pipeline file's
+        // `## Steps` section. See vault/CLAUDE.md "Pipeline graph".
         for step in steps where !step.stepId.isEmpty {
             let fileURL = stepsDir.appending(component: "\(step.stepId).md")
-            let content = step.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                + "\n\nrotina: [[\(routineId)]]\n"
+            let content = step.prompt.trimmingCharacters(in: .whitespacesAndNewlines) + "\n"
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
         }
 

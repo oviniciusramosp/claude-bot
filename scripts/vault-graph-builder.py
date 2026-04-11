@@ -78,11 +78,26 @@ def parse_frontmatter(text):
 
 
 def extract_wikilinks(text):
-    """Extract all wikilink targets from markdown text (excluding frontmatter)."""
+    """Extract wikilink targets from markdown body, skipping frontmatter and
+    fenced code blocks (``` ... ```). Wikilinks inside code blocks are example
+    code, not real graph relationships."""
     # Strip frontmatter
     m = FRONTMATTER_RE.match(text)
     body = text[m.end() :] if m else text
-    return WIKILINK_RE.findall(body)
+
+    # Strip fenced code blocks before extracting wikilinks. Track open/close
+    # state line-by-line so nested or mid-line backticks don't confuse us.
+    in_fence = False
+    cleaned = []
+    for line in body.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        cleaned.append(line)
+    return WIKILINK_RE.findall("\n".join(cleaned))
 
 
 def normalize_id(filepath, vault_dir):
