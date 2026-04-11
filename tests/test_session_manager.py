@@ -161,6 +161,51 @@ class SessionManagerCRUD(unittest.TestCase):
         self.assertFalse(tmp.exists())
         self.assertTrue(self.bot.SESSIONS_FILE.exists())
 
+    def test_clone_copies_metadata_and_switches(self):
+        sm = self.bot.SessionManager()
+        src = sm.create("branch-main")
+        src.session_id = "claude-abc-123"
+        src.model = "opus"
+        src.message_count = 7
+        src.total_turns = 9
+        sm.save()
+        clone = sm.clone("branch-main", "branch-exp")
+        self.assertIsNotNone(clone)
+        # Shares Claude session to continue the thread
+        self.assertEqual(clone.session_id, "claude-abc-123")
+        self.assertEqual(clone.model, "opus")
+        self.assertEqual(clone.message_count, 7)
+        # Fresh turn counter for this branch
+        self.assertEqual(clone.total_turns, 0)
+        # Clone becomes active session
+        self.assertEqual(sm.active_session, "branch-exp")
+        # Clone persists
+        sm2 = self.bot.SessionManager()
+        self.assertIn("branch-exp", sm2.sessions)
+        self.assertEqual(sm2.sessions["branch-exp"].session_id, "claude-abc-123")
+
+    def test_clone_isolation_editing_clone_does_not_affect_source(self):
+        sm = self.bot.SessionManager()
+        sm.create("src")
+        sm.sessions["src"].model = "sonnet"
+        sm.clone("src", "dst")
+        sm.sessions["dst"].model = "haiku"
+        sm.sessions["dst"].total_turns = 42
+        sm.save()
+        # Source must stay untouched
+        self.assertEqual(sm.sessions["src"].model, "sonnet")
+        self.assertEqual(sm.sessions["src"].total_turns, 0)
+
+    def test_clone_missing_source_returns_none(self):
+        sm = self.bot.SessionManager()
+        self.assertIsNone(sm.clone("missing", "dst"))
+
+    def test_clone_existing_dest_returns_none(self):
+        sm = self.bot.SessionManager()
+        sm.create("a")
+        sm.create("b")
+        self.assertIsNone(sm.clone("a", "b"))
+
 
 class MakeSessionName(unittest.TestCase):
     @classmethod

@@ -66,6 +66,31 @@ For each step, determine:
 - `retry`: number of attempts on failure (default: 0)
 - `output: telegram`: mark on the LAST step that produces the final output
 
+**Ralph loop (optional) — iterate a step until a marker appears:**
+
+Steps can loop-until-done via the Ralph technique. Use this for iterative refinement where the agent progresses across iterations. Syntax is flat inside the step:
+
+```pipeline
+steps:
+  - id: refine
+    name: Iteratively refine draft
+    model: opus
+    prompt_file: steps/refine.md
+    loop_until: "DRAFT_READY"
+    loop_max_iterations: 5
+    loop_on_no_progress: abort
+```
+
+Fields:
+- `loop_until`: substring that marks "done". When this string appears in the step output, the loop exits successfully. Omit (or leave empty) to disable looping
+- `loop_max_iterations`: max loop iterations (default: 5, hard cap: `MAX_LOOP_ITERATIONS = 10`)
+- `loop_on_no_progress`: `abort` (default) fails the step if two consecutive iterations produce identical output; `continue` keeps looping regardless
+
+Behavior:
+- Each iteration prepends the previous output as context to the next iteration's prompt so the agent can make progress
+- Reaching `loop_max_iterations` without finding the marker is an ERROR — the step fails with a clear message
+- Cancellation (`/stop`) aborts the loop immediately
+
 **Model rules by step type:**
 - Data collection → `haiku` (fast, cheap, good for APIs and scraping)
 - Analysis / creative writing → `opus` (best reasoning, more expensive)

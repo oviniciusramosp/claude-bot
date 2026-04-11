@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.32.0"  # feat: macOS app frontmatter-aware filter/search via shared VaultSearch matcher (matches bot /find syntax: model:opus tag:crypto agent:foo)
+BOT_VERSION = "2.33.0"  # feat: /clone session branching + Lessons (compound engineering) + graph-based skill hints + pipeline Ralph loops
 
 import hmac
 import hashlib
@@ -100,6 +100,7 @@ LOG_FILE = DATA_DIR / "bot.log"
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_DIR = VAULT_DIR / "Routines"
 AGENTS_DIR = VAULT_DIR / "Agents"
+LESSONS_DIR = VAULT_DIR / "Lessons"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 ACTIVITY_LOG_DIR = VAULT_DIR / "Journal" / ".activity"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
@@ -152,6 +153,8 @@ PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
+SKILL_HINTS_ENABLED = True   # inject top-N skill hints from vault/.graphs/graph.json
+MAX_LOOP_ITERATIONS = 10     # hard cap for pipeline step loop (Ralph technique)
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
@@ -227,6 +230,7 @@ SYSTEM_PROMPT = (
     "Check Journal/ for recent context. "
     "Read Tooling.md for tool preferences. "
     "Read .env for project credentials when needed. "
+    "Scan Lessons/ before similar tasks — previous failures drafted there so you don't repeat them. "
     "All vault .md files MUST have YAML frontmatter (title, description, type, created/updated, tags). "
     "Use the description field to scan files before reading them fully. "
     "\n\n"
@@ -289,6 +293,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/sessions` — Listar sessões
 • `/switch <nome>` — Trocar sessão
 • `/delete <nome>` — Apagar sessão
+• `/clone <nome>` — Clonar sessão atual (mesma thread do Claude, branch paralela)
 • `/clear` — Resetar sessão atual
 • `/compact` — Compactar contexto
 • `/cost` — Custo e uso de tokens da sessão
@@ -313,6 +318,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 📓 *Journal*
 • `/important` — Registrar pontos importantes da sessão no diário
+• `/lesson <texto>` — Registrar lição manual em `vault/Lessons/`
 
 🔁 *Rotinas*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
@@ -556,11 +562,25 @@ class PipelineStep:
     output_file: Optional[str] = None  # custom output filename (default: {id}.md)
     engine: str = "claude"
     effort: Optional[str] = None
+    # Ralph loop — re-run the step until `loop_until` appears in the output or
+    # `loop_max_iterations` is reached. Inspired by frankbria/ralph-claude-code.
+    # None in loop_until disables looping for this step. When enabled, each
+    # iteration appends the previous output as context to the next iteration
+    # so the agent can make progress. on_no_progress="abort" (default) fails
+    # the step if two consecutive iterations produce identical output;
+    # "continue" keeps looping regardless.
+    loop_until: Optional[str] = None
+    loop_max_iterations: int = 5
+    loop_on_no_progress: str = "abort"  # "abort" or "continue"
 
     @property
     def resolved_filename(self) -> str:
         """Return the output filename: custom if set, otherwise {id}.md."""
         return self.output_file if self.output_file else f"{self.id}.md"
+
+    @property
+    def has_loop(self) -> bool:
+        return bool(self.loop_until)
 
 
 @dataclass
@@ -1368,6 +1388,22 @@ class RoutineScheduler:
                 out_type = "file"
 
             _step_effort = str(s.get("effort", "")).lower().strip()
+            # Ralph loop config — flat keys (the pipeline parser is line-based).
+            # loop_until: substring that marks "done"; empty/None disables loops.
+            loop_until_raw = s.get("loop_until")
+            loop_until = str(loop_until_raw) if loop_until_raw not in (None, "") else None
+            try:
+                loop_max = int(s.get("loop_max_iterations", 5))
+            except (TypeError, ValueError):
+                loop_max = 5
+            if loop_max < 1:
+                loop_max = 1
+            if loop_max > MAX_LOOP_ITERATIONS:
+                logger.warning("Pipeline %s step %s: loop_max_iterations=%d exceeds hard cap %d — clamping",
+                               routine_name, step_id, loop_max, MAX_LOOP_ITERATIONS)
+                loop_max = MAX_LOOP_ITERATIONS
+            _np_raw = str(s.get("loop_on_no_progress", "abort")).lower().strip()
+            loop_np = _np_raw if _np_raw in ("abort", "continue") else "abort"
             steps.append(PipelineStep(
                 id=step_id,
                 name=str(s.get("name", step_id)),
@@ -1383,6 +1419,9 @@ class RoutineScheduler:
                 output_file=s.get("output_file") or None,
                 engine=str(s.get("engine", "claude")),
                 effort=_step_effort if _step_effort in ("low", "medium", "high") else None,
+                loop_until=loop_until,
+                loop_max_iterations=loop_max,
+                loop_on_no_progress=loop_np,
             ))
 
         if not steps:
@@ -1604,6 +1643,221 @@ def _log_activity(entry: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lessons — compound-engineering failure drafts
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_lesson_slug(name: str) -> str:
+    """Normalize a routine/pipeline name into a filename-safe slug.
+
+    Collapses any sequence of non [a-zA-Z0-9_-] chars (INCLUDING dots) into a
+    single hyphen to prevent path traversal sequences like `..` from surviving.
+    """
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip())
+    slug = slug.strip("-_") or "unknown"
+    return slug[:80]
+
+
+def record_lesson_draft(trigger_name: str, error_summary: str,
+                        kind: str = "routine") -> Optional[Path]:
+    """Append a draft lesson to vault/Lessons/draft-YYYY-MM-DD-{name}.md on failure.
+
+    Idempotent per day+trigger: if the draft file already exists it appends a new
+    `## HH:MM — error` section instead of overwriting. Returns the file Path on
+    success, None on failure (errors are logged but never raised).
+    """
+    try:
+        LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+        today = time.strftime("%Y-%m-%d")
+        slug = _sanitize_lesson_slug(trigger_name)
+        path = LESSONS_DIR / f"draft-{today}-{slug}.md"
+        safe_error = (error_summary or "(no error text)").strip()
+        if len(safe_error) > 1500:
+            safe_error = safe_error[:1500] + "... [truncated]"
+        if path.exists():
+            # Append another occurrence — the draft is still pending
+            now_hm = time.strftime("%H:%M")
+            addendum = (
+                f"\n\n## {now_hm} — Additional failure\n\n"
+                f"```\n{safe_error}\n```\n"
+            )
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(addendum)
+            return path
+        # Fresh draft
+        frontmatter = (
+            "---\n"
+            f"title: \"Draft lesson — {trigger_name}\"\n"
+            f"description: Auto-draft from {kind} failure; needs user to fill Fix and Detect sections.\n"
+            "type: lesson\n"
+            "status: draft\n"
+            f"trigger: {trigger_name}\n"
+            f"kind: {kind}\n"
+            f"date: {today}\n"
+            f"created: {today}\n"
+            f"updated: {today}\n"
+            "tags: [lesson, draft, postmortem]\n"
+            "---\n\n"
+        )
+        body = (
+            f"# Draft lesson — {trigger_name}\n\n"
+            "## What went wrong\n\n"
+            f"```\n{safe_error}\n```\n\n"
+            "## Fix\n\n"
+            "TODO\n\n"
+            "## How to detect next time\n\n"
+            "TODO\n"
+        )
+        path.write_text(frontmatter + body, encoding="utf-8")
+        logger.info("Lesson draft recorded: %s", path)
+        return path
+    except Exception as exc:
+        logger.error("Failed to record lesson draft for %s: %s", trigger_name, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Skill hint injection — graph.json-based keyword scoring
+# ---------------------------------------------------------------------------
+
+# Short common words that must not contribute to the skill match score.
+# English + Portuguese — the bot runs bilingual by default.
+_SKILL_HINT_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "is", "it", "for",
+    "on", "at", "by", "be", "as", "are", "was", "with", "that", "this",
+    "from", "but", "not", "can", "you", "me", "my", "we", "us", "your",
+    "o", "os", "a", "as", "um", "uma", "uns", "umas", "e", "ou", "de",
+    "do", "da", "dos", "das", "em", "no", "na", "nos", "nas", "por",
+    "para", "com", "como", "que", "se", "foi", "ser", "estar", "ter",
+    "isso", "esse", "essa", "eu", "eu", "voce", "você", "ele", "ela",
+})
+
+
+def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
+    """Return up to `max_n` skill names scored against the prompt via graph.json.
+
+    Reads ``vault/.graphs/graph.json`` (zero LLM cost) and scores each skill
+    node by simple keyword overlap between the prompt and the skill's
+    name/description/tags. Stopwords are ignored and short words (<=3 chars)
+    are ignored to keep the signal-to-noise ratio high.
+
+    Returns an empty list when:
+    - SKILL_HINTS_ENABLED is False
+    - graph.json does not exist (expected for new users — not an error)
+    - graph.json is malformed or unreadable (logged, not raised)
+    - no skills score above 0
+
+    All I/O is wrapped in try/except and errors are logged via
+    ``logger.warning`` — the caller should NOT expect exceptions.
+    """
+    if not SKILL_HINTS_ENABLED:
+        return []
+    if not prompt or not prompt.strip():
+        return []
+    graph_path = VAULT_DIR / ".graphs" / "graph.json"
+    if not graph_path.is_file():
+        return []  # New users won't have a graph yet — silent, expected
+    try:
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Skill hint: could not read %s: %s", graph_path, exc)
+        return []
+    nodes = data.get("nodes") if isinstance(data, dict) else None
+    if not isinstance(nodes, list):
+        logger.warning("Skill hint: graph.json has no 'nodes' list — got %s", type(nodes).__name__)
+        return []
+
+    # Tokenize prompt → filtered lowercase word set
+    tokens = re.findall(r"[\w-]+", prompt.lower())
+    prompt_words = {
+        t for t in tokens
+        if len(t) > 3 and t not in _SKILL_HINT_STOPWORDS
+    }
+    if not prompt_words:
+        return []
+
+    scored: List[tuple] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        # Filter to skills — graph.json uses type=="skill" OR source_file starts with "Skills/"
+        node_type = str(node.get("type", "")).lower()
+        source_file = str(node.get("source_file", ""))
+        if node_type != "skill" and not source_file.startswith("Skills/"):
+            continue
+        # Build a haystack from name/label/description/tags
+        name = str(node.get("label") or node.get("name") or "")
+        if not name and source_file:
+            name = Path(source_file).stem
+        description = str(node.get("description", ""))
+        tags = node.get("tags", []) or []
+        if not isinstance(tags, list):
+            tags = []
+        haystack = " ".join([name, description, " ".join(str(t) for t in tags)]).lower()
+        haystack_tokens = set(re.findall(r"[\w-]+", haystack))
+        # Score: +2 exact token hit, +1 substring hit
+        score = 0
+        for w in prompt_words:
+            if w in haystack_tokens:
+                score += 2
+            elif any(w in ht for ht in haystack_tokens):
+                score += 1
+        if score > 0:
+            # Prefer the stem (matches filename used in vault/Skills/) for display.
+            display_name = Path(source_file).stem if source_file else name
+            scored.append((score, display_name))
+
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [s[1] for s in scored[:max_n]]
+
+
+def record_manual_lesson(text: str) -> Optional[Path]:
+    """Append a user-supplied lesson to vault/Lessons/manual-YYYY-MM-DD-HHMM.md.
+
+    Returns the file Path on success, None on failure.
+    """
+    try:
+        LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+        now = time.strftime("%Y-%m-%d-%H%M")
+        today = time.strftime("%Y-%m-%d")
+        # Collision-safe: if two lessons arrive in the same minute, append a counter
+        base_path = LESSONS_DIR / f"manual-{now}.md"
+        path = base_path
+        counter = 1
+        while path.exists():
+            counter += 1
+            path = LESSONS_DIR / f"manual-{now}-{counter}.md"
+        body = (text or "").strip()
+        if not body:
+            raise ValueError("lesson text is empty")
+        frontmatter = (
+            "---\n"
+            f"title: \"Manual lesson — {now}\"\n"
+            "description: User-supplied lesson captured via /lesson command on Telegram.\n"
+            "type: lesson\n"
+            "status: recorded\n"
+            f"date: {today}\n"
+            f"created: {today}\n"
+            f"updated: {today}\n"
+            "tags: [lesson, manual]\n"
+            "---\n\n"
+        )
+        markdown = (
+            f"# Manual lesson\n\n"
+            "## Context\n\n"
+            f"{body}\n\n"
+            "## Fix\n\nTODO\n\n"
+            "## How to detect next time\n\nTODO\n"
+        )
+        path.write_text(frontmatter + markdown, encoding="utf-8")
+        logger.info("Manual lesson recorded: %s", path)
+        return path
+    except Exception as exc:
+        logger.error("Failed to record manual lesson: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
 
@@ -1709,6 +1963,40 @@ class SessionManager:
             self.active_session = next(iter(self.sessions), None)
         self.save()
         return True
+
+    def clone(self, source_name: str, dest_name: str) -> Optional[Session]:
+        """Clone an existing session into a new name.
+
+        The clone shares the same Claude session_id, model, workspace, and agent
+        — meaning it continues the source's Claude-side conversation thread.
+        Cloning lets the user branch a session and try divergent prompts while
+        still keeping the original intact as a rollback point.
+
+        message_count is carried over so context utilization stats are accurate
+        (the cloned Claude session has the same token history). total_turns and
+        created_at are reset because the clone is a NEW Session record.
+
+        Returns the new Session, or None if source is missing / dest already exists.
+        """
+        if source_name not in self.sessions:
+            return None
+        if dest_name in self.sessions:
+            return None
+        src = self.sessions[source_name]
+        clone = Session(
+            name=dest_name,
+            session_id=src.session_id,      # SAME Claude session — continues the thread
+            model=src.model,
+            workspace=src.workspace,
+            agent=src.agent,
+            created_at=time.time(),         # fresh creation timestamp for eviction
+            message_count=src.message_count,  # carry over so auto-compact stats stay accurate
+            total_turns=0,                  # fresh turn counter for this branch
+        )
+        self.sessions[dest_name] = clone
+        self.active_session = dest_name
+        self.save()
+        return clone
 
     def list(self) -> List[Session]:
         return list(self.sessions.values())
@@ -2473,6 +2761,12 @@ class PipelineExecutor:
 
     def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute a single pipeline step using ClaudeRunner."""
+        # Ralph loop dispatcher — when the step has loop config, use the
+        # dedicated loop executor. Otherwise fall through to the normal path.
+        if step.has_loop:
+            self._execute_loop_step(step, data_dir)
+            return
+
         attempt = self._step_attempts.get(step.id, 0) + 1
         with self._lock:
             self._step_attempts[step.id] = attempt
@@ -2629,6 +2923,187 @@ class PipelineExecutor:
             with self._lock:
                 self._active_runners.pop(step.id, None)
                 # Release output-file path lock so deferred steps can proceed
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self._remove_step_activity(step.id)
+
+    def _run_step_invocation(self, step: PipelineStep, prompt: str, ws: str) -> str:
+        """Run a single ClaudeRunner invocation for a step and return the raw output.
+
+        Shared helper used by both the normal `_execute_step` path (indirectly via
+        code below) and the Ralph-loop `_execute_loop_step`. Raises on timeout,
+        cancellation, or runner error. Updates the pipeline's active-runners
+        registry so `cancel()` can abort mid-loop.
+        """
+        runner = ClaudeRunner()
+        with self._lock:
+            self._active_runners[step.id] = runner
+        try:
+            runner_thread = threading.Thread(
+                target=runner.run,
+                kwargs={
+                    "prompt": prompt, "model": step.model, "workspace": ws,
+                    "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT,
+                    "effort": step.effort or self.task.effort,
+                },
+                daemon=True, name=f"pipeline-loop-runner-{step.id}",
+            )
+            runner_thread.start()
+            hard_deadline = time.time() + step.timeout
+            last_activity_write = 0.0
+            while runner_thread.is_alive() and time.time() < hard_deadline:
+                if self._cancelled.is_set():
+                    runner.cancel()
+                    break
+                idle = time.time() - runner.last_activity
+                if idle > step.inactivity_timeout and runner.last_activity > runner.start_time:
+                    proc = runner.process
+                    if not (proc and proc.poll() is None):
+                        runner.cancel()
+                        raise TimeoutError(
+                            f"Step {step.id} idle for {int(idle)}s "
+                            f"(inactivity limit: {step.inactivity_timeout}s)"
+                        )
+                now = time.time()
+                if now - last_activity_write >= 3.0:
+                    self._write_step_activity(step.id, runner)
+                    last_activity_write = now
+                time.sleep(1)
+            if runner_thread.is_alive() or runner.running:
+                elapsed = int(time.time() - runner.start_time)
+                runner.cancel()
+                runner_thread.join(timeout=10)
+                raise TimeoutError(f"Step {step.id} exceeded {step.timeout}s hard limit (ran {elapsed}s)")
+            runner_thread.join(timeout=5)
+
+            if self._cancelled.is_set():
+                raise RuntimeError("Pipeline cancelled")
+
+            output = runner.result_text or runner.accumulated_text or ""
+            if runner.error_text and not output:
+                raise RuntimeError(runner.error_text)
+            return output
+        finally:
+            with self._lock:
+                self._active_runners.pop(step.id, None)
+
+    def _execute_loop_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Ralph loop — re-run a step until ``step.loop_until`` appears in the
+        output or the iteration cap is reached.
+
+        Behaviour:
+        - Each iteration appends the previous output as context to the next
+          prompt so the agent can make progress
+        - If ``step.loop_until`` substring appears in the current iteration's
+          output, the loop exits successfully
+        - If ``max_iterations`` is reached, the step is marked FAILED with a
+          clear error (no silent errors)
+        - If ``loop_on_no_progress == "abort"`` and two consecutive iterations
+          produce identical output, the loop aborts as FAILED
+        - Cancellation via ``cancel()`` aborts the loop immediately
+        """
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+        self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "running", attempt=attempt)
+
+        logger.info(
+            "Pipeline %s: step %s starting LOOP (model=%s, until=%r, max=%d)",
+            self.task.name, step.id, step.model, step.loop_until, step.loop_max_iterations,
+        )
+
+        # Resolve workspace for Claude CLI (same rules as _execute_step)
+        ws = str(self.workspace)
+        agent_id_for_ws = step.agent or self.task.agent
+        if agent_id_for_ws:
+            isolated = AGENTS_DIR / agent_id_for_ws / "workspace"
+            if isolated.is_dir():
+                ws = str(isolated)
+            elif (AGENTS_DIR / agent_id_for_ws).is_dir():
+                ws = str(AGENTS_DIR / agent_id_for_ws)
+
+        base_prompt = self._build_step_prompt(step, data_dir)
+        output = ""
+        previous_output = None
+        iterations = 0
+        cap = min(step.loop_max_iterations, MAX_LOOP_ITERATIONS)
+        loop_marker = step.loop_until or ""
+
+        try:
+            for i in range(1, cap + 1):
+                if self._cancelled.is_set():
+                    raise RuntimeError("Pipeline cancelled during loop")
+
+                iterations = i
+                if i == 1:
+                    iter_prompt = base_prompt
+                else:
+                    iter_prompt = (
+                        f"{base_prompt}\n\n"
+                        f"---\n\n"
+                        f"[LOOP ITERATION {i}/{cap}] "
+                        f"Você está em um loop. Continue a tarefa até escrever "
+                        f"exatamente a string `{loop_marker}` no seu output quando "
+                        f"a tarefa estiver concluída. Este é o resultado da iteração anterior:\n\n"
+                        f"{previous_output or '(vazio)'}\n"
+                    )
+                logger.info("Pipeline %s: step %s loop iter %d/%d", self.task.name, step.id, i, cap)
+                output = self._run_step_invocation(step, iter_prompt, ws)
+
+                # Persist the latest output every iteration so a crash mid-loop
+                # leaves the most recent result on disk for debugging.
+                try:
+                    (data_dir / step.resolved_filename).write_text(output, encoding="utf-8")
+                except OSError as ose:
+                    logger.error("Pipeline %s: step %s could not write loop output: %s",
+                                 self.task.name, step.id, ose)
+
+                # Success: loop marker appeared
+                if loop_marker and loop_marker in output:
+                    logger.info("Pipeline %s: step %s loop exited on iter %d (marker found)",
+                                self.task.name, step.id, i)
+                    break
+
+                # No-progress detection
+                if previous_output is not None and output == previous_output:
+                    if step.loop_on_no_progress == "abort":
+                        raise RuntimeError(
+                            f"Loop stalled on iter {i}: two consecutive iterations produced "
+                            f"identical output (on_no_progress=abort)"
+                        )
+                    logger.warning("Pipeline %s: step %s no progress on iter %d (continuing)",
+                                   self.task.name, step.id, i)
+
+                previous_output = output
+            else:
+                # Loop ran to completion without finding marker
+                raise RuntimeError(
+                    f"Loop exceeded max_iterations={cap} without finding marker "
+                    f"{loop_marker!r} (Ralph technique)"
+                )
+
+            with self._lock:
+                self._step_outputs[step.id] = output
+                self._step_status[step.id] = "completed"
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "completed",
+                attempt=attempt,
+            )
+            logger.info("Pipeline %s: step %s loop completed in %d iters",
+                        self.task.name, step.id, iterations)
+        except Exception as exc:
+            err_msg = f"[loop iter {iterations}] {str(exc)[:180]}"
+            with self._lock:
+                self._step_errors[step.id] = err_msg
+                self._step_status[step.id] = "failed"
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "failed",
+                error=err_msg, attempt=attempt,
+            )
+            logger.error("Pipeline %s: step %s loop failed: %s",
+                         self.task.name, step.id, err_msg)
+        finally:
+            with self._lock:
                 if self._output_file_locks.get(step.resolved_filename) == step.id:
                     del self._output_file_locks[step.resolved_filename]
             self._remove_step_activity(step.id)
@@ -2836,6 +3311,20 @@ class PipelineExecutor:
             self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
         except Exception as exc:
             logger.error("Pipeline notify_failure send failed: %s", exc)
+
+        # Compound engineering: auto-draft a lesson so we learn from this failure.
+        # record_lesson_draft never raises — errors are logged and swallowed.
+        lesson_path = record_lesson_draft(self.task.name, error, kind="pipeline")
+        if lesson_path:
+            try:
+                self.bot.send_message(
+                    f"📝 Rascunho de lição criado em `vault/Lessons/{lesson_path.name}` "
+                    f"— complete as seções Fix e Detect.",
+                    chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
+                    disable_notification=True,
+                )
+            except Exception as exc:
+                logger.error("Pipeline lesson-draft notify failed: %s", exc)
 
         # Activity log
         _log_activity({
@@ -3851,6 +4340,67 @@ class ClaudeTelegramBot:
             self.send_message(f"🗑 Sessão `{name}` apagada.")
         else:
             self.send_message(f"❌ Sessão `{name}` não encontrada.")
+
+    def cmd_lesson(self, text: str) -> None:
+        """Record a manual lesson into vault/Lessons/.
+
+        Usage: /lesson <text>
+        Persists as manual-YYYY-MM-DD-HHMM.md with structured frontmatter.
+        """
+        text = (text or "").strip()
+        if not text:
+            self.send_message(
+                "❌ Use: `/lesson <texto>`\n"
+                "_Registra uma lição manual em `vault/Lessons/`. "
+                "Útil para capturar aprendizados durante a conversa._"
+            )
+            return
+        path = record_manual_lesson(text)
+        if path is None:
+            self.send_message("❌ Falha ao gravar lição. Veja o log para detalhes.")
+            return
+        self.send_message(
+            f"📝 Lição registrada em `vault/Lessons/{path.name}`.\n"
+            f"_Complete as seções Fix e Detect quando puder._"
+        )
+
+    def cmd_clone(self, dest_name: str) -> None:
+        """Clone the current active session into a new name and switch to it.
+
+        Usage: /clone <new-name>
+        The clone keeps the same Claude session_id (continues the conversation)
+        so the user can branch and test divergent prompts. Original stays intact.
+        """
+        dest_name = (dest_name or "").strip()
+        if not dest_name:
+            self.send_message(
+                "❌ Use: `/clone <nome>`\n"
+                "_Clona a sessão atual mantendo o mesmo session\\_id do Claude — "
+                "permite testar prompts divergentes sem perder o contexto original._"
+            )
+            return
+        current = self._get_session()
+        if current is None:
+            self.send_message("❌ Nenhuma sessão ativa para clonar.")
+            return
+        if dest_name in self.sessions.sessions:
+            self.send_message(f"❌ Sessão `{dest_name}` já existe. Escolha outro nome.")
+            return
+        try:
+            clone = self.sessions.clone(current.name, dest_name)
+        except Exception as exc:
+            logger.error("Clone failed: source=%s dest=%s err=%s", current.name, dest_name, exc)
+            self.send_message(f"❌ Falha ao clonar sessão: `{str(exc)[:100]}`")
+            return
+        if clone is None:
+            self.send_message(f"❌ Falha ao clonar sessão `{current.name}` para `{dest_name}`.")
+            return
+        self.send_message(
+            f"🌿 Sessão `{current.name}` clonada para `{clone.name}`.\n"
+            f"• Modelo: `{clone.model}`\n"
+            f"• Session ID: `{clone.session_id or 'nenhum'}`\n"
+            f"_Agora ativa nesta branch. Original intacta em `{current.name}`._"
+        )
 
     def cmd_clear(self) -> None:
         # Consolidate before clearing — session_id will be lost
@@ -5299,6 +5849,23 @@ class ClaudeTelegramBot:
                     skills_block += f"- **{s['name']}**: {s['description']} (`{s['path']}`)\n"
                 effective_sp = (effective_sp + skills_block) if effective_sp else skills_block
 
+        # Graph-based skill hint (user-prompt prefix) — lightweight nudge sourced
+        # from vault/.graphs/graph.json. Skipped for routines/pipelines (they
+        # carry their own context) and for retries (already tagged).
+        if (SKILL_HINTS_ENABLED and not _retry and not routine_mode
+                and prompt is not None):
+            try:
+                hinted = _select_relevant_skills(prompt, max_n=3)
+            except Exception as exc:
+                logger.warning("Skill hint injection failed: %s", exc)
+                hinted = []
+            if hinted:
+                hint_line = (
+                    f"<hint>Relevant skills for this task: {', '.join(hinted)}. "
+                    f"See vault/Skills/ for details.</hint>\n\n"
+                )
+                prompt = hint_line + prompt
+
         # All paths use the same session/model/effort
         effective_session_id = session.session_id
         effective_model = session.model
@@ -5747,6 +6314,16 @@ class ClaudeTelegramBot:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", runner.error_text[:200])
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {runner.error_text[:200]}")
+                # Compound engineering: draft a lesson from this failure
+                lesson_path = record_lesson_draft(task.name, runner.error_text, kind="routine")
+                if lesson_path:
+                    try:
+                        self.send_message(
+                            f"📝 Rascunho de lição: `vault/Lessons/{lesson_path.name}`",
+                            disable_notification=True,
+                        )
+                    except Exception as exc:
+                        logger.error("Routine lesson-draft notify failed: %s", exc)
             else:
                 # Success — commit checkpoint (drop stash, keep new state)
                 if checkpoint_ref:
@@ -5764,6 +6341,16 @@ class ClaudeTelegramBot:
                 self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
             else:
                 self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+            # Compound engineering: draft a lesson from this failure
+            lesson_path = record_lesson_draft(task.name, str(exc), kind="routine")
+            if lesson_path:
+                try:
+                    self.send_message(
+                        f"📝 Rascunho de lição: `vault/Lessons/{lesson_path.name}`",
+                        disable_notification=True,
+                    )
+                except Exception as notify_exc:
+                    logger.error("Routine lesson-draft notify failed: %s", notify_exc)
         finally:
             self.effort = saved_effort
 
@@ -5820,6 +6407,8 @@ class ClaudeTelegramBot:
                 "/sessions": lambda: self.cmd_sessions_list(),
                 "/switch": lambda: self.cmd_switch(arg) if arg else self.send_message("❌ Use: `/switch <nome>`"),
                 "/delete": lambda: self.cmd_delete(arg) if arg else self.send_message("❌ Use: `/delete <nome>`"),
+                "/clone": lambda: self.cmd_clone(arg),
+                "/lesson": lambda: self.cmd_lesson(arg),
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),

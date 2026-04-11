@@ -252,6 +252,36 @@ Body.
         # Empty vault has no marker files — should report that
         self.assertIn("marcadores", last["text"].lower() + "marcadores")  # tolerate either path
 
+    def test_clone_without_arg_shows_usage(self):
+        self.bot._handle_text("/clone")
+        last = self._last_send()
+        self.assertIn("/clone", last["text"])
+
+    def test_clone_creates_branch_from_active(self):
+        # Start from a known session
+        self.bot._handle_text("/new main-branch")
+        self.bot._get_session().session_id = "claude-xyz"
+        self.bot._get_session().model = "opus"
+        self.bot.sessions.save()
+        before = len(self.bot.sessions.sessions)
+        self.bot._handle_text("/clone exp-branch")
+        self.assertEqual(len(self.bot.sessions.sessions), before + 1)
+        self.assertIn("exp-branch", self.bot.sessions.sessions)
+        # Clone is the new active session
+        self.assertEqual(self.bot.sessions.active_session, "exp-branch")
+        # Clone continues the same Claude thread
+        self.assertEqual(self.bot.sessions.sessions["exp-branch"].session_id, "claude-xyz")
+        self.assertEqual(self.bot.sessions.sessions["exp-branch"].model, "opus")
+
+    def test_clone_existing_name_fails(self):
+        self.bot._handle_text("/new a")
+        self.bot._handle_text("/new b")
+        before = len(self.bot.sessions.sessions)
+        self.bot._handle_text("/clone a")  # 'a' already exists
+        self.assertEqual(len(self.bot.sessions.sessions), before)
+        last = self._last_send()
+        self.assertIn("já existe", last["text"])
+
 
 class SkillDiscoveryTest(unittest.TestCase):
     def setUp(self):
