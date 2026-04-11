@@ -167,7 +167,8 @@ default: false
 - {list}
 ```
 
-**{id}.md** — link hub in the Obsidian graph:
+**{id}.md** — link hub in the Obsidian graph. Body contains wikilinks ONLY to other knowledge files inside the agent's folder (reference docs, glossaries, etc.). Empty body is fine — the hub still receives an inbound edge from `Agents.md`.
+
 ```markdown
 ---
 title: {name}
@@ -177,13 +178,13 @@ created: {YYYY-MM-DD}
 updated: {YYYY-MM-DD}
 tags: [agent]
 ---
-
-[[{id}/Journal|Journal]]
-[[agent]]
-[[CLAUDE]]
 ```
 
-**Journal/** — create the empty directory
+**DO NOT** add `[[agent]]`, `[[CLAUDE]]`, or `[[{id}/Journal|Journal]]` here:
+- `agent.md` and `CLAUDE.md` are excluded from the graph (bot metadata / instructions, no body)
+- The Journal directory has no index file — the wikilink would dangle
+
+**Journal/** — create the empty directory. Daily journal entries (`Journal/YYYY-MM-DD.md`) are excluded from the graph and MUST NOT contain any wikilinks (no parent index, no mentioned entities). Just frontmatter and content.
 
 ### Step 9 — Update Agents.md
 

@@ -135,6 +135,40 @@ def resolve_wikilink(link, source_dir, vault_dir):
     return None
 
 
+# Files/dirs that exist on disk but should NOT appear in the knowledge graph.
+# These are ephemeral runtime artifacts (pipeline outputs, daily logs, bot
+# reactions, agent metadata) — not knowledge nodes. Including them pollutes
+# the graph with orphans and forces editors to add fake backlinks.
+DAILY_JOURNAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+
+
+def is_ephemeral(filepath: Path, vault_dir: Path) -> bool:
+    """Return True if the file is runtime data, not a knowledge node."""
+    try:
+        rel = filepath.relative_to(vault_dir)
+    except ValueError:
+        return False
+    parts = rel.parts
+
+    # Pipeline runtime workspace (any depth)
+    if "workspace" in parts:
+        return True
+    # Bot reactions (config, not knowledge)
+    if parts and parts[0] == "Reactions":
+        return True
+    # Daily journal entries (YYYY-MM-DD.md) at any level — keep Journal.md indexes
+    if "Journal" in parts and DAILY_JOURNAL_RE.match(filepath.name):
+        return True
+    # Agent metadata + instructions (no body / no frontmatter — not graph nodes)
+    if (
+        len(parts) >= 3
+        and parts[0] == "Agents"
+        and filepath.name in ("agent.md", "CLAUDE.md")
+    ):
+        return True
+    return False
+
+
 def build_graph(vault_dir):
     """Build the knowledge graph from vault markdown files."""
     vault_dir = Path(vault_dir)
@@ -149,6 +183,8 @@ def build_graph(vault_dir):
         if ".graphs" not in str(f)
         and ".obsidian" not in str(f)
         and ".claude" not in str(f)
+        and "__pycache__" not in str(f)
+        and not is_ephemeral(f, vault_dir)
     )
 
     for filepath in md_files:

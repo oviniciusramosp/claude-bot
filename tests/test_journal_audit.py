@@ -107,6 +107,50 @@ class FrontmatterRepair(unittest.TestCase):
         self.assertIn("type: journal", text)
         self.assertIn("created: 2026-04-10", text)
 
+    def test_create_journal_file_has_no_wikilinks(self):
+        # Daily journal entries are excluded from the knowledge graph (see
+        # vault-graph-builder.py::is_ephemeral). They MUST NOT contain any
+        # wikilinks — adding [[Journal]] would create a dangling edge in
+        # Obsidian and pollute the graph view.
+        p = self.tmpdir / "fresh.md"
+        self.ja.create_journal_file(p, "main", "2026-04-10")
+        self.assertNotIn("[[", p.read_text())
+        # Same rule for agent journals
+        p2 = self.tmpdir / "agent.md"
+        self.ja.create_journal_file(p2, "myagent", "2026-04-10")
+        self.assertNotIn("[[", p2.read_text())
+
+    def test_fix_strips_legacy_journal_wikilink(self):
+        # Old journal files written before the rule change have a [[Journal]]
+        # or [[agent/Journal|Journal]] line right after the frontmatter.
+        # The repair pass should remove it.
+        p = self.tmpdir / "legacy.md"
+        p.write_text(
+            "---\n"
+            'title: "Journal 2026-04-10"\n'
+            "type: journal\n"
+            "## 08:00 — entry\nbody\n"
+        )
+        self.ja.fix_frontmatter(p, "main", "2026-04-10")
+        text = p.read_text()
+        self.assertNotIn("[[Journal]]", text)
+        self.assertIn("## 08:00", text)
+
+    def test_fix_strips_legacy_agent_journal_wikilink(self):
+        p = self.tmpdir / "legacy_agent.md"
+        # Simulate a file that already has the legacy agent wikilink
+        p.write_text(
+            "---\n"
+            'title: "Journal 2026-04-10"\n'
+            "type: journal\n"
+            "[[crypto-bro/Journal|Journal]]\n\n"
+            "## 09:00 — note\n"
+        )
+        self.ja.fix_frontmatter(p, "crypto-bro", "2026-04-10")
+        text = p.read_text()
+        self.assertNotIn("[[", text)
+        self.assertIn("## 09:00", text)
+
     def test_create_for_agent_uses_agent_path(self):
         agent_journal = self.ja.get_journal_path(self.tmpdir, "myagent", "2026-04-10")
         self.assertEqual(

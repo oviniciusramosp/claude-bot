@@ -106,9 +106,9 @@ source: openclaw
 source_id: {original id in OC}
 source_workspace: {OC workspace path}
 ---
-
-[[Agents]]
 ```
+
+`agent.md` has no body — it is bot metadata, not a graph node.
 
 #### 5b. Generate CLAUDE.md
 

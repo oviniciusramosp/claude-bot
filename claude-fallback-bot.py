@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.25.0"  # feat: parent-owned pipeline ## Steps section + safer wikilink stripping in step prompts
+BOT_VERSION = "2.25.1"  # fix: clean knowledge graph — exclude ephemeral files, strip wikilinks from daily journals
 
 import hmac
 import hashlib

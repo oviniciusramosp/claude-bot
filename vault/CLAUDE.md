@@ -116,9 +116,16 @@ README (root hub)
 | Index | its direct children | README |
 | Leaf (routine, note) | `[[ParentIndex]]` on first line + genuine cross-links | its index |
 | Skill | NO wikilinks (use paths). Only exception: links to own sub-files | Skills index |
-| Agent | `{id}.md` with internal links | Agents index |
-| Journal entry | `[[Journal]]` or `[[{agent}/Journal\|Journal]]` | Journal index |
+| Agent hub `{id}.md` | only the agent's own knowledge sub-files (e.g., reference docs in the agent's folder) | Agents index |
 | Tooling | none (terminal) | README |
+
+**Files that are NOT graph nodes** (excluded by `vault-graph-builder.py`):
+- Daily journal entries (`Journal/YYYY-MM-DD.md` and `Agents/*/Journal/YYYY-MM-DD.md`) — ephemeral chronological logs
+- Pipeline workspace data (`Agents/*/workspace/**`) — runtime outputs
+- Bot reactions (`Reactions/**`) — webhook config, not knowledge
+- Agent metadata (`Agents/*/agent.md`) and instructions (`Agents/*/CLAUDE.md`) — read by the bot/Claude CLI, not browsed in the graph
+
+These files exist on disk but are deliberately not part of the knowledge graph. They MUST NOT contain wikilinks — adding `[[]]` here pollutes Obsidian's graph view via dangling edges and risks leaking to the LLM when read as prompt context.
 
 **Core principle: not every mention needs to be a `[[link]]`.** Links exist to create connections IN the Obsidian graph. If the connection doesn't add visual value, don't link. Use plain text.
 
@@ -193,9 +200,9 @@ created: YYYY-MM-DD
 updated: YYYY-MM-DD
 tags: [journal]
 ---
-
-[[Journal]]
 ```
+
+**No parent wikilink in the body.** Daily journal entries are chronological logs, not knowledge nodes — they're excluded from the graph. The folder location is enough context.
 
 Entry format:
 ```markdown
@@ -220,9 +227,9 @@ Don't wait for the end of the conversation. Record in the Journal immediately wh
 
 Each record is atomic and self-contained. Use `## HH:MM — Short summary` as header, bullets with details, and `---` as separator.
 
-**Journal DOES NOT create wikilinks to mentioned entities.** The file format and its location in the folder are sufficient for the graph. This keeps the chart clean.
+**Journal DOES NOT create wikilinks at all.** No parent index, no mentioned entities. The file format and its location in the folder are sufficient. Daily entries are excluded from the knowledge graph (see "Files that are NOT graph nodes" above) — any `[[]]` in them creates dangling edges in Obsidian's graph view.
 
-For agent journals, first line: `[[{agent-id}/Journal|Journal]]`
+Agent journal entries follow the same rule: just frontmatter and content, no wikilinks.
 
 ## Notes (`Notes/`)
 
@@ -457,12 +464,13 @@ The `chat_id` and `thread_id` fields are optional. When present, pipelines and r
 - {focus areas}
 ```
 
-**{id}.md** — agent's hub in the Obsidian graph. Contains internal links:
+**{id}.md** — agent's hub in the Obsidian graph. Contains wikilinks ONLY to other knowledge files in the agent's folder (e.g., reference docs, glossaries). Empty body is fine if the agent has no sub-knowledge — the hub still receives an inbound edge from `Agents.md`.
+
 ```markdown
-[[{id}/Journal|Journal]]
-[[agent]]
-[[CLAUDE]]
+[[expressions-glossary]]
 ```
+
+**Do not** add `[[agent]]`, `[[CLAUDE]]`, or `[[{id}/Journal|Journal]]` here — `agent.md` and `CLAUDE.md` are not graph nodes (excluded), and the Journal directory has no index file to point to.
 
 **Workspace:** when active, `cwd` changes to `Agents/{id}/`. Claude reads the agent's CLAUDE.md + this vault CLAUDE.md (automatic hierarchy).
 

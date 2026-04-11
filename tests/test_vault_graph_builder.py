@@ -178,5 +178,120 @@ class BuildGraph(unittest.TestCase):
         self.assertIn("generated_at", meta)
 
 
+class IsEphemeral(unittest.TestCase):
+    """The graph builder must skip runtime-only files (workspace data, daily
+    journals, bot reactions, agent metadata). They are not knowledge nodes and
+    forcing them in pollutes the graph with orphans."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gb = _load_script()
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.vault = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _check(self, rel: str, expected: bool):
+        p = self.vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("", encoding="utf-8")
+        self.assertEqual(self.gb.is_ephemeral(p, self.vault), expected, rel)
+
+    def test_pipeline_workspace_data_is_ephemeral(self):
+        self._check("Agents/cryptobot/workspace/data/news/collect.md", True)
+
+    def test_workspace_at_any_depth_is_ephemeral(self):
+        self._check("Agents/foo/bar/workspace/x.md", True)
+
+    def test_reactions_dir_is_ephemeral(self):
+        self._check("Reactions/test-webhook.md", True)
+
+    def test_daily_journal_root_is_ephemeral(self):
+        self._check("Journal/2026-04-10.md", True)
+
+    def test_daily_journal_agent_is_ephemeral(self):
+        self._check("Agents/parmeirense/Journal/2026-04-10.md", True)
+
+    def test_agent_metadata_is_ephemeral(self):
+        self._check("Agents/parmeirense/agent.md", True)
+
+    def test_agent_claude_md_is_ephemeral(self):
+        self._check("Agents/parmeirense/CLAUDE.md", True)
+
+    def test_keeps_journal_index(self):
+        # Journal.md (the index) is a knowledge node — must NOT be ephemeral
+        self._check("Journal/Journal.md", False)
+
+    def test_keeps_root_claude_md(self):
+        # vault/CLAUDE.md (root) is a knowledge node — must NOT be ephemeral
+        self._check("CLAUDE.md", False)
+
+    def test_keeps_agent_hub(self):
+        # The {id}.md hub IS a graph node
+        self._check("Agents/parmeirense/parmeirense.md", False)
+
+    def test_keeps_routine_step(self):
+        # Routine step prompts are linked from the parent — keep them
+        self._check("Routines/myname/steps/collect.md", False)
+
+    def test_keeps_skill(self):
+        self._check("Skills/create-pipeline.md", False)
+
+
+class BuildGraphIgnoresEphemeral(unittest.TestCase):
+    """End-to-end: a vault containing both knowledge nodes and ephemeral
+    runtime files should produce a graph that contains only the knowledge
+    nodes — and no orphans."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.gb = _load_script()
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.vault = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _write(self, rel: str, content: str):
+        p = self.vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+
+    def test_ephemeral_files_excluded(self):
+        # Knowledge nodes
+        self._write("README.md", '---\ntitle: README\n---\n[[Notes]]')
+        self._write("Notes/Notes.md", '---\ntitle: Notes\n---\n[[my-note]]')
+        self._write("Notes/my-note.md", '---\ntitle: My Note\n---\n[[Notes]]')
+        # Ephemeral files that should be ignored
+        self._write("Journal/2026-04-10.md", '---\ntitle: Journal\n---\n[[Notes]]')
+        self._write("Reactions/webhook.md", '---\ntitle: Webhook\n---\n[[Notes]]')
+        self._write(
+            "Agents/foo/workspace/data/x/collect.md",
+            '---\ntitle: Collect\n---\n[[Notes]]',
+        )
+        self._write("Agents/foo/agent.md", '---\ntitle: foo\ntype: agent\n---\n')
+        self._write("Agents/foo/CLAUDE.md", "# foo\n")
+
+        graph = self.gb.build_graph(self.vault)
+        ids = {n["id"] for n in graph["nodes"]}
+        # Knowledge nodes present
+        self.assertIn("readme", ids)
+        self.assertIn("notes_notes", ids)
+        self.assertIn("notes_my-note", ids)
+        # Ephemeral nodes absent
+        self.assertNotIn("journal_2026-04-10", ids)
+        self.assertNotIn("reactions_webhook", ids)
+        self.assertNotIn(
+            "agents_foo_workspace_data_x_collect", ids
+        )
+        self.assertNotIn("agents_foo_agent", ids)
+        self.assertNotIn("agents_foo_claude", ids)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,6 @@ action:
     Timestamp: {{timestamp}}
 ---
 
-[[Reactions]]
 
 Simple webhook test — forwards any POST payload to the default Telegram chat.
 Use this to validate the full stack: Tailscale Funnel → webhook server → Telegram.

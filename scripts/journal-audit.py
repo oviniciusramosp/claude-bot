@@ -70,13 +70,6 @@ def get_journal_path(vault: Path, agent: str, target_date: str) -> Path:
     return vault / "Agents" / agent / "Journal" / f"{target_date}.md"
 
 
-def get_journal_link(agent: str) -> str:
-    """Return the wikilink for the journal's parent index."""
-    if agent == "main":
-        return "[[Journal]]"
-    return f"[[{agent}/Journal|Journal]]"
-
-
 JOURNAL_TEMPLATE = """\
 ---
 title: "Journal {date}"
@@ -86,20 +79,17 @@ created: {date}
 updated: {date}
 tags: [{tags}]
 ---
-
-{link}
 """
 
 
 def create_journal_file(path: Path, agent: str, target_date: str) -> None:
-    """Create a journal file with valid frontmatter. Deterministic — no Claude needed."""
+    """Create a journal file with valid frontmatter. Deterministic — no Claude needed.
+    Daily journal entries do NOT carry a parent wikilink; they live in the Journal
+    folder which is sufficient context, and they are excluded from the knowledge
+    graph (see scripts/vault-graph-builder.py::is_ephemeral)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tags = "journal" if agent == "main" else f"journal, {agent}"
-    content = JOURNAL_TEMPLATE.format(
-        date=target_date,
-        tags=tags,
-        link=get_journal_link(agent),
-    )
+    content = JOURNAL_TEMPLATE.format(date=target_date, tags=tags)
     path.write_text(content, encoding="utf-8")
 
 
@@ -193,13 +183,20 @@ def fix_frontmatter(path: Path, agent: str, target_date: str) -> str:
         new_fm += f"{k}: {v}\n"
     new_fm += "---\n"
 
-    # Ensure journal link is present after frontmatter
-    link = get_journal_link(agent)
+    # Strip any leading parent-index wikilink line — daily journals are
+    # ephemeral logs and don't belong in the knowledge graph (see
+    # scripts/vault-graph-builder.py::is_ephemeral). The line is harmless
+    # but pollutes Obsidian's graph view.
+    body_lines = list(body_lines)
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    if body_lines and re.match(
+        r"^\[\[(?:[\w/-]+\|)?[\w/ -]+\]\]\s*$", body_lines[0].strip()
+    ):
+        body_lines.pop(0)
+
     body_text = "\n".join(body_lines).strip()
-    if link not in body_text:
-        body_text = f"\n{link}\n\n{body_text}"
-    else:
-        body_text = f"\n{body_text}"
+    body_text = f"\n{body_text}" if body_text else ""
 
     path.write_text(new_fm + body_text + "\n", encoding="utf-8")
     return "frontmatter repaired"
