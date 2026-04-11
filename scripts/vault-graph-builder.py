@@ -11,11 +11,18 @@ Usage:
 """
 
 import json
-import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# Share parsing logic with the bot and the query layer.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vault_frontmatter import (  # noqa: E402
+    extract_wikilinks,
+    normalize_id,
+    parse_frontmatter,
+)
 
 VAULT_DIR = Path(__file__).resolve().parent.parent / "vault"
 OUTPUT_DIR = VAULT_DIR / ".graphs"
@@ -34,76 +41,8 @@ while i < len(args):
     else:
         i += 1
 
-# Regex patterns
-FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---", re.DOTALL)
-WIKILINK_RE = re.compile(r"\[\[([^\]|]+?)(?:\|[^\]]+?)?\]\]")
-YAML_LIST_RE = re.compile(r"^\s*-\s+(.+)$", re.MULTILINE)
-YAML_KV_RE = re.compile(r"^(\w[\w.]*)\s*:\s*(.+)$", re.MULTILINE)
-RELATED_BLOCK_RE = re.compile(
-    r"^related:\s*\n((?:\s+-\s+.*\n?)*)", re.MULTILINE
-)
-RELATED_ENTRY_RE = re.compile(
-    r'file:\s*"?([^"\n,]+)"?\s*.*?type:\s*(\w+).*?reason:\s*"?([^"\n]*)"?'
-)
-
-
-def parse_frontmatter(text):
-    """Extract frontmatter fields from markdown text."""
-    m = FRONTMATTER_RE.match(text)
-    if not m:
-        return {}
-    raw = m.group(1)
-    fm = {}
-    for kv in YAML_KV_RE.finditer(raw):
-        key, val = kv.group(1), kv.group(2).strip()
-        # Handle inline lists: [a, b, c]
-        if val.startswith("[") and val.endswith("]"):
-            fm[key] = [
-                v.strip().strip("\"'") for v in val[1:-1].split(",") if v.strip()
-            ]
-        elif val.lower() in ("true", "false"):
-            fm[key] = val.lower() == "true"
-        else:
-            fm[key] = val.strip("\"'")
-    # Parse related blocks
-    rm = RELATED_BLOCK_RE.search(raw)
-    if rm:
-        related = []
-        for entry in RELATED_ENTRY_RE.finditer(rm.group(1)):
-            related.append(
-                {"file": entry.group(1), "type": entry.group(2), "reason": entry.group(3)}
-            )
-        fm["related"] = related
-    return fm
-
-
-def extract_wikilinks(text):
-    """Extract wikilink targets from markdown body, skipping frontmatter and
-    fenced code blocks (``` ... ```). Wikilinks inside code blocks are example
-    code, not real graph relationships."""
-    # Strip frontmatter
-    m = FRONTMATTER_RE.match(text)
-    body = text[m.end() :] if m else text
-
-    # Strip fenced code blocks before extracting wikilinks. Track open/close
-    # state line-by-line so nested or mid-line backticks don't confuse us.
-    in_fence = False
-    cleaned = []
-    for line in body.split("\n"):
-        stripped = line.lstrip()
-        if stripped.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        cleaned.append(line)
-    return WIKILINK_RE.findall("\n".join(cleaned))
-
-
-def normalize_id(filepath, vault_dir):
-    """Create a stable node ID from file path."""
-    rel = filepath.relative_to(vault_dir)
-    return str(rel).replace("/", "_").replace(".md", "").replace(" ", "-").lower()
+# parse_frontmatter, extract_wikilinks, normalize_id, FRONTMATTER_RE, and
+# WIKILINK_RE are imported from vault_frontmatter at the top of this file.
 
 
 def resolve_wikilink(link, source_dir, vault_dir):

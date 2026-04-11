@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.25.1"  # fix: clean knowledge graph — exclude ephemeral files, strip wikilinks from daily journals
+BOT_VERSION = "2.26.0"  # feat: vault_query foundation — extract single-source frontmatter parser to scripts/vault_frontmatter.py
 
 import hmac
 import hashlib
@@ -30,6 +30,11 @@ from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+# Make scripts/ importable so we can share helpers between the bot, the
+# graph builder, and the optional MCP server. Single source of truth for
+# the frontmatter parser lives in scripts/vault_frontmatter.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent / "scripts"))
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -354,168 +359,22 @@ _sh.setFormatter(_fmt)
 logger.addHandler(_sh)
 
 # ---------------------------------------------------------------------------
-# Frontmatter parser (stdlib only — no pyyaml)
+# Frontmatter parser (re-exported from scripts/vault_frontmatter.py)
 # ---------------------------------------------------------------------------
+# Single source of truth for frontmatter parsing lives in scripts/. Three
+# in-tree parsers (bot, graph builder, query layer) used to drift; we now
+# import from one shared module. The Swift FrontmatterParser remains
+# separate but is parity-tested in tests/test_contracts.py.
 
-
-def _indent_of(line: str) -> int:
-    """Count leading spaces (tabs expanded to 4)."""
-    n = 0
-    for ch in line:
-        if ch == " ":
-            n += 1
-        elif ch == "\t":
-            n += 4
-        else:
-            break
-    return n
-
-
-def parse_frontmatter(text: str) -> Dict[str, Any]:
-    """Parse YAML frontmatter from a markdown file.
-
-    Supports scalars, quoted strings (with `\\n` escapes), flow lists, nested
-    blocks (one level), and block scalars (`|` literal and `>` folded) for
-    multi-line string values.
-    """
-    lines = text.split("\n")
-    if not lines or lines[0].strip() != "---":
-        return {}
-    end = -1
-    for i in range(1, len(lines)):
-        if lines[i].strip() == "---":
-            end = i
-            break
-    if end < 0:
-        return {}
-
-    result: Dict[str, Any] = {}
-    current_block: Optional[str] = None
-    i = 1
-    while i < end:
-        line = lines[i]
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            i += 1
-            continue
-
-        # Indented sub-key of an open nested block
-        if current_block and line.startswith("  ") and ":" in stripped and not stripped.startswith("-"):
-            key, _, val = stripped.partition(":")
-            key = key.strip()
-            val = val.strip()
-            # Block scalar at nested level
-            if val in ("|", "|-", ">", ">-"):
-                scalar, consumed = _read_block_scalar(lines, i + 1, end, _indent_of(line))
-                if isinstance(result.get(current_block), dict):
-                    result[current_block][key] = scalar if val.startswith("|") else scalar.replace("\n", " ").strip()
-                i += 1 + consumed
-                continue
-            if isinstance(result.get(current_block), dict):
-                result[current_block][key] = _parse_yaml_value(val)
-            i += 1
-            continue
-
-        # Top-level key
-        if ":" in stripped and not stripped.startswith("-"):
-            key, _, val = stripped.partition(":")
-            key = key.strip()
-            val = val.strip()
-            if val == "":
-                # Start of a nested block (e.g., schedule:, auth:, action:)
-                result[key] = {}
-                current_block = key
-            elif val in ("|", "|-", ">", ">-"):
-                # Top-level block scalar
-                scalar, consumed = _read_block_scalar(lines, i + 1, end, _indent_of(line))
-                result[key] = scalar if val.startswith("|") else scalar.replace("\n", " ").strip()
-                i += 1 + consumed
-                current_block = None
-                continue
-            else:
-                result[key] = _parse_yaml_value(val)
-                current_block = None
-        i += 1
-    return result
-
-
-def _read_block_scalar(lines: List[str], start: int, end: int, parent_indent: int) -> tuple:
-    """Collect a YAML block scalar starting at `start`.
-
-    Returns (joined_text, consumed_lines). Only lines indented strictly deeper
-    than `parent_indent` are included. Strips the minimum indent from each line.
-    """
-    collected: List[str] = []
-    j = start
-    while j < end:
-        line = lines[j]
-        if line.strip() == "":
-            collected.append("")
-            j += 1
-            continue
-        if _indent_of(line) <= parent_indent:
-            break
-        collected.append(line)
-        j += 1
-    if not collected:
-        return "", j - start
-    # Find minimum indent among non-empty collected lines
-    min_indent = min(_indent_of(ln) for ln in collected if ln.strip())
-    dedented = [ln[min_indent:] if len(ln) >= min_indent else ln for ln in collected]
-    # Strip trailing empty lines
-    while dedented and dedented[-1] == "":
-        dedented.pop()
-    return "\n".join(dedented), j - start
-
-
-def _parse_yaml_value(val: str) -> Any:
-    """Parse a single YAML value: bool, number, quoted string, flow list, or plain string."""
-    if val.lower() in ("true", "yes"):
-        return True
-    if val.lower() in ("false", "no"):
-        return False
-    # Flow list: [a, b, c]
-    if val.startswith("[") and val.endswith("]"):
-        items = val[1:-1].split(",")
-        return [_strip_quotes(i.strip()) for i in items if i.strip()]
-    # Quoted string
-    if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
-        return val[1:-1]
-    # Try number
-    try:
-        if "." in val:
-            return float(val)
-        return int(val)
-    except ValueError:
-        pass
-    return val
-
-
-def _strip_quotes(s: str) -> str:
-    if len(s) >= 2 and ((s[0] == '"' and s[-1] == '"') or (s[0] == "'" and s[-1] == "'")):
-        return s[1:-1]
-    return s
-
-
-def get_frontmatter_and_body(filepath: Path) -> tuple:
-    """Return (frontmatter_dict, body_text) from a markdown file."""
-    try:
-        text = filepath.read_text(encoding="utf-8")
-    except Exception:
-        return {}, ""
-    fm = parse_frontmatter(text)
-    # Extract body (everything after second ---)
-    lines = text.split("\n")
-    if lines and lines[0].strip() == "---":
-        end = -1
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                end = i
-                break
-        if end >= 0:
-            body = "\n".join(lines[end + 1:]).strip()
-            return fm, body
-    return fm, text.strip()
+from vault_frontmatter import (  # noqa: E402
+    _indent_of,
+    _parse_yaml_value,
+    _read_block_scalar,
+    _strip_quotes,
+    get_frontmatter_and_body,
+    parse_frontmatter,
+    parse_pipeline_body,
+)
 
 
 _REACTION_STATS_LOCK = threading.Lock()
@@ -633,56 +492,9 @@ def load_reaction(name: str) -> Optional[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline body parser
+# Pipeline body parser is imported from vault_frontmatter at the top of this
+# file (single source of truth shared with the linter and the indexer).
 # ---------------------------------------------------------------------------
-
-
-def parse_pipeline_body(body: str) -> list:
-    """Extract step definitions from a ```pipeline fenced block in the markdown body.
-
-    Returns a list of dicts, each with keys like id, name, model, depends_on, prompt_file, etc.
-    """
-    # Find the fenced block
-    in_block = False
-    block_lines: list = []
-    for line in body.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("```pipeline"):
-            in_block = True
-            continue
-        if in_block and stripped == "```":
-            break
-        if in_block:
-            block_lines.append(line)
-
-    if not block_lines:
-        return []
-
-    steps: list = []
-    current: Optional[dict] = None
-    for line in block_lines:
-        stripped = line.strip()
-        if not stripped or stripped == "steps:":
-            continue
-        # New step item: "  - id: value"
-        if stripped.startswith("- "):
-            if current is not None:
-                steps.append(current)
-            current = {}
-            stripped = stripped[2:].strip()  # Remove "- " prefix
-        if current is None:
-            continue
-        # Parse "key: value" pair
-        if ":" in stripped:
-            colon = stripped.index(":")
-            key = stripped[:colon].strip()
-            val = stripped[colon + 1:].strip()
-            if val:
-                parsed = _parse_yaml_value(val)
-                current[key] = parsed
-    if current:
-        steps.append(current)
-    return steps
 
 
 # ---------------------------------------------------------------------------
