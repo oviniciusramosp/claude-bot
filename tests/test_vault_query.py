@@ -260,6 +260,21 @@ code = "[[not-a-link]]"
         links = vfm.extract_wikilinks(text)
         self.assertEqual(set(links), {"foo", "bar"})
 
+    def test_extract_wikilinks_skips_inline_code(self):
+        text = """---
+t: x
+---
+
+Real link: [[foo]]
+
+Documentation: use `[[ParentIndex]]` on the first line.
+Also `[[skill-name]]` is just a placeholder.
+
+[[bar]]
+"""
+        links = vfm.extract_wikilinks(text)
+        self.assertEqual(set(links), {"foo", "bar"})
+
     def test_get_frontmatter_and_body(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)

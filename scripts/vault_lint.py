@@ -255,11 +255,14 @@ def lint_orphans(vi: VaultIndex, report: LintReport) -> None:
 def lint_broken_prompt_files(vi: VaultIndex, report: LintReport) -> None:
     for f in vi.find(type="pipeline"):
         steps = parse_pipeline_body(f.body)
+        # Bot resolves prompt_file as `(pipeline_md.parent / pipeline_md.stem / pf)`
+        # — the per-pipeline subfolder is named after the pipeline file's stem.
+        pipeline_dir = f.path.parent / f.path.stem
         for step in steps:
             pf = step.get("prompt_file")
             if not pf:
                 continue
-            target = (f.path.parent / str(pf)).resolve()
+            target = (pipeline_dir / str(pf)).resolve()
             if not target.exists():
                 report.add(
                     LintIssue(

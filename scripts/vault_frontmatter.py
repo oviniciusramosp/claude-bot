@@ -311,10 +311,13 @@ def get_frontmatter_and_body(filepath: Path) -> Tuple[Dict[str, Any], str]:
     return fm, text.strip()
 
 
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
 def extract_wikilinks(text: str) -> List[str]:
-    """Extract wikilink targets from markdown body, skipping frontmatter and
-    fenced code blocks. Wikilinks inside code blocks are example code, not
-    real graph relationships.
+    """Extract wikilink targets from markdown body, skipping frontmatter,
+    fenced code blocks (```...```), and inline code spans (`...`). Wikilinks
+    inside code are documentation examples, not real graph relationships.
     """
     m = FRONTMATTER_RE.match(text)
     body = text[m.end() :] if m else text
@@ -327,7 +330,8 @@ def extract_wikilinks(text: str) -> List[str]:
             continue
         if in_fence:
             continue
-        cleaned.append(line)
+        # Strip inline code spans before extracting wikilinks
+        cleaned.append(_INLINE_CODE_RE.sub("", line))
     return WIKILINK_RE.findall("\n".join(cleaned))
 
 
