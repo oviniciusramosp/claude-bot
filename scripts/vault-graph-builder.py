@@ -15,6 +15,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # Share parsing logic with the bot and the query layer.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,28 +46,79 @@ while i < len(args):
 # WIKILINK_RE are imported from vault_frontmatter at the top of this file.
 
 
+def _is_agent_root(candidate: Path) -> bool:
+    """Return True iff `candidate` is a directory with `agent-<dirname>.md` inside.
+
+    v3.4: each agent's hub file is named after the directory itself
+    (`agent-main.md` inside `main/`, `agent-crypto-bro.md` inside `crypto-bro/`).
+    """
+    return (candidate / f"agent-{candidate.name}.md").is_file()
+
+
+def _agent_from_source_dir(source_dir: Path, vault_dir: Path) -> Optional[Path]:
+    """Return the ``<agent>/`` root for the folder containing a source file.
+
+    Given a source dir like ``vault/crypto-bro/Routines/``, returns
+    ``vault/crypto-bro``. Returns ``None`` when the source file isn't inside
+    an agent directory (e.g. the top-level README/CLAUDE.md/Tooling.md).
+    """
+    try:
+        rel = source_dir.relative_to(vault_dir)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if not parts:
+        return None
+    candidate = vault_dir / parts[0]
+    if _is_agent_root(candidate):
+        return candidate
+    return None
+
+
 def resolve_wikilink(link, source_dir, vault_dir):
-    """Resolve a wikilink target to a file path relative to vault."""
-    # Strip section refs
+    """Resolve a wikilink target to a file path relative to vault.
+
+    v3.1 flat per-agent layout: every agent lives directly at the vault root
+    (``vault/<id>/Skills/``, ``vault/<id>/Routines/``, …). Wikilinks inside an
+    agent's files should resolve within that agent's subtree first; top-level
+    wikilinks (from README.md or CLAUDE.md) may reference any agent via a
+    path-qualified form like ``[[main/agent-info]]``.
+
+    Resolution order:
+    1. Inside the same directory as the source file (or the exact path if
+       the link contains a ``/``).
+    2. Inside any sibling subfolder of the same agent (Skills/Routines/…).
+    3. Direct child of vault root (matches agent hub references like
+       ``[[main/agent-info]]``).
+    4. Anywhere else via rglob (last-resort fallback).
+    """
     link = link.split("#")[0].strip()
     if not link:
         return None
 
-    # Try relative to source dir first
     candidates = [
         source_dir / f"{link}.md",
         source_dir / link / f"{link}.md",
         vault_dir / f"{link}.md",
     ]
-    # Search common directories
-    for subdir in ["Notes", "Skills", "Routines", "Agents", "Journal"]:
-        candidates.append(vault_dir / subdir / f"{link}.md")
+
+    # Same-agent sibling subfolders (isolamento total: never leave the agent).
+    agent_root = _agent_from_source_dir(source_dir, vault_dir)
+    if agent_root is not None:
+        for subdir in ("Skills", "Routines", "Journal", "Notes", "Reactions",
+                       "Lessons", ".workspace"):
+            candidates.append(agent_root / subdir / f"{link}.md")
+        candidates.append(agent_root / f"{link}.md")
+
+    # Path-qualified wikilinks resolve against the vault root.
+    if "/" in link:
+        candidates.append(vault_dir / f"{link}.md")
 
     for c in candidates:
         if c.exists():
             return c.relative_to(vault_dir)
 
-    # Try glob for nested paths
+    # Last-resort rglob
     for match in vault_dir.rglob(f"{link}.md"):
         if ".graphs" not in str(match) and ".obsidian" not in str(match):
             return match.relative_to(vault_dir)
@@ -89,21 +141,23 @@ def is_ephemeral(filepath: Path, vault_dir: Path) -> bool:
         return False
     parts = rel.parts
 
-    # Pipeline runtime workspace (any depth)
-    if "workspace" in parts:
+    # Pipeline runtime workspace (any depth). v3.5 dot-prefixes it so Obsidian
+    # hides it from the graph view, but the graph builder must exclude it too
+    # so we don't create knowledge-graph nodes for pipeline step outputs.
+    if ".workspace" in parts or "workspace" in parts:
         return True
-    # Bot reactions (config, not knowledge)
-    if parts and parts[0] == "Reactions":
+    # Bot reactions (webhook config, not knowledge) — v3.1: per-agent reactions.
+    if "Reactions" in parts:
         return True
     # Daily journal entries (YYYY-MM-DD.md) at any level — keep Journal.md indexes
     if "Journal" in parts and DAILY_JOURNAL_RE.match(filepath.name):
         return True
-    # Agent metadata + instructions (no body / no frontmatter — not graph nodes)
-    if (
-        len(parts) >= 3
-        and parts[0] == "Agents"
-        and filepath.name in ("agent.md", "CLAUDE.md")
-    ):
+    # Routine execution history rollups (<agent>/Routines/.history/YYYY-MM.md).
+    if ".history" in parts:
+        return True
+    # Per-agent CLAUDE.md instruction files are read by Claude CLI, not browsed
+    # in the graph. agent-info.md IS a graph node (the hub), so it stays in.
+    if len(parts) >= 2 and filepath.name == "CLAUDE.md":
         return True
     return False
 
@@ -136,6 +190,16 @@ def build_graph(vault_dir):
         node_id = normalize_id(filepath, vault_dir)
         rel_path = str(filepath.relative_to(vault_dir))
 
+        # Derive owning agent from the path (<agent>/...). Top-level files
+        # like README.md / CLAUDE.md / Tooling.md have agent=None — they are
+        # the shared vault surface.
+        rel_parts = Path(rel_path).parts
+        owner_agent = None
+        if len(rel_parts) >= 2:
+            first = vault_dir / rel_parts[0]
+            if _is_agent_root(first):
+                owner_agent = rel_parts[0]
+
         # Create node
         node = {
             "id": node_id,
@@ -147,6 +211,7 @@ def build_graph(vault_dir):
             "tags": fm.get("tags", []),
             "created": fm.get("created", ""),
             "updated": fm.get("updated", ""),
+            "agent": owner_agent,
         }
         nodes.append(node)
         node_ids.add(node_id)

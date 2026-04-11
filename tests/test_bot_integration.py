@@ -294,7 +294,8 @@ class SkillDiscoveryTest(unittest.TestCase):
         self._td.cleanup()
 
     def _seed(self, name, description, tags):
-        skills_dir = self.fixture.vault / "Skills"
+        # v3.1: skills live under <agent>/Skills/ (no Agents/ wrapper).
+        skills_dir = self.fixture.vault / "main" / "Skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
         tag_str = "[" + ", ".join(tags) + "]"
         (skills_dir / f"{name}.md").write_text(

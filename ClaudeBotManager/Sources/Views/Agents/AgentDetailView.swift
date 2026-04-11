@@ -84,7 +84,7 @@ struct AgentDetailView: View {
                     TextField("Name", text: $agent.name)
                         .font(.system(size: 17, weight: .bold))
                         .textFieldStyle(.plain)
-                    Text("Agents/\(agent.id)/")
+                    Text("vault/\(agent.id)/")
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))
                 }

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.34.0"  # feat: Active Memory — proactive vault context injection (OpenClaw v2026.4.10 inspired)
+BOT_VERSION = "3.5.0"  # BREAKING: rename agent workspace dir to `.workspace/` (dot-prefixed) so Obsidian hides pipeline runtime data automatically
 
 import hmac
 import hashlib
@@ -90,7 +90,14 @@ def _detect_claude_path() -> str:
     return "/opt/homebrew/bin/claude"
 
 CLAUDE_PATH = _detect_claude_path()
-CLAUDE_WORKSPACE = os.environ.get("CLAUDE_WORKSPACE", str(Path(__file__).resolve().parent / "vault"))
+# Default workspace for interactive sessions on the Main agent. In v3.0 the
+# Main agent is just another agent and owns its own folder directly at the
+# vault root (vault/main/). No `Agents/` wrapper — the user's diagram shows
+# agents as siblings of the shared CLAUDE.md / README.md / Tooling.md.
+CLAUDE_WORKSPACE = os.environ.get(
+    "CLAUDE_WORKSPACE",
+    str(Path(__file__).resolve().parent / "vault" / "main"),
+)
 
 DATA_DIR = Path.home() / ".claude-bot"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
@@ -98,12 +105,157 @@ CONTEXTS_FILE = DATA_DIR / "contexts.json"
 LOG_FILE = DATA_DIR / "bot.log"
 
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
-ROUTINES_DIR = VAULT_DIR / "Routines"
-AGENTS_DIR = VAULT_DIR / "Agents"
-LESSONS_DIR = VAULT_DIR / "Lessons"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
-ACTIVITY_LOG_DIR = VAULT_DIR / "Journal" / ".activity"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
+
+# ---------------------------------------------------------------------------
+# Per-agent path resolution (v3.1 layout)
+# ---------------------------------------------------------------------------
+# Every agent — including Main — lives directly under vault/<id>/ (no more
+# Agents/ wrapper). Each agent owns its own Skills/, Routines/, Journal/,
+# Reactions/, Lessons/, Notes/, workspace/. The vault root contains only the
+# shared CLAUDE.md / README.md / Tooling.md plus the per-agent directories.
+# Isolamento total: each agent only sees its own stuff.
+#
+# A directory is considered an agent iff it contains an `agent-<id>.md` file
+# (the hub/index file that also carries the agent's metadata in frontmatter).
+# v3.4: the per-agent hub file is named after the directory itself
+# (`agent-main.md`, `agent-crypto-bro.md`, …) so every basename in the vault
+# is unique and Obsidian's wikilink resolver picks the right one with bare
+# `[[agent-main]]` syntax.
+MAIN_AGENT_ID = "main"
+
+
+# v3.3 sub-index naming: each agent's per-folder index file uses the
+# `agent-<folder>` prefix so the LLM knows it's an Obsidian graph hub, not
+# regular knowledge content. The bot's routine/skill/reaction iterators
+# skip these filenames so the index files never get treated as items.
+SUB_INDEX_FILENAMES = {
+    "Skills":    "agent-skills.md",
+    "Routines":  "agent-routines.md",
+    "Journal":   "agent-journal.md",
+    "Reactions": "agent-reactions.md",
+    "Lessons":   "agent-lessons.md",
+    "Notes":     "agent-notes.md",
+}
+# Names alone (filename only) for fast membership checks inside iterators.
+SUB_INDEX_FILENAMES_SET = frozenset(SUB_INDEX_FILENAMES.values())
+
+# Obsidian graph-view color palette for per-agent color groups.
+# Each value is a 24-bit RGB integer (r<<16 | g<<8 | b) — the format Obsidian
+# stores inside `.obsidian/graph.json`'s `colorGroups.color.rgb` field.
+# When a new agent is created via /agent new or the Swift app, the user picks
+# one of these names and the bot syncs the graph-view config automatically.
+AGENT_COLOR_PALETTE: Dict[str, int] = {
+    "grey":   0x9E9E9E,   # 10395294 — neutral default for Main
+    "red":    0xEF4444,   # 15680580
+    "orange": 0xFF9800,   # 16750848
+    "yellow": 0xFBBF24,   # 16498468
+    "green":  0x4CAF50,   # 5025616
+    "teal":   0x14B8A6,   # 1358502
+    "blue":   0x3B82F6,   # 3900150
+    "purple": 0x9333EA,   # 9647082
+}
+DEFAULT_AGENT_COLOR = "grey"
+
+
+def resolve_agent_color(color: Optional[str]) -> int:
+    """Look up a palette name and return the 24-bit RGB int.
+
+    Unknown names fall back to DEFAULT_AGENT_COLOR so the helper is safe to
+    call on legacy agent-info.md files that don't carry the field.
+    """
+    if isinstance(color, str):
+        key = color.strip().lower()
+        if key in AGENT_COLOR_PALETTE:
+            return AGENT_COLOR_PALETTE[key]
+    return AGENT_COLOR_PALETTE[DEFAULT_AGENT_COLOR]
+
+
+def _agent_id_or_main(agent_id: Optional[str]) -> str:
+    """Normalize None/empty → 'main'. Trims whitespace."""
+    if not agent_id:
+        return MAIN_AGENT_ID
+    agent_id = str(agent_id).strip()
+    return agent_id or MAIN_AGENT_ID
+
+
+def agent_base(agent_id: Optional[str]) -> Path:
+    return VAULT_DIR / _agent_id_or_main(agent_id)
+
+
+def agent_hub_filename(agent_id: Optional[str]) -> str:
+    """Return the agent's hub-file basename: `agent-<id>.md` (v3.4 layout)."""
+    return f"agent-{_agent_id_or_main(agent_id)}.md"
+
+
+def agent_info_path(agent_id: Optional[str]) -> Path:
+    """Return the absolute path to the agent's hub file (`<id>/agent-<id>.md`)."""
+    return agent_base(agent_id) / agent_hub_filename(agent_id)
+
+
+def routines_dir(agent_id: Optional[str]) -> Path:
+    return agent_base(agent_id) / "Routines"
+
+
+def skills_dir(agent_id: Optional[str]) -> Path:
+    return agent_base(agent_id) / "Skills"
+
+
+def journal_dir(agent_id: Optional[str]) -> Path:
+    return agent_base(agent_id) / "Journal"
+
+
+def reactions_dir(agent_id: Optional[str]) -> Path:
+    return agent_base(agent_id) / "Reactions"
+
+
+def lessons_dir(agent_id: Optional[str]) -> Path:
+    return agent_base(agent_id) / "Lessons"
+
+
+def notes_dir(agent_id: Optional[str]) -> Path:
+    return agent_base(agent_id) / "Notes"
+
+
+def activity_log_dir(agent_id: Optional[str]) -> Path:
+    return journal_dir(agent_id) / ".activity"
+
+
+def workspace_dir(agent_id: Optional[str]) -> Path:
+    # v3.5: dot-prefixed so Obsidian (and other editors that hide dotfiles)
+    # skip runtime pipeline data automatically — no userIgnoreFilters needed.
+    return agent_base(agent_id) / ".workspace"
+
+
+# Names at the vault root that are NEVER agents — shared files and internal
+# directories. Any other top-level directory that contains `agent-<dir>.md`
+# is treated as an agent.
+_VAULT_RESERVED_NAMES = frozenset({
+    "README.md", "CLAUDE.md", "Tooling.md", ".env", ".gitkeep",
+    ".graphs", ".obsidian", ".claude", "Images", "__pycache__",
+})
+
+
+def iter_agent_ids() -> List[str]:
+    """Yield every agent directory name directly under VAULT_DIR.
+
+    A directory counts as an agent iff it contains ``agent-<dirname>.md``.
+    """
+    if not VAULT_DIR.is_dir():
+        return []
+    ids: List[str] = []
+    for entry in sorted(VAULT_DIR.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith("."):
+            continue
+        if entry.name in _VAULT_RESERVED_NAMES:
+            continue
+        hub = entry / f"agent-{entry.name}.md"
+        if hub.is_file():
+            ids.append(entry.name)
+    return ids
 TEMP_AUDIO_DIR = Path("/tmp/claude-bot-audio")
 HEAR_BIN_DIR = DATA_DIR / "bin"
 
@@ -144,7 +296,6 @@ DEFAULT_TIMEOUT = 600
 CONTROL_PORT = 27182
 CONTROL_TOKEN_FILE = DATA_DIR / ".control-token"
 WEBHOOK_PORT = 27183                                # public via Tailscale Funnel; control server stays on CONTROL_PORT (local-only)
-REACTIONS_DIR = VAULT_DIR / "Reactions"
 REACTION_SECRETS_FILE = DATA_DIR / "reaction-secrets.json"
 REACTION_STATS_FILE = DATA_DIR / "reaction-stats.json"
 WEBHOOK_MAX_BODY_BYTES = 1_048_576                  # 1 MB cap on webhook payloads
@@ -315,7 +466,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/doctor` — Verificar saúde da instalação
 • `/lint` — Auditar o vault (frontmatter, links, schedules)
 • `/find <expr>` — Buscar no vault por frontmatter (ex: `type=routine model=opus`)
-• `/indexes` — Regenerar índices `vault-query` (Routines.md, Skills.md, Agents.md)
+• `/indexes` — Regenerar marker blocks dos índices (`agent-skills.md`, `agent-routines.md`, ...) + sync color groups
 
 ⚙️ *Modelo*
 • `/sonnet` — Usar Sonnet
@@ -333,7 +484,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 📓 *Journal & Memory*
 • `/important` — Registrar pontos importantes da sessão no diário
-• `/lesson <texto>` — Registrar lição manual em `vault/Lessons/`
+• `/lesson <texto>` — Registrar lição manual no agente atual (`<agente>/Lessons/`)
 • `/active-memory [on|off|status]` — Injeção proativa de contexto do vault (padrão: on)
 
 🔁 *Rotinas*
@@ -364,7 +515,6 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-REACTIONS_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 HEAR_BIN_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -470,17 +620,29 @@ def _load_reaction_secrets() -> Dict[str, Dict[str, Any]]:
         return {}
 
 
+def _find_reaction_file(name: str) -> Optional[Path]:
+    """Locate a reaction .md file by stem across every Agents/<id>/Reactions/."""
+    for aid in iter_agent_ids():
+        candidate = reactions_dir(aid) / f"{name}.md"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def load_reaction(name: str) -> Optional[Dict[str, Any]]:
     """Load a reaction by id. Returns merged frontmatter + secrets + body.
 
-    Returns None if file missing, disabled, or frontmatter invalid. The returned
-    dict has keys: id, title, description, enabled, auth (dict with mode,
-    token/hmac_secret, hmac_header, hmac_algo), action (dict with routine,
-    forward, forward_template, agent), body.
+    Reactions now live per-agent under Agents/<id>/Reactions/. The reaction
+    name space is flat across agents (the first match wins), and the owning
+    agent is injected into the returned `action` dict so webhook dispatch
+    knows which agent context to use.
+
+    Returns None if file missing, disabled, or frontmatter invalid.
     """
-    md_file = REACTIONS_DIR / f"{name}.md"
-    if not md_file.exists():
+    md_file = _find_reaction_file(name)
+    if md_file is None:
         return None
+    owner_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
     fm, body = get_frontmatter_and_body(md_file)
     if not fm:
         return None
@@ -493,6 +655,10 @@ def load_reaction(name: str) -> Optional[Dict[str, Any]]:
     action_fm = fm.get("action") if isinstance(fm.get("action"), dict) else {}
 
     secrets = _load_reaction_secrets().get(name, {})
+
+    # Folder ownership wins over frontmatter for agent routing, matching
+    # the rule we already enforce for routines and skills.
+    action_agent = action_fm.get("agent") or owner_agent
 
     return {
         "id": name,
@@ -510,8 +676,9 @@ def load_reaction(name: str) -> Optional[Dict[str, Any]]:
             "routine": action_fm.get("routine"),
             "forward": bool(action_fm.get("forward", False)),
             "forward_template": action_fm.get("forward_template"),
-            "agent": action_fm.get("agent"),
+            "agent": action_agent,
         },
+        "owner_agent": owner_agent,
         "body": body,
     }
 
@@ -624,7 +791,7 @@ class PipelineTask:
 #   the next session resumes with prior context (see _build_frozen_context).
 # - After auto-compact: the bot fires a structured "summarize state" prompt
 #   and rewrites .context.md with the new snapshot, plus extracts durable
-#   concepts to vault/Notes/.
+#   concepts to the agent's Notes folder (Agents/<id>/Notes/).
 # - On /important: the user can manually trigger a hot-cache update.
 #
 # Pattern inspired by claude-obsidian's "hot cache" (Karpathy LLM Wiki).
@@ -638,7 +805,7 @@ _AGENT_CONTEXT_LOCK = threading.Lock()
 
 def _agent_context_path(agent_id: str) -> Path:
     """Resolve the rolling context file for an agent."""
-    return AGENTS_DIR / agent_id / ".context.md"
+    return VAULT_DIR / agent_id / ".context.md"
 
 
 def _read_agent_context(agent_id: Optional[str]) -> str:
@@ -764,7 +931,7 @@ def _strip_durable_concepts_section(llm_text: str) -> str:
 def _promote_durable_concept_to_notes(
     concept: Dict[str, str], agent_id: str
 ) -> Optional[Path]:
-    """Create or update vault/Notes/{slug}.md for a high-confidence concept.
+    """Create or update Agents/<agent>/Notes/{slug}.md for a high-confidence concept.
 
     Returns the file path on success, None when skipped or failed.
     Guardrails:
@@ -778,9 +945,9 @@ def _promote_durable_concept_to_notes(
         return None
     slug = concept["slug"]
     summary = concept["summary"]
-    notes_dir = VAULT_DIR / "Notes"
-    notes_dir.mkdir(parents=True, exist_ok=True)
-    path = notes_dir / f"{slug}.md"
+    agent_notes = notes_dir(agent_id)
+    agent_notes.mkdir(parents=True, exist_ok=True)
+    path = agent_notes / f"{slug}.md"
     today = time.strftime("%Y-%m-%d")
     try:
         if path.is_file():
@@ -814,6 +981,19 @@ def _promote_durable_concept_to_notes(
 _HISTORY_LOCK = threading.Lock()
 
 
+def _find_routine_file(name: str) -> Optional[Path]:
+    """Locate a routine .md file by stem, searching every agent's Routines/ folder.
+
+    Routine file names are unique across the vault (enforced by convention),
+    so the first match wins. Returns None if not found.
+    """
+    for aid in iter_agent_ids():
+        candidate = routines_dir(aid) / f"{name}.md"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def _append_routine_history(
     name: str,
     time_slot: str,
@@ -821,18 +1001,19 @@ def _append_routine_history(
     error: Optional[str],
     kind: str = "routine",
 ) -> None:
-    """Append a queryable history record to vault/Routines/.history/YYYY-MM.md.
+    """Append a queryable history record to Agents/<agent>/Routines/.history/YYYY-MM.md.
 
     Each terminal-state transition (completed/failed/cancelled) writes one
-    `## YYYY-MM-DD HH:MM — name` block. The file gets created with required
-    frontmatter on first write so the linter and vault_query treat it as a
-    proper knowledge node.
-
-    This rollup makes the previously-ephemeral execution state queryable
-    via vault_query.find(type="history") and powers the linter's
-    "stale routine" detection.
+    `## YYYY-MM-DD HH:MM — name` block under the owning agent. If the routine
+    file cannot be located (e.g. deleted mid-run) the record goes to main.
     """
-    history_dir = ROUTINES_DIR / ".history"
+    routine_path = _find_routine_file(name)
+    if routine_path is not None:
+        # Owning agent is the name of the Agents/<id>/ folder two levels up.
+        owner_agent = routine_path.parent.parent.name
+    else:
+        owner_agent = MAIN_AGENT_ID
+    history_dir = routines_dir(owner_agent) / ".history"
     history_dir.mkdir(parents=True, exist_ok=True)
     today = time.strftime("%Y-%m-%d")
     month = time.strftime("%Y-%m")
@@ -840,10 +1021,9 @@ def _append_routine_history(
 
     # Pull a few useful fields from the routine file (best-effort — if the
     # file moved or got renamed mid-run we still write the record).
-    routine_path = ROUTINES_DIR / f"{name}.md"
     fm_model = ""
     fm_agent = ""
-    if routine_path.exists():
+    if routine_path is not None and routine_path.exists():
         try:
             fm, _ = get_frontmatter_and_body(routine_path)
             fm_model = str(fm.get("model", ""))
@@ -1155,8 +1335,22 @@ def vault_checkpoint_drop(stash_ref: str) -> None:
         pass
 
 
+def _iter_routine_files() -> List[Path]:
+    """Yield every *.md file under <agent>/Routines/ (skipping the agent-routines.md index)."""
+    results: List[Path] = []
+    for aid in iter_agent_ids():
+        rdir = routines_dir(aid)
+        if not rdir.is_dir():
+            continue
+        for md_file in sorted(rdir.glob("*.md")):
+            if md_file.name in SUB_INDEX_FILENAMES_SET:
+                continue
+            results.append(md_file)
+    return results
+
+
 class RoutineScheduler:
-    """Background thread that checks vault/Routines/ every 60s and enqueues matching routines."""
+    """Background thread that scans every Agents/<id>/Routines/ every 60s and enqueues matching routines."""
 
     def __init__(self, state: RoutineStateManager, enqueue_fn, enqueue_pipeline_fn=None,
                  notify_fn=None) -> None:
@@ -1194,7 +1388,7 @@ class RoutineScheduler:
         msg = (
             f"\u26a0\ufe0f Rotina `{routine_name}` tem erros no frontmatter:\n"
             f"{bullet_list}\n\n"
-            f"Corrija o arquivo `vault/Routines/{routine_name}.md`"
+            f"Corrija o arquivo em `<agente>/Routines/{routine_name}.md`"
         )
         try:
             self._notify_fn(msg)
@@ -1202,8 +1396,6 @@ class RoutineScheduler:
             logger.error("Failed to notify about invalid routine %s: %s", routine_name, exc)
 
     def _check_routines(self) -> None:
-        if not ROUTINES_DIR.is_dir():
-            return
         now_time = time.strftime("%H:%M")
         now_day_idx = time.localtime().tm_wday  # 0=Monday
         today_str = time.strftime("%Y-%m-%d")
@@ -1214,12 +1406,15 @@ class RoutineScheduler:
             self._notified_date = today_str
             _cleanup_stale_pipeline_workspaces()
 
-        for md_file in sorted(ROUTINES_DIR.glob("*.md")):
+        for md_file in _iter_routine_files():
             try:
                 fm, body = get_frontmatter_and_body(md_file)
+                # The folder structure is now the source of truth for agent
+                # ownership. Agents/<id>/Routines/foo.md → agent=id.
+                owning_agent = md_file.parent.parent.name
                 if not fm or not body:
                     continue
-                # Skip index files (e.g. Routines.md) — they are Obsidian hubs, not routines
+                # Skip index files (e.g. agent-routines.md) — they are Obsidian hubs, not routines
                 if str(fm.get("type", "")).lower() == "index":
                     continue
                 # P2-05: Validate required frontmatter fields
@@ -1251,6 +1446,14 @@ class RoutineScheduler:
                 model = str(fm.get("model", "sonnet"))
                 routine_type = str(fm.get("type", "routine"))
                 interval_str = str(schedule.get("interval", "")).strip()
+
+                # Validate frontmatter agent field against folder ownership.
+                fm_agent_raw = fm.get("agent")
+                if fm_agent_raw and str(fm_agent_raw).strip() and str(fm_agent_raw).strip() != owning_agent:
+                    logger.warning(
+                        "Routine %s: frontmatter agent=%r disagrees with folder owner %r — using folder",
+                        md_file.name, fm_agent_raw, owning_agent,
+                    )
 
                 if interval_str:
                     # --- Interval mode: run every N minutes/hours/days/weeks ---
@@ -1291,7 +1494,7 @@ class RoutineScheduler:
                             prompt=body,
                             model=model,
                             time_slot=t_str,
-                            agent=fm.get("agent"),
+                            agent=owning_agent,
                             minimal_context=bool(fm.get("context") == "minimal"),
                             voice=bool(fm.get("voice", False)),
                             effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
@@ -1333,7 +1536,7 @@ class RoutineScheduler:
                                     prompt=body,
                                     model=model,
                                     time_slot=t_str,
-                                    agent=fm.get("agent"),
+                                    agent=owning_agent,
                                     minimal_context=bool(fm.get("context") == "minimal"),
                                     voice=bool(fm.get("voice", False)),
                                     effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
@@ -1351,7 +1554,15 @@ class RoutineScheduler:
             return
         # Resolve step prompts
         pipeline_dir = md_file.parent / md_file.stem
-        default_agent = fm.get("agent")
+        # Folder is the source of truth: Agents/<id>/Routines/foo.md → agent=id.
+        owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
+        fm_agent_raw = fm.get("agent")
+        if fm_agent_raw and str(fm_agent_raw).strip() and str(fm_agent_raw).strip() != owning_agent:
+            logger.warning(
+                "Pipeline %s: frontmatter agent=%r disagrees with folder owner %r — using folder",
+                md_file.name, fm_agent_raw, owning_agent,
+            )
+        default_agent = owning_agent
         steps = []
         for s in steps_raw:
             step_id = str(s.get("id", ""))
@@ -1492,14 +1703,12 @@ class RoutineScheduler:
 
     def list_today_routines(self) -> List[Dict]:
         """List all routines scheduled for today with their status."""
-        if not ROUTINES_DIR.is_dir():
-            return []
         now_day_idx = time.localtime().tm_wday
         today_str = time.strftime("%Y-%m-%d")
         state = self.state.get_today_state()
         routines = []
 
-        for md_file in sorted(ROUTINES_DIR.glob("*.md")):
+        for md_file in _iter_routine_files():
             try:
                 fm, _ = get_frontmatter_and_body(md_file)
                 if not fm or not fm.get("enabled", False):
@@ -1646,11 +1855,18 @@ def get_weekly_cost() -> dict:
 
 
 def _log_activity(entry: dict) -> None:
-    """Append one JSONL line to vault/Journal/.activity/YYYY-MM-DD.jsonl."""
+    """Append one JSONL line to Agents/<agent>/Journal/.activity/YYYY-MM-DD.jsonl.
+
+    The owning agent is taken from `entry["agent"]` (defaults to "main"). This
+    keeps the activity log per-agent so the journal auditor and compound
+    engineering tooling can find failures attached to the right agent.
+    """
     try:
-        ACTIVITY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        agent_id = entry.get("agent") or MAIN_AGENT_ID
+        adir = activity_log_dir(agent_id)
+        adir.mkdir(parents=True, exist_ok=True)
         today = time.strftime("%Y-%m-%d")
-        path = ACTIVITY_LOG_DIR / f"{today}.jsonl"
+        path = adir / f"{today}.jsonl"
         entry.setdefault("time", time.strftime("%H:%M"))
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -1675,18 +1891,23 @@ def _sanitize_lesson_slug(name: str) -> str:
 
 
 def record_lesson_draft(trigger_name: str, error_summary: str,
-                        kind: str = "routine") -> Optional[Path]:
-    """Append a draft lesson to vault/Lessons/draft-YYYY-MM-DD-{name}.md on failure.
+                        kind: str = "routine",
+                        agent_id: Optional[str] = None) -> Optional[Path]:
+    """Append a draft lesson to Agents/<agent>/Lessons/draft-YYYY-MM-DD-{name}.md on failure.
 
     Idempotent per day+trigger: if the draft file already exists it appends a new
     `## HH:MM — error` section instead of overwriting. Returns the file Path on
     success, None on failure (errors are logged but never raised).
+
+    `agent_id` defaults to 'main' when omitted; callers that know the owning
+    agent (e.g. routine/pipeline execution) should pass it explicitly.
     """
     try:
-        LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+        agent_lessons = lessons_dir(agent_id)
+        agent_lessons.mkdir(parents=True, exist_ok=True)
         today = time.strftime("%Y-%m-%d")
         slug = _sanitize_lesson_slug(trigger_name)
-        path = LESSONS_DIR / f"draft-{today}-{slug}.md"
+        path = agent_lessons / f"draft-{today}-{slug}.md"
         safe_error = (error_summary or "(no error text)").strip()
         if len(safe_error) > 1500:
             safe_error = safe_error[:1500] + "... [truncated]"
@@ -1749,22 +1970,21 @@ _SKILL_HINT_STOPWORDS = frozenset({
 })
 
 
-def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
+def _select_relevant_skills(prompt: str, agent_id: Optional[str] = None,
+                             max_n: int = 3) -> List[str]:
     """Return up to `max_n` skill names scored against the prompt via graph.json.
 
-    Reads ``vault/.graphs/graph.json`` (zero LLM cost) and scores each skill
-    node by simple keyword overlap between the prompt and the skill's
-    name/description/tags. Stopwords are ignored and short words (<=3 chars)
-    are ignored to keep the signal-to-noise ratio high.
+    **Isolamento total:** only skills belonging to ``agent_id`` (or main) are
+    candidates. A node is considered owned by ``agent_id`` when its
+    ``source_file`` starts with ``<agent_id>/Skills/``.
 
-    Returns an empty list when:
-    - SKILL_HINTS_ENABLED is False
-    - graph.json does not exist (expected for new users — not an error)
-    - graph.json is malformed or unreadable (logged, not raised)
-    - no skills score above 0
+    Reads ``vault/.graphs/graph.json`` (zero LLM cost) and scores each matching
+    skill node by simple keyword overlap between the prompt and the skill's
+    name/description/tags.
 
-    All I/O is wrapped in try/except and errors are logged via
-    ``logger.warning`` — the caller should NOT expect exceptions.
+    Returns an empty list when the feature is disabled, the graph is missing
+    or malformed, or no skill scores above zero. All I/O is wrapped and errors
+    are logged — callers should NOT expect exceptions.
     """
     if not SKILL_HINTS_ENABLED:
         return []
@@ -1792,16 +2012,18 @@ def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
     if not prompt_words:
         return []
 
+    agent_skills_prefix = f"{_agent_id_or_main(agent_id)}/Skills/"
     scored: List[tuple] = []
     for node in nodes:
         if not isinstance(node, dict):
             continue
-        # Filter to skills — graph.json uses type=="skill" OR source_file starts with "Skills/"
         node_type = str(node.get("type", "")).lower()
         source_file = str(node.get("source_file", ""))
-        if node_type != "skill" and not source_file.startswith("Skills/"):
+        # Only this agent's skills qualify.
+        if not source_file.startswith(agent_skills_prefix):
             continue
-        # Build a haystack from name/label/description/tags
+        if node_type and node_type != "skill":
+            continue
         name = str(node.get("label") or node.get("name") or "")
         if not name and source_file:
             name = Path(source_file).stem
@@ -1811,7 +2033,6 @@ def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
             tags = []
         haystack = " ".join([name, description, " ".join(str(t) for t in tags)]).lower()
         haystack_tokens = set(re.findall(r"[\w-]+", haystack))
-        # Score: +2 exact token hit, +1 substring hit
         score = 0
         for w in prompt_words:
             if w in haystack_tokens:
@@ -1819,7 +2040,6 @@ def _select_relevant_skills(prompt: str, max_n: int = 3) -> List[str]:
             elif any(w in ht for ht in haystack_tokens):
                 score += 1
         if score > 0:
-            # Prefer the stem (matches filename used in vault/Skills/) for display.
             display_name = Path(source_file).stem if source_file else name
             scored.append((score, display_name))
 
@@ -1880,8 +2100,12 @@ def _active_memory_read_excerpt(source_file: str, max_chars: int) -> str:
     return text
 
 
-def _active_memory_lookup(prompt: str) -> Optional[str]:
+def _active_memory_lookup(prompt: str, agent_id: Optional[str] = None) -> Optional[str]:
     """Active Memory: deterministic vault graph lookup before main Claude turn.
+
+    **Isolamento total:** only nodes whose ``source_file`` lives under
+    ``<agent_id>/`` (directly at the vault root) are candidates — the Main
+    agent's content is NOT implicitly shared with named agents.
 
     Returns a compact "## Active Memory" block to append to the system prompt,
     or None if disabled / no matches / any error / over budget.
@@ -1927,6 +2151,8 @@ def _active_memory_lookup(prompt: str) -> Optional[str]:
     if not prompt_words:
         return None
 
+    agent_prefix = f"{_agent_id_or_main(agent_id)}/"
+    agent_skills_prefix = f"{agent_prefix}Skills/"
     scored: List[tuple] = []
     for node in nodes:
         if not isinstance(node, dict):
@@ -1937,8 +2163,11 @@ def _active_memory_lookup(prompt: str) -> Optional[str]:
         source_file = str(node.get("source_file", ""))
         if not source_file:
             continue
-        # Skill files live under Skills/ — exclude even if type=="unknown".
-        if source_file.startswith("Skills/"):
+        # Isolamento total: the candidate must live under THIS agent's folder.
+        if not source_file.startswith(agent_prefix):
+            continue
+        # Skill files are already surfaced by the skill-hint helper.
+        if source_file.startswith(agent_skills_prefix):
             continue
         label = str(node.get("label") or node.get("id") or Path(source_file).stem)
         description = str(node.get("description", ""))
@@ -2000,22 +2229,24 @@ def _active_memory_lookup(prompt: str) -> Optional[str]:
     return "\n".join(lines)
 
 
-def record_manual_lesson(text: str) -> Optional[Path]:
-    """Append a user-supplied lesson to vault/Lessons/manual-YYYY-MM-DD-HHMM.md.
+def record_manual_lesson(text: str, agent_id: Optional[str] = None) -> Optional[Path]:
+    """Append a user-supplied lesson to Agents/<agent>/Lessons/manual-YYYY-MM-DD-HHMM.md.
 
-    Returns the file Path on success, None on failure.
+    Returns the file Path on success, None on failure. `agent_id` defaults to
+    'main'; callers with an active session should pass `session.agent`.
     """
     try:
-        LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+        agent_lessons = lessons_dir(agent_id)
+        agent_lessons.mkdir(parents=True, exist_ok=True)
         now = time.strftime("%Y-%m-%d-%H%M")
         today = time.strftime("%Y-%m-%d")
         # Collision-safe: if two lessons arrive in the same minute, append a counter
-        base_path = LESSONS_DIR / f"manual-{now}.md"
+        base_path = agent_lessons / f"manual-{now}.md"
         path = base_path
         counter = 1
         while path.exists():
             counter += 1
-            path = LESSONS_DIR / f"manual-{now}-{counter}.md"
+            path = agent_lessons / f"manual-{now}-{counter}.md"
         body = (text or "").strip()
         if not body:
             raise ValueError("lesson text is empty")
@@ -2071,6 +2302,10 @@ class Session:
     session_id: Optional[str] = None
     model: str = "sonnet"
     workspace: str = CLAUDE_WORKSPACE
+    # `agent` is optional at the type level for sessions.json backcompat:
+    # pre-v3.0 sessions persisted `agent=None` to mean "Main". On load we
+    # normalize None → "main" so the rest of the code can rely on a string.
+    # New sessions should always carry an explicit agent id.
     agent: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     message_count: int = 0
@@ -2098,6 +2333,18 @@ class SessionManager:
             _valid_fields = {f.name for f in Session.__dataclass_fields__.values()}
             for name, sdata in data.get("sessions", {}).items():
                 filtered = {k: v for k, v in sdata.items() if k in _valid_fields}
+                # v3.0 backcompat: pre-v3 sessions stored agent=None for Main.
+                # Normalize to the explicit "main" string so downstream helpers
+                # can treat every session as having a known owning agent.
+                if not filtered.get("agent"):
+                    filtered["agent"] = MAIN_AGENT_ID
+                # Same story for workspace — older sessions may have pointed
+                # at vault/ directly. Rewrite to Agents/main/ only if the file
+                # is the legacy vault root.
+                ws = filtered.get("workspace")
+                legacy_vault_ws = str(VAULT_DIR)
+                if ws == legacy_vault_ws or ws == legacy_vault_ws + "/":
+                    filtered["workspace"] = str(agent_base(filtered["agent"]))
                 self.sessions[name] = Session(**filtered)
             self.active_session = data.get("active_session")
             self.cumulative_turns = data.get("cumulative_turns", 0)
@@ -2134,8 +2381,13 @@ class SessionManager:
 
     # -- CRUD --
 
-    def create(self, name: str) -> Session:
-        s = Session(name=name)
+    def create(self, name: str, agent: Optional[str] = None) -> Session:
+        agent_id = _agent_id_or_main(agent)
+        s = Session(
+            name=name,
+            agent=agent_id,
+            workspace=str(agent_base(agent_id)),
+        )
         self.sessions[name] = s
         self.active_session = name
         self.save()
@@ -2594,22 +2846,33 @@ class ClaudeRunner:
 # ---------------------------------------------------------------------------
 
 
-def _get_agent_workspace(agent_id: str) -> Path:
+def _get_agent_workspace(agent_id: Optional[str]) -> Path:
     """Return (and create if needed) the isolated workspace dir for an agent.
 
-    Each agent gets its own permanent workspace at Agents/{id}/workspace/ so
-    that pipeline data persists across runs and CLAUDE.md inheritance is
-    controlled via .claude/settings.local.json inside the workspace.
+    Each agent (including main) gets its own permanent workspace at
+    ``<id>/.workspace/`` so pipeline data persists across runs and CLAUDE.md
+    inheritance is controlled via .claude/settings.local.json inside it. The
+    dot-prefix hides the folder from Obsidian's graph view automatically
+    (dotfiles are hardcoded-ignored) so pipeline runtime data never pollutes
+    the knowledge graph.
     """
-    ws = AGENTS_DIR / agent_id / "workspace"
+    ws = workspace_dir(agent_id)
     ws.mkdir(parents=True, exist_ok=True)
     (ws / "data").mkdir(exist_ok=True)
     return ws
 
 
 def load_agent(agent_id: str) -> Optional[Dict[str, Any]]:
-    """Load agent definition from vault/Agents/{id}/agent.md. Returns parsed frontmatter + body or None."""
-    agent_file = AGENTS_DIR / agent_id / "agent.md"
+    """Load agent definition from ``<id>/agent-<id>.md``.
+
+    v3.4+ renamed the hub file from ``agent-info.md`` to ``agent-<id>.md``
+    so every agent has a unique basename vault-wide (needed for Obsidian's
+    shortest-path wikilink resolution). The file's frontmatter carries
+    metadata (name, icon, model, color, chat_id, thread_id, …) and the body
+    carries path-qualified wikilinks down to the agent's sub-indexes
+    (Skills, Routines, Journal, Reactions, Lessons, Notes) plus CLAUDE.md.
+    """
+    agent_file = agent_info_path(agent_id)
     if not agent_file.is_file():
         return None
     fm, body = get_frontmatter_and_body(agent_file)
@@ -2621,26 +2884,131 @@ def load_agent(agent_id: str) -> Optional[Dict[str, Any]]:
 
 
 def list_agents() -> List[Dict[str, Any]]:
-    """List all agents in vault/Agents/."""
-    if not AGENTS_DIR.is_dir():
-        return []
-    agents = []
-    for d in sorted(AGENTS_DIR.iterdir()):
-        if d.is_dir() and (d / "agent.md").is_file():
-            a = load_agent(d.name)
-            if a:
-                agents.append(a)
+    """List every agent at the top of the vault (including main).
+
+    Uses :func:`iter_agent_ids` as the discriminator so reserved vault folders
+    (``.graphs``, ``Images``, …) never get treated as agents.
+    """
+    agents: List[Dict[str, Any]] = []
+    for name in iter_agent_ids():
+        a = load_agent(name)
+        if a:
+            agents.append(a)
     return agents
 
 
+# ---------------------------------------------------------------------------
+# Obsidian graph-view color groups — auto-synced from agent metadata
+# ---------------------------------------------------------------------------
+#
+# Obsidian stores its graph config in `vault/.obsidian/graph.json` with a
+# `colorGroups` array:
+#
+#     "colorGroups": [
+#         {"query": "path:main/", "color": {"a": 1, "rgb": 10395294}},
+#         ...
+#     ]
+#
+# The bot keeps this in sync with each agent's `color` field in
+# `agent-info.md`: every time an agent is created or loaded, we rewrite the
+# block of color groups tagged with our own marker so it reflects the current
+# agent set. Any user-defined groups without the marker are preserved.
+
+def _build_agent_color_group(agent_id: str, rgb: int) -> Dict[str, Any]:
+    """Return an Obsidian colorGroup entry for an agent.
+
+    The query is just ``path:<agent>/`` so Obsidian's native path filter
+    matches every file in that agent's subtree. Bot-managed groups are
+    identified by the format of this query string (see ``_is_agent_group``).
+    """
+    return {
+        "query": f"path:{agent_id}/",
+        "color": {"a": 1, "rgb": int(rgb)},
+    }
+
+
+def _is_agent_group(group: Dict[str, Any], known_agent_ids: set) -> bool:
+    """Return True if this color group looks like one the bot manages.
+
+    Bot-managed groups are identified either by the clean v3.1 query format
+    (``path:<id>/``) or by the short-lived legacy marker format from v3.0
+    (``claude-bot-agent:<id>``). Legacy matches are collected so the sync
+    can clean them up on first run.
+    """
+    query = str(group.get("query", "")).strip()
+    if "claude-bot-agent:" in query:
+        return True
+    if not query.startswith("path:"):
+        return False
+    # Match path:<id>/ — accept with or without trailing slash and extra junk.
+    rest = query[5:].strip()
+    # Extract the first path segment before any whitespace or slash.
+    first = rest.split()[0] if rest.split() else ""
+    first = first.rstrip("/")
+    return first in known_agent_ids
+
+
+def sync_obsidian_graph_color_groups() -> bool:
+    """Regenerate per-agent color groups in ``vault/.obsidian/graph.json``.
+
+    Walks every agent, reads the ``color`` field from its ``agent-info.md``
+    frontmatter, and rewrites the bot-managed colorGroups block. User-defined
+    color groups that don't look like agent paths are preserved untouched.
+
+    Fail-open: any error is logged and the function returns False so callers
+    can proceed without blocking the main flow. Returns True on success.
+    """
+    graph_json_path = VAULT_DIR / ".obsidian" / "graph.json"
+    try:
+        if graph_json_path.is_file():
+            raw = graph_json_path.read_text(encoding="utf-8")
+            data = json.loads(raw) if raw.strip() else {}
+        else:
+            # Nothing to sync into if Obsidian has never opened the vault.
+            return False
+        if not isinstance(data, dict):
+            logger.warning("graph.json is not a JSON object — skipping color sync")
+            return False
+
+        known_agent_ids = set(iter_agent_ids())
+
+        existing = data.get("colorGroups") or []
+        if not isinstance(existing, list):
+            existing = []
+        # Preserve user groups (anything that isn't an agent path filter).
+        preserved = [
+            g for g in existing
+            if isinstance(g, dict) and not _is_agent_group(g, known_agent_ids)
+        ]
+
+        # Build fresh bot-managed groups from current agent metadata.
+        new_groups: List[Dict[str, Any]] = []
+        for agent_id in sorted(known_agent_ids):
+            info = load_agent(agent_id)
+            if not info:
+                continue
+            rgb = resolve_agent_color(info.get("color"))
+            new_groups.append(_build_agent_color_group(agent_id, rgb))
+
+        data["colorGroups"] = new_groups + preserved
+        graph_json_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info("Synced %d agent color groups → %s",
+                    len(new_groups), graph_json_path)
+        return True
+    except Exception as exc:
+        logger.warning("Obsidian color-group sync failed: %s", exc)
+        return False
+
+
 def get_agent_journal_dir(agent_id: Optional[str], create: bool = False) -> Path:
-    """Return the journal directory for an agent, or the global one."""
-    if agent_id:
-        d = AGENTS_DIR / agent_id / "Journal"
-        if create:
-            d.mkdir(parents=True, exist_ok=True)
-        return d
-    return VAULT_DIR / "Journal"
+    """Return the journal directory for an agent (main included)."""
+    d = journal_dir(agent_id)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 # ---------------------------------------------------------------------------
@@ -2688,10 +3056,17 @@ class PipelineExecutor:
         self.bot = bot
         self.ctx = ctx
         self.state = state_mgr
-        # Agent pipelines use a permanent per-agent workspace; otherwise use a temp dir
-        if task.agent and (AGENTS_DIR / task.agent).is_dir():
-            self.workspace = _get_agent_workspace(task.agent)
+        # Every pipeline runs inside its owning agent's permanent workspace.
+        # If the agent folder is missing (edge case — orphan task) fall back
+        # to a temp dir so execution doesn't explode, but this is a bug path.
+        owning = task.agent or MAIN_AGENT_ID
+        if (VAULT_DIR / owning).is_dir():
+            self.workspace = _get_agent_workspace(owning)
         else:
+            logger.warning(
+                "Pipeline %s owning agent folder missing (%s) — using temp workspace",
+                task.name, owning,
+            )
             self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{secrets.token_hex(6)}")
         self._step_status: Dict[str, str] = {s.id: "pending" for s in task.steps}
         self._step_outputs: Dict[str, str] = {}
@@ -2719,7 +3094,8 @@ class PipelineExecutor:
             return False
         logger.info("Pipeline %s starting (%d steps)", self.task.name, len(self.task.steps))
         self.workspace.mkdir(parents=True, exist_ok=True)
-        if self.task.agent and (AGENTS_DIR / self.task.agent).is_dir():
+        owning = self.task.agent or MAIN_AGENT_ID
+        if (VAULT_DIR / owning).is_dir():
             # Persistent per-pipeline data dir inside the agent's permanent workspace
             data_dir = self.workspace / "data" / self.task.name
         else:
@@ -2978,13 +3354,12 @@ class PipelineExecutor:
 
         # Determine workspace for Claude CLI — prefer isolated workspace/ subdir
         ws = str(self.workspace)
-        agent_id_for_ws = step.agent or self.task.agent
-        if agent_id_for_ws:
-            isolated = AGENTS_DIR / agent_id_for_ws / "workspace"
-            if isolated.is_dir():
-                ws = str(isolated)
-            elif (AGENTS_DIR / agent_id_for_ws).is_dir():
-                ws = str(AGENTS_DIR / agent_id_for_ws)
+        agent_id_for_ws = step.agent or self.task.agent or MAIN_AGENT_ID
+        isolated = workspace_dir(agent_id_for_ws)
+        if isolated.is_dir():
+            ws = str(isolated)
+        elif agent_base(agent_id_for_ws).is_dir():
+            ws = str(agent_base(agent_id_for_ws))
 
         try:
             # Run Claude CLI in a separate thread so timeouts can actually fire
@@ -3073,12 +3448,13 @@ class PipelineExecutor:
             if not (output_file.exists() and output_file.stat().st_size > 0):
                 # Fallback: check if Claude wrote to the agent's workspace data dir
                 # (safety net for when agent workspace differs from pipeline data_dir)
-                agent_id = step.agent or self.task.agent
+                agent_id = step.agent or self.task.agent or MAIN_AGENT_ID
                 if agent_id:
+                    ws_root = workspace_dir(agent_id)
                     candidates = [
-                        AGENTS_DIR / agent_id / "workspace" / "data" / self.task.name / step.resolved_filename,
-                        AGENTS_DIR / agent_id / "workspace" / "data" / step.resolved_filename,
-                        AGENTS_DIR / agent_id / "data" / step.resolved_filename,  # legacy
+                        ws_root / "data" / self.task.name / step.resolved_filename,
+                        ws_root / "data" / step.resolved_filename,
+                        agent_base(agent_id) / "data" / step.resolved_filename,  # legacy
                     ]
                     for candidate in candidates:
                         if candidate.exists() and candidate.stat().st_size > 0:
@@ -3207,13 +3583,12 @@ class PipelineExecutor:
 
         # Resolve workspace for Claude CLI (same rules as _execute_step)
         ws = str(self.workspace)
-        agent_id_for_ws = step.agent or self.task.agent
-        if agent_id_for_ws:
-            isolated = AGENTS_DIR / agent_id_for_ws / "workspace"
-            if isolated.is_dir():
-                ws = str(isolated)
-            elif (AGENTS_DIR / agent_id_for_ws).is_dir():
-                ws = str(AGENTS_DIR / agent_id_for_ws)
+        agent_id_for_ws = step.agent or self.task.agent or MAIN_AGENT_ID
+        isolated = workspace_dir(agent_id_for_ws)
+        if isolated.is_dir():
+            ws = str(isolated)
+        elif agent_base(agent_id_for_ws).is_dir():
+            ws = str(agent_base(agent_id_for_ws))
 
         base_prompt = self._build_step_prompt(step, data_dir)
         output = ""
@@ -3507,11 +3882,18 @@ class PipelineExecutor:
 
         # Compound engineering: auto-draft a lesson so we learn from this failure.
         # record_lesson_draft never raises — errors are logged and swallowed.
-        lesson_path = record_lesson_draft(self.task.name, error, kind="pipeline")
+        lesson_path = record_lesson_draft(
+            self.task.name, error, kind="pipeline",
+            agent_id=self.task.agent or MAIN_AGENT_ID,
+        )
         if lesson_path:
             try:
+                try:
+                    rel = lesson_path.relative_to(VAULT_DIR)
+                except ValueError:
+                    rel = lesson_path
                 self.bot.send_message(
-                    f"📝 Rascunho de lição criado em `vault/Lessons/{lesson_path.name}` "
+                    f"📝 Rascunho de lição criado em `{rel}` "
                     f"— complete as seções Fix e Detect.",
                     chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
                     disable_notification=True,
@@ -3566,6 +3948,14 @@ class ClaudeTelegramBot:
             notify_fn=self.send_message,
         )
         self.scheduler.start()
+
+        # Sync the per-agent Obsidian graph-view color groups. Fail-open —
+        # the bot works fine without it; the user may just not have Obsidian
+        # installed or pointed at this vault.
+        try:
+            sync_obsidian_graph_color_groups()
+        except Exception as exc:
+            logger.warning("Initial Obsidian color-group sync skipped: %s", exc)
 
         # Tracks active routine/pipeline contexts for HTTP stop requests
         self._routine_contexts: Dict[str, "ThreadContext"] = {}
@@ -3663,8 +4053,8 @@ class ClaudeTelegramBot:
             session = self._get_session()
             session.agent = agent["_id"]
             session.model = agent.get("model", session.model)
-            isolated = AGENTS_DIR / agent["_id"] / "workspace"
-            session.workspace = str(isolated) if isolated.is_dir() else str(AGENTS_DIR / agent["_id"])
+            isolated = workspace_dir(agent["_id"])
+            session.workspace = str(isolated) if isolated.is_dir() else str(agent_base(agent["_id"]))
             # Mark as auto-activated so manual overrides are respected
             if ctx:
                 ctx._auto_agent = agent["_id"]
@@ -4571,25 +4961,32 @@ class ClaudeTelegramBot:
             self.send_message(f"❌ Sessão `{name}` não encontrada.")
 
     def cmd_lesson(self, text: str) -> None:
-        """Record a manual lesson into vault/Lessons/.
+        """Record a manual lesson into <current-agent>/Lessons/.
 
         Usage: /lesson <text>
-        Persists as manual-YYYY-MM-DD-HHMM.md with structured frontmatter.
+        Persists as manual-YYYY-MM-DD-HHMM.md with structured frontmatter
+        under the active agent's Lessons folder.
         """
         text = (text or "").strip()
         if not text:
             self.send_message(
                 "❌ Use: `/lesson <texto>`\n"
-                "_Registra uma lição manual em `vault/Lessons/`. "
+                "_Registra uma lição manual em `<agente>/Lessons/`. "
                 "Útil para capturar aprendizados durante a conversa._"
             )
             return
-        path = record_manual_lesson(text)
+        current = self._get_session()
+        agent_for_lesson = current.agent if current else None
+        path = record_manual_lesson(text, agent_id=agent_for_lesson)
         if path is None:
             self.send_message("❌ Falha ao gravar lição. Veja o log para detalhes.")
             return
+        try:
+            rel = path.relative_to(VAULT_DIR)
+        except ValueError:
+            rel = path
         self.send_message(
-            f"📝 Lição registrada em `vault/Lessons/{path.name}`.\n"
+            f"📝 Lição registrada em `{rel}`.\n"
             f"_Complete as seções Fix e Detect quando puder._"
         )
 
@@ -4660,7 +5057,7 @@ class ClaudeTelegramBot:
 
         # Agent instructions (up to 2000 chars to keep it tight)
         if session.agent:
-            agent_claude_md = AGENTS_DIR / session.agent / "CLAUDE.md"
+            agent_claude_md = VAULT_DIR / session.agent / "CLAUDE.md"
             if agent_claude_md.is_file():
                 try:
                     content = agent_claude_md.read_text(encoding="utf-8")[:2000]
@@ -4707,7 +5104,7 @@ class ClaudeTelegramBot:
         return ascii_text.lower()
 
     def _find_relevant_skills(self, prompt: str, limit: int = 3) -> List[Dict[str, str]]:
-        """Return up to `limit` skills that match the prompt.
+        """Return up to `limit` skills that match the prompt — for the current agent only.
 
         Hybrid scoring (zero LLM cost):
           +5 per skill tag that appears in the prompt (highest signal — tags
@@ -4716,9 +5113,9 @@ class ClaudeTelegramBot:
           +2 per exact word match against title/description
           +1 per substring match anywhere
 
+        Isolamento total: skills are filtered by `<current-agent>/Skills/`.
         Short words (<= 3 chars) are ignored to avoid noise. Skills with score
-        0 are filtered out. Uses vault_query for the load step so it benefits
-        from the same parser used by /find and the linter.
+        0 are filtered out.
 
         Returns list of {name, description, path}.
         """
@@ -4726,10 +5123,14 @@ class ClaudeTelegramBot:
         prompt_words = {w for w in norm_prompt.split() if len(w) > 3}
         if not prompt_words:
             return []
+        session = self._get_session()
+        current_agent = session.agent if session else None
+        agent_skills_prefix = f"{_agent_id_or_main(current_agent)}/Skills/"
         try:
             from vault_query import load_vault
             vi = load_vault(VAULT_DIR)
-            skills = vi.find(type="skill")
+            skills = [s for s in vi.find(type="skill")
+                      if s.rel_path.startswith(agent_skills_prefix)]
         except Exception:
             logger.exception("vault_query load failed in _find_relevant_skills")
             return []
@@ -4856,13 +5257,13 @@ class ClaudeTelegramBot:
         session into Active topics / Recent decisions / Open threads, plus
         a Durable concepts section. Writes the first three sections to
         .context.md and promotes high-confidence durable concepts to
-        vault/Notes/{slug}.md.
+        Agents/<agent>/Notes/{slug}.md.
 
         Best-effort — never raises. Logs failures and moves on.
         """
-        if not session.session_id or not session.agent:
+        if not session.session_id:
             return
-        agent_id = session.agent
+        agent_id = session.agent or MAIN_AGENT_ID
         prompt = (
             "You are updating the rolling context file for this agent. Reflect "
             "on the current session and produce a structured snapshot in the "
@@ -5001,7 +5402,7 @@ class ClaudeTelegramBot:
         self.send_message(text)
 
     def cmd_indexes(self) -> None:
-        """Regenerate vault index marker blocks from frontmatter."""
+        """Regenerate vault index marker blocks and Obsidian graph color groups."""
         try:
             from vault_indexes import regenerate_vault
         except Exception as exc:
@@ -5014,11 +5415,15 @@ class ClaudeTelegramBot:
             logger.exception("vault_indexes failed")
             self.send_message(f"❌ Index regen falhou: `{exc}`")
             return
+        # Also sync the Obsidian graph color groups from agent metadata.
+        colors_synced = sync_obsidian_graph_color_groups()
         if not scanned:
-            self.send_message("ℹ️ Nenhum arquivo com marcadores `vault-query` encontrado.")
+            extra = " + color groups synced" if colors_synced else ""
+            self.send_message(f"ℹ️ Nenhum arquivo com marcadores `vault-query` encontrado.{extra}")
             return
         if not changed:
-            self.send_message(f"✅ Todos os {len(scanned)} index files já estão atualizados.")
+            extra = " · color groups synced" if colors_synced else ""
+            self.send_message(f"✅ Todos os {len(scanned)} index files já estão atualizados.{extra}")
             return
         lines = [f"📚 *Vault indexes regenerated* ({len(changed)}/{len(scanned)})"]
         for f in changed:
@@ -5027,6 +5432,8 @@ class ClaudeTelegramBot:
             except ValueError:
                 rel = f
             lines.append(f"  • `{rel}`")
+        if colors_synced:
+            lines.append("🎨 Obsidian graph color groups synced from agent metadata")
         self.send_message("\n".join(lines))
 
     def cmd_stop(self, arg: str = "") -> None:
@@ -5327,9 +5734,9 @@ class ClaudeTelegramBot:
             return
 
         name = arg.replace(".md", "").strip()
-        md_file = ROUTINES_DIR / f"{name}.md"
+        md_file = _find_routine_file(name)
 
-        if not md_file.exists():
+        if md_file is None:
             self.send_message(f"❌ Rotina `{name}` não encontrada.")
             return
 
@@ -5359,12 +5766,14 @@ class ClaudeTelegramBot:
         else:
             self.routine_state.set_status(name, time_slot, "running")
             _effort_raw = str(fm.get("effort", "")).lower().strip()
+            # Folder is the source of truth for agent ownership.
+            owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
             task = RoutineTask(
                 name=name,
                 prompt=body,
                 model=model,
                 time_slot=time_slot,
-                agent=fm.get("agent"),
+                agent=owning_agent,
                 minimal_context=bool(fm.get("context") == "minimal"),
                 voice=bool(fm.get("voice", False)),
                 effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
@@ -5374,12 +5783,13 @@ class ClaudeTelegramBot:
 
     def _run_list_keyboard(self) -> None:
         """Show inline keyboard with all available routines/pipelines."""
-        if not ROUTINES_DIR.is_dir():
+        routine_files = _iter_routine_files()
+        if not routine_files:
             self.send_message("❌ Nenhuma rotina disponível.")
             return
 
         buttons = []
-        for md_file in sorted(ROUTINES_DIR.glob("*.md")):
+        for md_file in routine_files:
             fm, body = get_frontmatter_and_body(md_file)
             if not fm or not body:
                 continue
@@ -5422,20 +5832,24 @@ class ClaudeTelegramBot:
             self._skill_edit(arg)
 
     def _skill_list(self) -> None:
-        skills_dir = VAULT_DIR / "Skills"
-        if not skills_dir.is_dir():
-            self.send_message("⚡ Nenhuma skill encontrada.")
+        """List the skills available to the current agent (isolamento total)."""
+        session = self._get_session()
+        current_agent = session.agent if session else None
+        sdir = skills_dir(current_agent)
+        label = current_agent or MAIN_AGENT_ID
+        if not sdir.is_dir():
+            self.send_message(f"⚡ Nenhuma skill encontrada para `{label}`.")
             return
-        lines = ["⚡ *Skills*\n"]
-        for f in sorted(skills_dir.glob("*.md")):
-            if f.name.startswith("Skills"):
-                continue  # skip index
+        lines = [f"⚡ *Skills ({label})*\n"]
+        for f in sorted(sdir.glob("*.md")):
+            if f.name in SUB_INDEX_FILENAMES_SET:
+                continue  # skip the agent-skills.md index
             fm, _ = get_frontmatter_and_body(f)
             title = fm.get("title", f.stem)
             desc = fm.get("description", "")[:60]
             lines.append(f"- *{title}* — {desc}")
         if len(lines) == 1:
-            self.send_message("⚡ Nenhuma skill encontrada.")
+            self.send_message(f"⚡ Nenhuma skill encontrada para `{label}`.")
         else:
             self.send_message("\n".join(lines))
 
@@ -5495,9 +5909,9 @@ class ClaudeTelegramBot:
     def _agent_edit(self, name: str) -> None:
         prompt = (
             f"O usuario quer editar um agente existente. "
-            "Liste os agentes em Agents/ (leia o frontmatter de cada agent.md). "
+            "Liste os agentes no topo do vault (leia o frontmatter de cada agent-info.md). "
             "Pergunte qual deseja editar e o que quer mudar (personalidade, instrucoes, modelo, icone). "
-            "Faca a edicao nos arquivos agent.md e/ou CLAUDE.md do agente e confirme."
+            "Faca a edicao nos arquivos agent-info.md e/ou CLAUDE.md do agente e confirme."
         )
         if name:
             prompt += f"\n\nO usuario quer editar: {name}"
@@ -5517,7 +5931,7 @@ class ClaudeTelegramBot:
         prompt = (
             f"Execute a skill de criacao de agentes. "
             "Leia Skills/create-agent.md para instrucoes. "
-            "Ajude o usuario a criar um novo agente em Agents/. "
+            "Ajude o usuario a criar um novo agente como subdiretório direto do vault. "
             "Faca as perguntas necessarias sobre: nome, personalidade, especializacoes, "
             "modelo padrao, e icone. Depois gere os arquivos e registre no Journal."
         )
@@ -5533,11 +5947,12 @@ class ClaudeTelegramBot:
         if ctx:
             ctx._manual_override = True
         if agent_id == "none":
+            # v3.0: "none" is equivalent to switching back to Main.
             session = self._get_session()
-            session.agent = None
-            session.workspace = CLAUDE_WORKSPACE
+            session.agent = MAIN_AGENT_ID
+            session.workspace = str(agent_base(MAIN_AGENT_ID))
             self.sessions.save()
-            self.send_message("🤖 Agente desativado. Usando modo padrão.")
+            self.send_message("🤖 Agente resetado para Main.")
             return
         # Try to find agent by id or name
         agents = list_agents()
@@ -5552,8 +5967,8 @@ class ClaudeTelegramBot:
         session = self._get_session()
         session.agent = found["_id"]
         session.model = found.get("model", session.model)
-        isolated = AGENTS_DIR / found["_id"] / "workspace"
-        session.workspace = str(isolated) if isolated.is_dir() else str(AGENTS_DIR / found["_id"])
+        isolated = workspace_dir(found["_id"])
+        session.workspace = str(isolated) if isolated.is_dir() else str(agent_base(found["_id"]))
         self.sessions.save()
         icon = found.get("icon", "🤖")
         name = found.get("name", found["_id"])
@@ -6088,7 +6503,7 @@ class ClaudeTelegramBot:
                 and system_prompt is not None
                 and getattr(session, "active_memory", True)):
             try:
-                am_block = _active_memory_lookup(prompt)
+                am_block = _active_memory_lookup(prompt, agent_id=session.agent)
             except Exception as exc:
                 logger.warning("Active Memory lookup raised: %s", exc)
                 am_block = None
@@ -6098,19 +6513,20 @@ class ClaudeTelegramBot:
                 )
 
         # Graph-based skill hint (user-prompt prefix) — lightweight nudge sourced
-        # from vault/.graphs/graph.json. Skipped for routines/pipelines (they
-        # carry their own context) and for retries (already tagged).
+        # from vault/.graphs/graph.json. Filters to the current agent's skills
+        # only. Skipped for routines/pipelines (they carry their own context)
+        # and for retries (already tagged).
         if (SKILL_HINTS_ENABLED and not _retry and not routine_mode
                 and prompt is not None):
             try:
-                hinted = _select_relevant_skills(prompt, max_n=3)
+                hinted = _select_relevant_skills(prompt, agent_id=session.agent, max_n=3)
             except Exception as exc:
                 logger.warning("Skill hint injection failed: %s", exc)
                 hinted = []
             if hinted:
                 hint_line = (
                     f"<hint>Relevant skills for this task: {', '.join(hinted)}. "
-                    f"See vault/Skills/ for details.</hint>\n\n"
+                    f"See Skills/ in your workspace for details.</hint>\n\n"
                 )
                 prompt = hint_line + prompt
 
@@ -6502,8 +6918,8 @@ class ClaudeTelegramBot:
             session.model = task.model
         if task.agent:
             session.agent = task.agent
-            isolated = AGENTS_DIR / task.agent / "workspace"
-            session.workspace = str(isolated) if isolated.is_dir() else str(AGENTS_DIR / task.agent)
+            isolated = workspace_dir(task.agent)
+            session.workspace = str(isolated) if isolated.is_dir() else str(agent_base(task.agent))
         changed = (session.model != original_model or session.agent != original_agent
                     or session.workspace != original_workspace)
 
@@ -6563,11 +6979,18 @@ class ClaudeTelegramBot:
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {runner.error_text[:200]}")
                 # Compound engineering: draft a lesson from this failure
-                lesson_path = record_lesson_draft(task.name, runner.error_text, kind="routine")
+                lesson_path = record_lesson_draft(
+                    task.name, runner.error_text, kind="routine",
+                    agent_id=task.agent or MAIN_AGENT_ID,
+                )
                 if lesson_path:
                     try:
+                        try:
+                            rel = lesson_path.relative_to(VAULT_DIR)
+                        except ValueError:
+                            rel = lesson_path
                         self.send_message(
-                            f"📝 Rascunho de lição: `vault/Lessons/{lesson_path.name}`",
+                            f"📝 Rascunho de lição: `{rel}`",
                             disable_notification=True,
                         )
                     except Exception as exc:
@@ -6590,11 +7013,18 @@ class ClaudeTelegramBot:
             else:
                 self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
             # Compound engineering: draft a lesson from this failure
-            lesson_path = record_lesson_draft(task.name, str(exc), kind="routine")
+            lesson_path = record_lesson_draft(
+                task.name, str(exc), kind="routine",
+                agent_id=task.agent or MAIN_AGENT_ID,
+            )
             if lesson_path:
                 try:
+                    try:
+                        rel = lesson_path.relative_to(VAULT_DIR)
+                    except ValueError:
+                        rel = lesson_path
                     self.send_message(
-                        f"📝 Rascunho de lição: `vault/Lessons/{lesson_path.name}`",
+                        f"📝 Rascunho de lição: `{rel}`",
                         disable_notification=True,
                     )
                 except Exception as notify_exc:
@@ -7062,14 +7492,15 @@ class ClaudeTelegramBot:
                     if self.path == "/routine/run":
                         name = body.get("name", "")
                         time_slot = body.get("time_slot", "now")
-                        md_file = ROUTINES_DIR / f"{name}.md"
-                        if not md_file.exists():
+                        md_file = _find_routine_file(name)
+                        if md_file is None:
                             self._respond(404, {"error": "routine not found"})
                             return
                         fm, routine_body = get_frontmatter_and_body(md_file)
                         if not fm or not routine_body:
                             self._respond(400, {"error": "invalid routine file"})
                             return
+                        owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
                         # Check if this is a pipeline
                         if str(fm.get("type", "routine")) == "pipeline":
                             bot.scheduler._enqueue_pipeline_from_file(
@@ -7083,7 +7514,7 @@ class ClaudeTelegramBot:
                             prompt=routine_body,
                             model=str(fm.get("model", "sonnet")),
                             time_slot=time_slot,
-                            agent=fm.get("agent"),
+                            agent=owning_agent,
                             minimal_context=bool(fm.get("context") == "minimal"),
                             effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
                         )
@@ -7281,8 +7712,7 @@ class ClaudeTelegramBot:
                         thread_id: Optional[str] = None
                         agent_id = action.get("agent")
                         if agent_id:
-                            agent_dir = AGENTS_DIR / str(agent_id)
-                            agent_md = agent_dir / "agent.md"
+                            agent_md = agent_info_path(str(agent_id))
                             if agent_md.exists():
                                 a_fm, _ = get_frontmatter_and_body(agent_md)
                                 acid = a_fm.get("chat_id") or a_fm.get("telegram_chat_id")
@@ -7302,12 +7732,13 @@ class ClaudeTelegramBot:
                 routine_name = action.get("routine")
                 if routine_name:
                     try:
-                        md_file = ROUTINES_DIR / f"{routine_name}.md"
-                        if not md_file.exists():
+                        md_file = _find_routine_file(routine_name)
+                        if md_file is None:
                             raise FileNotFoundError(f"routine {routine_name} not found")
                         r_fm, r_body = get_frontmatter_and_body(md_file)
                         if not r_fm or not r_body:
                             raise ValueError(f"invalid routine {routine_name}")
+                        owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
                         time_slot = f"webhook-{int(time.time())}"
                         if str(r_fm.get("type", "routine")) == "pipeline":
                             # Pipelines don't yet support payload injection — log a warning
@@ -7325,7 +7756,7 @@ class ClaudeTelegramBot:
                                 prompt=r_body,
                                 model=str(r_fm.get("model", "sonnet")),
                                 time_slot=time_slot,
-                                agent=r_fm.get("agent") or action.get("agent"),
+                                agent=owning_agent,
                                 minimal_context=bool(r_fm.get("context") == "minimal"),
                                 voice=bool(r_fm.get("voice", False)),
                                 effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,

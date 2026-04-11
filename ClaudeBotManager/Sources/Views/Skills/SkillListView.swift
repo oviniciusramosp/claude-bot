@@ -5,11 +5,14 @@ struct SkillListView: View {
     @State private var selectedSkill: Skill? = nil
     @State private var searchText = ""
     @State private var showCreateSheet = false
+    @State private var agentFilter: String = "__all__"
 
     private var search: VaultSearch { VaultSearch(searchText) }
 
     private func filtered(_ skills: [Skill]) -> [Skill] {
-        skills.filter { search.matches($0) }
+        skills.filter { s in
+            (agentFilter == "__all__" || s.ownerAgentId == agentFilter) && search.matches(s)
+        }
     }
 
     private var botSkills: [Skill] { filtered(appState.skills.filter { $0.isBuiltIn }) }
@@ -17,20 +20,24 @@ struct SkillListView: View {
 
     var body: some View {
         ScrollView {
-            if appState.skills.isEmpty {
-                EmptyStateView(
-                    symbol: SidebarItem.skills.symbol,
-                    title: "No Skills",
-                    subtitle: "Skills are markdown files in vault/Skills/."
-                )
-            } else if botSkills.isEmpty && mySkills.isEmpty {
-                EmptyStateView(
-                    symbol: "magnifyingglass",
-                    title: "No Results",
-                    subtitle: "No skills match \"\(searchText)\"."
-                )
-            } else {
-                VStack(spacing: Spacing.xl) {
+            VStack(spacing: Spacing.xl) {
+                AgentFilterBar(selection: $agentFilter)
+
+                if appState.skills.isEmpty {
+                    EmptyStateView(
+                        symbol: SidebarItem.skills.symbol,
+                        title: "No Skills",
+                        subtitle: "Skills are markdown files under vault/<id>/Skills/ (one file per skill, per agent)."
+                    )
+                } else if botSkills.isEmpty && mySkills.isEmpty {
+                    EmptyStateView(
+                        symbol: "magnifyingglass",
+                        title: "No Results",
+                        subtitle: searchText.isEmpty
+                            ? "No skills for this agent yet."
+                            : "No skills match \"\(searchText)\"."
+                    )
+                } else {
                     if !botSkills.isEmpty {
                         skillSection(title: "Bot Skills", skills: botSkills)
                     }
@@ -38,8 +45,8 @@ struct SkillListView: View {
                         skillSection(title: "My Skills", skills: mySkills)
                     }
                 }
-                .padding(Spacing.xl)
             }
+            .padding(Spacing.xl)
         }
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Skills")
@@ -61,7 +68,7 @@ struct SkillListView: View {
             SkillDetailView(skill: skill)
         }
         .sheet(isPresented: $showCreateSheet) {
-            SkillFormSheet()
+            SkillFormSheet(initialOwnerAgentId: agentFilter == "__all__" ? "main" : agentFilter)
         }
     }
 
@@ -154,15 +161,32 @@ struct SkillFormSheet: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
 
+    let initialOwnerAgentId: String
+
+    init(initialOwnerAgentId: String = "main") {
+        self.initialOwnerAgentId = initialOwnerAgentId
+        _ownerAgentId = State(initialValue: initialOwnerAgentId)
+    }
+
     @State private var title = ""
     @State private var skillId = ""
     @State private var description = ""
     @State private var trigger = ""
     @State private var instructions = ""
+    @State private var ownerAgentId: String = "main"
     @State private var isSaving = false
 
     private var canCreate: Bool {
         !title.isEmpty && !instructions.isEmpty && !isSaving
+    }
+
+    /// Owner agent options for the picker.
+    private var ownerAgentOptions: [(String, String)] {
+        var opts: [(String, String)] = [("main", "\(appState.mainAgent.icon) \(appState.mainAgent.name)")]
+        for a in appState.agents {
+            opts.append((a.id, "\(a.icon) \(a.name)"))
+        }
+        return opts
     }
 
     var body: some View {
@@ -189,6 +213,25 @@ struct SkillFormSheet: View {
                             .font(.system(size: 13))
                             .foregroundStyle(.secondary)
                             .textFieldStyle(.plain)
+                    }
+                    .padding(.horizontal, Spacing.xl)
+                    .padding(.vertical, Spacing.lg)
+
+                    Divider().padding(.horizontal, Spacing.xl)
+
+                    // Owner agent
+                    VStack(alignment: .leading, spacing: Spacing.xs) {
+                        Text("Owner Agent")
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                        Picker("", selection: $ownerAgentId) {
+                            ForEach(ownerAgentOptions, id: \.0) { id, label in
+                                Text(label).tag(id)
+                            }
+                        }
+                        .labelsHidden()
+                        Text("Lives under vault/\(ownerAgentId)/Skills/")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.tertiary)
                     }
                     .padding(.horizontal, Spacing.xl)
                     .padding(.vertical, Spacing.lg)
@@ -242,11 +285,12 @@ struct SkillFormSheet: View {
                         let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
                         return f.string(from: Date())
                     }()
-                    let skill = Skill(
+                    var skill = Skill(
                         id: skillId, title: title, description: description,
                         trigger: trigger, tags: ["skill"],
                         created: todayStr, updated: todayStr, body: instructions
                     )
+                    skill.ownerAgentId = ownerAgentId.isEmpty ? "main" : ownerAgentId
                     Task {
                         try? await appState.saveSkill(skill)
                         isSaving = false

@@ -112,6 +112,21 @@ struct ReactionDetailView: View {
                     TextField("Processa alertas de compra do TradingView", text: $reaction.description)
                         .textFieldStyle(.roundedBorder)
                 }
+                labeledField("Owner Agent") {
+                    Picker("", selection: $reaction.ownerAgentId) {
+                        Text("\(appState.mainAgent.icon) \(appState.mainAgent.name)").tag("main")
+                        ForEach(appState.agents) { agent in
+                            Text("\(agent.icon) \(agent.name)").tag(agent.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .disabled(!isNew)  // Moving an existing reaction is outside this sheet's scope
+                }
+                if !isNew {
+                    Text("To move this reaction to a different agent, delete it and create a new one.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                }
                 SettingRow("Enabled") {
                     Toggle("", isOn: $reaction.enabled).labelsHidden()
                 }
@@ -385,7 +400,7 @@ struct ReactionDetailView: View {
     private func delete() {
         Task {
             do {
-                try await appState.deleteReaction(id: reaction.id)
+                try await appState.deleteReaction(reaction)
                 dismiss()
             } catch {
                 errorMessage = "Failed to delete: \(error.localizedDescription)"

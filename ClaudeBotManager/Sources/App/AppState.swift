@@ -120,15 +120,47 @@ final class AppState: ObservableObject {
             Task { @MainActor in await self?.loadAll() }
         }
 
-        for path in [
+        // v3.5: every agent lives directly under the vault root as `<id>/`
+        // with the hub file `agent-<id>.md`. Watching the vault root catches
+        // new/removed agent directories; watching each detected agent's
+        // Routines/Skills/Reactions/Journal catches item-level changes.
+        var watchPaths: [String] = [
             "\(dataDir)/sessions.json",
             "\(dataDir)/contexts.json",
             "\(dataDir)/reaction-stats.json",
-            "\(vaultPath)/Agents",
-            "\(vaultPath)/Routines",
-            "\(vaultPath)/Skills",
-            "\(vaultPath)/Reactions"
-        ] {
+            vaultPath,  // catches top-level vault changes (new agent dir created/deleted)
+        ]
+        // Reserved top-level names that are NEVER agents (mirrors
+        // VaultService.reservedVaultNames so the two stay in sync).
+        let reservedVaultNames: Set<String> = [
+            "README.md", "CLAUDE.md", "Tooling.md", ".env",
+            ".graphs", ".obsidian", ".claude", "Images", "__pycache__",
+            "Agents",
+        ]
+        if let entries = try? FileManager.default.contentsOfDirectory(atPath: vaultPath) {
+            for entry in entries {
+                if entry.hasPrefix(".") { continue }
+                if reservedVaultNames.contains(entry) { continue }
+                let agentBase = "\(vaultPath)/\(entry)"
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: agentBase, isDirectory: &isDir),
+                      isDir.boolValue else { continue }
+                // v3.5 hub `agent-<id>.md` (or legacy `agent-info.md` mid-migration)
+                let hub = "\(agentBase)/agent-\(entry).md"
+                let legacyHub = "\(agentBase)/agent-info.md"
+                guard FileManager.default.fileExists(atPath: hub)
+                        || FileManager.default.fileExists(atPath: legacyHub) else {
+                    continue
+                }
+                for sub in ["Routines", "Skills", "Reactions", "Journal"] {
+                    let p = "\(agentBase)/\(sub)"
+                    if FileManager.default.fileExists(atPath: p) {
+                        watchPaths.append(p)
+                    }
+                }
+            }
+        }
+        for path in watchPaths {
             fileWatcher.watch(path: path, onChange: refresh)
         }
 
@@ -209,7 +241,9 @@ final class AppState: ObservableObject {
                 // Load pipeline step definitions for expanded view
                 if loaded[i].isPipeline && loaded[i].pipelineStepDefs.isEmpty {
                     loaded[i].pipelineStepDefs = await vs.loadPipelineStepDefs(
-                        routineId: loaded[i].id, promptBody: loaded[i].promptBody)
+                        routineId: loaded[i].id,
+                        promptBody: loaded[i].promptBody,
+                        ownerAgentId: loaded[i].ownerAgentId)
                 }
             }
             routines = loaded
@@ -318,8 +352,13 @@ final class AppState: ObservableObject {
         return result
     }
 
-    func deleteRoutine(id: String) async throws {
-        try await vaultService?.deleteRoutine(id: id)
+    func deleteRoutine(id: String, ownerAgentId: String = "main") async throws {
+        try await vaultService?.deleteRoutine(id: id, ownerAgentId: ownerAgentId)
+        await loadRoutines()
+    }
+
+    func deleteRoutine(_ routine: Routine) async throws {
+        try await vaultService?.deleteRoutine(id: routine.id, ownerAgentId: routine.ownerAgentId)
         await loadRoutines()
     }
 
@@ -354,8 +393,13 @@ final class AppState: ObservableObject {
         await loadSkills()
     }
 
-    func deleteSkill(id: String) async throws {
-        try await vaultService?.deleteSkill(id: id)
+    func deleteSkill(id: String, ownerAgentId: String = "main") async throws {
+        try await vaultService?.deleteSkill(id: id, ownerAgentId: ownerAgentId)
+        await loadSkills()
+    }
+
+    func deleteSkill(_ skill: Skill) async throws {
+        try await vaultService?.deleteSkill(id: skill.id, ownerAgentId: skill.ownerAgentId)
         await loadSkills()
     }
 
@@ -373,8 +417,13 @@ final class AppState: ObservableObject {
         await loadReactions()
     }
 
-    func deleteReaction(id: String) async throws {
-        try await vaultService?.deleteReaction(id: id)
+    func deleteReaction(id: String, ownerAgentId: String = "main") async throws {
+        try await vaultService?.deleteReaction(id: id, ownerAgentId: ownerAgentId)
+        await loadReactions()
+    }
+
+    func deleteReaction(_ reaction: Reaction) async throws {
+        try await vaultService?.deleteReaction(id: reaction.id, ownerAgentId: reaction.ownerAgentId)
         await loadReactions()
     }
 
@@ -396,8 +445,12 @@ final class AppState: ObservableObject {
         await routineStateService?.loadHistory(for: id) ?? []
     }
 
-    func loadPipelineStepDefs(routineId: String, promptBody: String) async -> [PipelineStepDef] {
-        await vaultService?.loadPipelineStepDefs(routineId: routineId, promptBody: promptBody) ?? []
+    func loadPipelineStepDefs(routineId: String, promptBody: String, ownerAgentId: String = "main") async -> [PipelineStepDef] {
+        await vaultService?.loadPipelineStepDefs(
+            routineId: routineId,
+            promptBody: promptBody,
+            ownerAgentId: ownerAgentId
+        ) ?? []
     }
 
     func allRoutineHistory() async -> [RoutineExecution] {

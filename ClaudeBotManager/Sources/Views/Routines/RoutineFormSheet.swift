@@ -4,6 +4,15 @@ struct RoutineFormSheet: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
 
+    /// Owner agent id that will be used when saving. Defaults to "main".
+    /// Passed from the list view so the new routine inherits the current filter.
+    let initialOwnerAgentId: String
+
+    init(initialOwnerAgentId: String = "main") {
+        self.initialOwnerAgentId = initialOwnerAgentId
+        _ownerAgentId = State(initialValue: initialOwnerAgentId)
+    }
+
     @State private var name = ""
     @State private var title = ""
     @State private var description = ""
@@ -15,6 +24,7 @@ struct RoutineFormSheet: View {
     @State private var monthdays: [Int] = []
     @State private var model = "sonnet"
     @State private var agentId: String? = nil
+    @State private var ownerAgentId: String = "main"
     @State private var promptBody = ""
     @State private var isSaving = false
     @State private var enabled = true
@@ -258,9 +268,18 @@ struct RoutineFormSheet: View {
                 .frame(maxWidth: .infinity)
             }
 
-            // Row 2: Model (hidden when pipeline)
-            if !isPipeline {
-                HStack(alignment: .top, spacing: 40) {
+            // Row 2: Owner + Model (Model hidden when pipeline)
+            HStack(alignment: .top, spacing: 40) {
+                // Owner Agent — decides which agent's vault folder stores this routine
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Owner")
+                    formMenuPicker(label: ownerAgentLabel, selection: $ownerAgentId,
+                                   options: ownerAgentOptions)
+                    fieldLabel("Lives under vault/<owner>/Routines/")
+                }
+                .frame(maxWidth: .infinity)
+
+                if !isPipeline {
                     VStack(alignment: .leading, spacing: 5) {
                         fieldLabel("Model")
                         formMenuPicker(label: modelDisplayName, selection: $model, options: [
@@ -271,6 +290,7 @@ struct RoutineFormSheet: View {
                         fieldLabel(modelDescription)
                     }
                     .frame(maxWidth: .infinity)
+                } else {
                     Spacer().frame(maxWidth: .infinity)
                 }
             }
@@ -399,7 +419,7 @@ struct RoutineFormSheet: View {
                         interval: nil, monthdays: []
                     )
                 }
-                let routine = Routine(
+                var routine = Routine(
                     id: name,
                     title: title,
                     description: description,
@@ -416,6 +436,7 @@ struct RoutineFormSheet: View {
                     minimalContext: executionType == "minimal",
                     pipelineStepDefs: isPipeline ? pipelineSteps : []
                 )
+                routine.ownerAgentId = ownerAgentId.isEmpty ? "main" : ownerAgentId
                 Task {
                     try? await appState.saveRoutine(routine)
                     isSaving = false
@@ -518,6 +539,26 @@ struct RoutineFormSheet: View {
 
     private var agentMenuOptions: [(String, String)] {
         var opts: [(String, String)] = [("__none__", "\u{1F916} Main (Default)")]
+        for a in appState.agents {
+            opts.append((a.id, "\(a.icon) \(a.name)"))
+        }
+        return opts
+    }
+
+    /// Human label for the currently-selected owner agent.
+    private var ownerAgentLabel: String {
+        if ownerAgentId == "main" {
+            return "\(appState.mainAgent.icon) \(appState.mainAgent.name)"
+        }
+        if let agent = appState.agents.first(where: { $0.id == ownerAgentId }) {
+            return "\(agent.icon) \(agent.name)"
+        }
+        return ownerAgentId
+    }
+
+    /// Owner agent options — always includes "main" plus any custom agents.
+    private var ownerAgentOptions: [(String, String)] {
+        var opts: [(String, String)] = [("main", "\(appState.mainAgent.icon) \(appState.mainAgent.name)")]
         for a in appState.agents {
             opts.append((a.id, "\(a.icon) \(a.name)"))
         }

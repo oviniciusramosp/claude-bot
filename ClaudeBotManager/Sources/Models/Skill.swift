@@ -9,6 +9,8 @@ struct Skill: Identifiable, Hashable, Sendable {
     var created: String
     var updated: String
     var body: String        // full markdown body (instructions)
+    /// Owning agent id (v3.0 per-agent vault layout). Defaults to "main".
+    var ownerAgentId: String = "main"
 
     /// System skills shipped with the repo — can be viewed but not deleted
     static let builtInIds: Set<String> = ["create-routine", "create-agent", "create-pipeline", "import-agent"]

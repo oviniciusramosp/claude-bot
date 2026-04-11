@@ -1,14 +1,68 @@
-# Vault — Claude Bot Knowledge Base
+---
+title: Vault Rules
+description: Universal frontmatter, graph, and linking rules for every agent in the vault.
+type: index
+created: 2026-04-07
+updated: 2026-04-11
+tags: [vault, rules, index]
+---
 
-**IMPORTANT:** This is the vault's CLAUDE.md — the bot's operational knowledge base. This vault is your primary source of context and memory. Always consult here first before looking for information elsewhere. You can read and interact with any file on the computer when the user asks — but DO NOT use configs from other AI tools (~/.claude/, ~/.openclaw/, etc.) as your own instructions.
+# Vault — Universal Rules
 
-**REQUIRED:** Before using any external tool (web, API, CLI), read `Tooling.md` to check if there is a configured preference. Do not assume which tool to use — check first.
+**IMPORTANT:** This file is the vault's universal contract. It defines frontmatter rules, the graph model, and linking rules that apply to **every** file in the vault, regardless of which agent owns it. Agent-specific operational instructions live in `<agent>/CLAUDE.md` — for example, `main/CLAUDE.md` for the Main agent.
+
+## Agents rooted in this vault
+
+Every agent sits directly under the vault root. The canonical entry point per agent is its `agent-info.md` file (frontmatter: metadata, body: the single parent wikilink `[[README]]`). This file does NOT list the agents — the agents point up to README directly, not via CLAUDE.md, so the graph tree stays clean with exactly one parent per file.
 
 The user may refer to this directory as **"vault"**, **"knowledge base"**, **"knowledge"**, or **"KB"**. They all mean the same thing: this directory.
 
-**The vault is the primary persistence source.** When you need to save or look up information — preferences, tools, decisions, context — use the vault FIRST (Tooling.md, Notes/, Journal/). Claude Code's auto-memory (~/.claude/projects/.../memory/) is secondary and should only be used for session metadata that does not belong in the vault. If the information has long-term value or is user-referenceable, it belongs in the vault.
+## v3.1 Layout — flat per-agent structure
 
-This vault is both the bot's long-term memory and a visual workspace for the user to navigate in Obsidian via Graph View.
+```
+vault/
+├── README.md
+├── CLAUDE.md             ← this file (universal rules)
+├── Tooling.md            ← shared tool preferences
+├── .graphs/              ← auto-generated graph.json
+├── .obsidian/
+├── main/
+│   ├── agent-info.md     ← metadata (frontmatter) + hub wikilinks (body)
+│   ├── CLAUDE.md         ← Main agent's personality / instructions
+│   ├── Skills/
+│   ├── Routines/
+│   ├── Journal/
+│   ├── Reactions/
+│   ├── Lessons/
+│   ├── Notes/
+│   └── workspace/
+├── crypto-bro/
+│   ├── agent-info.md
+│   ├── CLAUDE.md
+│   ├── Skills/           ← private to crypto-bro
+│   ├── Routines/         ← private to crypto-bro
+│   ├── Journal/
+│   ├── Reactions/
+│   ├── Lessons/
+│   ├── Notes/
+│   └── workspace/
+└── parmeirense/
+    └── ... (same structure)
+```
+
+**Isolamento total.** Every agent — including Main — owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes. Content is NEVER inherited between agents. If Main has a useful skill and crypto-bro needs it, the file must be copied (or recreated) under `crypto-bro/Skills/`.
+
+The vault root contains only shared files (`README.md`, this `CLAUDE.md`, `Tooling.md`) plus each agent's directory. An agent is identified by the presence of `agent-info.md` — any top-level directory without it (e.g. `.graphs`, `.obsidian`, `Images`) is internal scaffolding, not an agent.
+
+### `agent-info.md` — the per-agent hub
+
+Each agent has a single `agent-info.md` file at its root that combines:
+
+- **Metadata** in frontmatter: `name`, `icon`, `model`, `description`, optional `chat_id`/`thread_id` for Telegram routing, etc.
+- **Graph wikilinks** in the body: one `[[Skills]]`, `[[Routines]]`, `[[Journal]]`, `[[Reactions]]`, `[[Lessons]]`, `[[Notes]]` link that the Obsidian graph uses to make the agent's subtree reachable from the vault root.
+
+The top-level `vault/CLAUDE.md` (this file) has path-qualified links to each `<agent>/agent-info.md`, giving the graph a single connected tree:
+`README → CLAUDE → <agent>/agent-info → Skills/Routines/… → leaves`.
 
 ## Language policy
 
@@ -16,47 +70,35 @@ This vault is both the bot's long-term memory and a visual workspace for the use
 
 **Exceptions:**
 - **Journal entry body content** — may be written in the user's preferred language (the daily log reflects conversation language)
-- **Agent signature terms** — character-defining words/phrases may stay in Portuguese (e.g., "porco", "segue meu Pal!") when they are part of the agent's personality
+- **Agent signature terms** — character-defining words/phrases may stay in Portuguese (e.g., "porco", "segue meu Pal!") when part of the agent's personality
 - **Bot conversations** — always respond in whatever language the user writes in
-
----
 
 ## How to consume the vault
 
 **Principle: scan before read.** Never open all files in a folder. First list the files and read only the first ~10 lines (frontmatter) of each. Use the `description` field to decide which ones deserve a full read.
 
-### Knowledge Graph (`.graphs/graph.json`)
+### Knowledge graph (`.graphs/graph.json`)
 
-The vault has a knowledge graph generated by [Graphify](https://github.com/safishamsi/graphify) at `.graphs/graph.json`. This graph maps relationships between all vault files — concepts, dependencies, and thematic communities.
+The vault has a lightweight knowledge graph at `.graphs/graph.json`, regenerated daily by the `vault-graph-update` routine. Every node now carries an `agent` attribute derived from its path (`Agents/<id>/…`), which the Active Memory and skill hint helpers use to enforce isolamento total.
 
-**When to use graph.json:**
-- Before doing extensive glob in large folders (Notes/, Routines/)
+**When to use:**
+- Before doing extensive glob in large folders
 - To find files related to a topic without reading all frontmatters
-- To understand community structure (which files form thematic clusters)
+- To understand community structure inside a single agent
 
-**How to query:**
-1. Read `.graphs/graph.json` — contains nodes (files) and edges (relationships) with confidence labels
-2. Do BFS/DFS traversal from the relevant node to find neighbors
-3. Edges marked as `EXTRACTED` are explicit relationships; `INFERRED` are deduced; `AMBIGUOUS` need validation
-
-**Fallback:** If graph.json doesn't exist or is outdated, fall back to the standard scan-before-read procedure. The `vault-graph-update` routine regenerates the graph daily at 4am.
+**Fallback:** If `graph.json` doesn't exist or is outdated, fall back to the standard scan-before-read procedure.
 
 ### Scan-before-read (standard procedure)
 
-When starting any session:
-1. If `.graphs/graph.json` exists, query it for structural context
+When starting any session (as an agent):
+1. If `.graphs/graph.json` exists, query it for structural context inside **your** agent folder
 2. Glob `Journal/*.md` — read the last 2-3 days for recent context
-3. Read `Tooling.md` — tool preferences (which one to use for each task)
+3. Read `../../Tooling.md` (relative to your agent cwd) — shared tool preferences
 4. If the user mentions a topic, list `Notes/` and read frontmatters to filter by `description` and `tags` before opening full files
 5. If a skill is triggered, read `Skills/<skill>.md` for instructions
-6. If a routine is triggered, read `Routines/<routine>.md` for the prompt and context
+6. If a routine is triggered, read `Routines/<routine>.md` for the prompt
 
-**Efficient navigation in large folders:**
-- List files → read first 10 lines of each → filter by `description`/`tags` → open only the relevant ones
-- Treat the collection of frontmatters as a browsable catalog
-- The `description` field replaces the need to read the file body in most cases
-
-## Unbreakable rule: YAML Frontmatter
+## Unbreakable rule: YAML frontmatter
 
 Every `.md` in the vault MUST have frontmatter. No exceptions. Creating without frontmatter is an error.
 
@@ -64,7 +106,7 @@ Every `.md` in the vault MUST have frontmatter. No exceptions. Creating without 
 ---
 title: Descriptive name
 description: Short sentence explaining the content and when this file is relevant.
-type: journal | note | skill | reference | routine
+type: journal | note | skill | reference | routine | pipeline | agent | index | reaction | lesson | history
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
 tags: [topic1, topic2]
@@ -73,213 +115,121 @@ tags: [topic1, topic2]
 
 The `description` field is required and functions as a semantic index. It must contain enough context to decide whether the file needs to be read in full or not.
 
-### `related` field (optional)
+**Exempt from frontmatter** (by design):
+- `Agents/<id>/agent.md` — metadata is the frontmatter; body is empty
+- `Agents/<id>/CLAUDE.md` — instructions for Claude Code, no frontmatter
+- Pipeline step prompts under `Routines/{pipeline}/steps/*.md` — raw prompt text only
 
-Semantic relationships that SHOULD NOT become wikilinks (to keep the graph clean), but help with navigation and discovery:
+### Optional `related` field
+
+Semantic relationships that should NOT become wikilinks (to keep the graph clean), but help with navigation:
 
 ```yaml
 related:
   - file: "file-name"
-    type: extracted    # explicit in content
+    type: extracted
     reason: "uses data from the same endpoint"
-  - file: "another-file"
-    type: inferred     # deduced by context
-    reason: "both deal with market analysis"
 ```
 
-Confidence types:
-- `extracted` — explicit relationship in the content (e.g., step references output from another step)
-- `inferred` — deduced by topic, data, or function similarity
-- `ambiguous` — possible relationship that needs human validation
+Confidence types: `extracted` (explicit), `inferred` (deduced), `ambiguous` (needs validation).
 
-The `related` field is a complementary semantic index. It does not create edges in Graph View — it helps Claude find related files without extensive globbing.
+## Graph structure — a clean tree
 
-## Graph structure
-
-The vault is a **clean tree graph**. Obsidian Graph View is the primary way for the user to navigate. The chart must be clean, with clear connections and no unnecessary links.
+Each agent's subtree is a **clean tree graph**. Obsidian Graph View is the primary way for the user to navigate. The chart must be clean, with clear connections and no unnecessary links.
 
 ```
 README (root hub)
-  ├── Journal (index) → daily entries
-  ├── Notes (index) → individual notes
-  ├── Skills (index) → individual skills
-  ├── Routines (index) → individual routines
-  ├── Agents (index) → individual agents
-  └── Tooling (terminal leaf)
+  └── Agents (shared index)
+        └── {agent} (hub)
+              ├── Journal (index) → daily entries
+              ├── Notes (index) → individual notes
+              ├── Skills (index) → individual skills
+              ├── Routines (index) → individual routines
+              └── ... (all per-agent)
 ```
 
 **Linking rules:**
 
 | Type | Outlinks | Inlinks |
 |------|----------|---------|
-| README | indexes + Tooling | none (root) |
-| Index | its direct children | README |
+| README | `Agents` index + `Tooling` | none (root) |
+| `Agents/Agents.md` | each agent hub `{id}.md` | README |
+| Agent hub `{id}.md` | the agent's own knowledge sub-files only | `Agents` index |
+| Index inside an agent (`Skills.md`, `Routines.md`, …) | the direct children in the same folder | agent hub |
 | Leaf (routine, note) | `[[ParentIndex]]` on first line + genuine cross-links | its index |
-| Skill | NO wikilinks (use paths). Only exception: links to own sub-files | Skills index |
-| Agent hub `{id}.md` | only the agent's own knowledge sub-files (e.g., reference docs in the agent's folder) | Agents index |
+| Skill | NO wikilinks (use paths). Exception: links to own sub-files | Skills index |
 | Tooling | none (terminal) | README |
 
 **Files that are NOT graph nodes** (excluded by `vault-graph-builder.py`):
-- Daily journal entries (`Journal/YYYY-MM-DD.md` and `Agents/*/Journal/YYYY-MM-DD.md`) — ephemeral chronological logs
-- Pipeline workspace data (`Agents/*/workspace/**`) — runtime outputs
-- Bot reactions (`Reactions/**`) — webhook config, not knowledge
-- Agent metadata (`Agents/*/agent.md`) and instructions (`Agents/*/CLAUDE.md`) — read by the bot/Claude CLI, not browsed in the graph
+- Daily journal entries (`Agents/<id>/Journal/YYYY-MM-DD.md`) — ephemeral chronological logs
+- Pipeline workspace data (`Agents/<id>/workspace/**`) — runtime outputs
+- Bot reactions (`Agents/<id>/Reactions/**`) — webhook config, not knowledge
+- Routine execution history (`Agents/<id>/Routines/.history/**`) — churn-y log rollups
+- Agent metadata (`Agents/<id>/agent.md`) and instructions (`Agents/<id>/CLAUDE.md`) — parsed directly by the bot / Claude CLI, not browsed in the graph
 
 These files exist on disk but are deliberately not part of the knowledge graph. They MUST NOT contain wikilinks — adding `[[]]` here pollutes Obsidian's graph view via dangling edges and risks leaking to the LLM when read as prompt context.
 
 **Core principle: not every mention needs to be a `[[link]]`.** Links exist to create connections IN the Obsidian graph. If the connection doesn't add visual value, don't link. Use plain text.
 
 **Forbidden:**
-- README linking to leaves (always through index)
-- Indexes linking to each other
+- README linking to leaves (always through an index)
+- Indexes linking to each other across agents
 - Two files having multiple connections
-- Decorative or "related" links
+- Decorative or "related" wikilinks
 - Journal entries creating wikilinks to everything they mention (pollutes the graph)
 
 ## Index files (MOCs)
 
-Each folder has an index that functions as a graph hub:
+Each folder has an index that functions as a graph hub. These are auto-regenerated by `scripts/vault_indexes.py` using the `vault-query:start` marker blocks — edit manually OUTSIDE the markers only.
 
 - `README.md` → root hub
-- `Journal/Journal.md`, `Notes/Notes.md`, `Skills/Skills.md`, `Routines/Routines.md`, `Agents/Agents.md`
-
-Rules: list ONLY direct children. Never link to other indexes.
-
-## Creating files in the vault
-
-**1. Complete frontmatter:**
-```yaml
----
-title: Name
-description: Short sentence about content and relevance.
-type: (note|skill|routine|agent|journal|reference|index)
-created: YYYY-MM-DD
-updated: YYYY-MM-DD
-tags: [tag1, tag2]
----
-```
-
-**2. First line of body = link to parent index:**
-Routine → `[[Routines]]`, Note → `[[Notes]]`
-**Exception: Skills DO NOT link to parent index.** Skills.md links to the skills (via `[[name]]`), but inside skills there are no wikilinks — use paths (e.g., `Skills/create-pipeline.md`). The only wikilink allowed inside a skill is to its own sub-files (files in folders owned by the skill).
-
-**3. Cross-links only for real dependencies.** When in doubt, don't link.
-
-**4. Update the folder's index** with `- [[new-file]] — description`
-
-**5. Record in the day's Journal** (without creating a wikilink to the new file — mention in plain text)
+- `Agents/Agents.md` → lists every agent via `{parent}` field
+- `Agents/<id>/Skills/Skills.md`, `Routines/Routines.md`, `Journal/Journal.md`, … → per-agent listings scoped by `scope="<id>/<Sub>"`
 
 ## Wikilinks — when to use
 
 **Create a link when:**
-- First line of body → `[[ParentIndex]]`
-- Referencing an agent's internal folder → `[[{id}/Journal|Journal]]`
-- Skill depends on another file → `[[target-file]]`
+- First line of body → `[[ParentIndex]]` (same-folder)
+- Pipeline parent → its steps (via the `## Steps` section)
+- Skill → its own sub-files
+- Leaf → its parent index
 
 **DO NOT create a link when:**
-- Mentioning something in the Journal (use plain text, not `[[link]]`)
+- Mentioning something in the Journal (use plain text)
 - Referencing Tooling from within leaves
 - Mentioning something "related" that is not a real dependency
 - Citing an entity for context without dependency
 
-**Syntax:**
-- `[[file-name]]` — simple link
-- `[[folder/subfolder/file|Display text]]` — with alias (for referencing folders)
-- `[[name#section]]` — for sections
+Each `[[wikilink]]` adds an edge to the Obsidian graph. Fewer edges = a more navigable graph.
 
-## Journal (`Journal/`)
+## Writing principles for the graph
 
-One file per day: `YYYY-MM-DD.md`. Append-only.
+1. **Atomicity** — each note about a single concept.
+2. **Intentional links** — link ONLY real dependencies.
+3. **Discoverability** — tags in frontmatter for search.
+4. **Stability** — filenames are permalinks. Renaming breaks links.
+5. **Incrementality** — never delete, always add.
+6. **Tree first** — the graph is a tree (README → Agents → agent hub → index → leaf). Cross-links are the exception.
 
-```yaml
----
-title: "Journal YYYY-MM-DD"
-description: Daily log for YYYY-MM-DD.
-type: journal
-created: YYYY-MM-DD
-updated: YYYY-MM-DD
-tags: [journal]
----
-```
+## Creating files in the vault
 
-**No parent wikilink in the body.** Daily journal entries are chronological logs, not knowledge nodes — they're excluded from the graph. The folder location is enough context.
+**1. Complete frontmatter** (see above).
 
-Entry format:
-```markdown
-## HH:MM — Short summary
+**2. First line of body = link to parent index:** Routine → `[[Routines]]`, Note → `[[Notes]]`. **Exception: Skills DO NOT link to parent index** — Skills.md links to the skills, not the other way around.
 
-- Topics discussed
-- Decisions made
-- Actions taken
+**3. Cross-links only for real dependencies.** When in doubt, don't link.
 
----
-```
+**4. Update the folder's index.** (Or let `scripts/vault_indexes.py` regenerate it — the `vault-indexes-update` routine does this daily.)
 
-**When to record (proactively, DURING the conversation):**
+**5. Record in the day's Journal** (without creating a wikilink to the new file — mention in plain text).
 
-Don't wait for the end of the conversation. Record in the Journal immediately when:
-- An important decision is made (e.g., architecture choice, trade-off accepted)
-- A task is completed successfully (deploy, fix, config, file creation)
-- Relevant new information is discovered (bug root cause, unexpected behavior)
-- Changes to config files or environment are made
-- The user explicitly asks to remember something
-- A routine or pipeline finishes executing
+## Frontmatter specs for common types
 
-Each record is atomic and self-contained. Use `## HH:MM — Short summary` as header, bullets with details, and `---` as separator.
-
-**Journal DOES NOT create wikilinks at all.** No parent index, no mentioned entities. The file format and its location in the folder are sufficient. Daily entries are excluded from the knowledge graph (see "Files that are NOT graph nodes" above) — any `[[]]` in them creates dangling edges in Obsidian's graph view.
-
-Agent journal entries follow the same rule: just frontmatter and content, no wikilinks.
-
-## Notes (`Notes/`)
-
-Incremental knowledge base. Each note is a graph node.
-
-- Names in kebab-case
-- Never delete content — add or update
-- Tags in frontmatter for search
-- First line: `[[Notes]]`
-
-## Skills (`Skills/`)
-
-Each skill is a .md with procedural instructions.
-
-```yaml
----
-title: Skill Name
-description: What it does and when to use it.
-type: skill
-trigger: "when the user asks for X"
-tags: [skill, category]
----
-
-## Objective
-...
-
-## Steps
-1. ...
-
-## Notes
-...
-```
-
-**Linking rules for skills:**
-- Skills DO NOT have `[[Skills]]` on the first line (unlike routines and notes)
-- Skills.md (index) links to each skill with `[[skill-name]]`
-- Inside a skill, NEVER use wikilinks `[[...]]` for external files — use paths in inline code (e.g., `Skills/create-pipeline.md`, `Routines/Routines.md`)
-- The ONLY wikilink allowed inside a skill is to its own sub-files (files in folders owned by the skill, lower levels)
-- When creating a new skill: add `- [[name]] — description` to Skills.md
-
-## Routines (`Routines/`)
-
-Scheduled routines that execute prompts on Claude Code automatically.
-
-Each routine is a `.md` with schedule frontmatter + prompt in the body:
-
+### Routine
 ```yaml
 ---
 title: Routine Name
-description: What this routine does and when it is relevant.
+description: What this routine does and when it's relevant.
 type: routine
 created: YYYY-MM-DD
 updated: YYYY-MM-DD
@@ -294,144 +244,48 @@ enabled: true
 
 [[Routines]]
 
-Prompt to be sent to Claude Code...
+Prompt for Claude Code...
 ```
 
-**Schedule fields:**
-- `times` — HH:MM times (24h, local time)
-- `days` — weekdays: mon/tue/wed/thu/fri/sat/sun, or `["*"]` for all
-- `until` — end date YYYY-MM-DD (optional)
-- `model` — model to use (sonnet/opus/haiku)
-- `enabled` — true/false
-- `voice` — true/false (also sends response as TTS audio)
+Folder location is the source of truth for the owning agent — a file at `Agents/crypto-bro/Routines/foo.md` belongs to `crypto-bro`. The legacy `agent:` frontmatter field is still accepted for backcompat but the folder wins if they disagree.
 
-**Creating routines:**
-- Via Telegram: `/routine` command triggers the [[create-routine]] skill
-- Via Claude Code: create a .md file directly in `Routines/`
-- Filename in kebab-case: `morning-report.md`
+### Pipeline
+```yaml
+---
+title: Pipeline Name
+type: pipeline
+schedule:
+  times: ["09:00"]
+  days: ["*"]
+model: sonnet
+enabled: true
+notify: final
+---
 
-**Execution:**
-- The bot's scheduler checks routines every 60 seconds
-- Executed routines receive vault context (Tooling, .env, Skills)
-- Every execution generates a Journal entry for the day with link `[[routine-name]]`
-- Routines don't block user messages — they enter the queue
-- Routines can be routed to agents with the `agent: {id}` frontmatter field
-
-### Pipelines (multi-agent routines)
-
-Pipelines are routines with `type: pipeline` that orchestrate multiple steps (sub-agents) in a DAG. The scheduler detects this automatically and uses the `PipelineExecutor`.
-
-To create a pipeline, use the [[create-pipeline]] skill or via the macOS app (Routines → New → toggle Pipeline).
-
-Structure:
-```
-Routines/{name}.md              ← frontmatter type:pipeline + ```pipeline block
-Routines/{name}/steps/{id}.md   ← each step's prompt
-```
-
-Example body block:
-```
-```pipeline
-steps:
-  - id: collect
-    name: "Collect data"
-    model: haiku
-    prompt_file: steps/collect.md
-
-  - id: analyze
-    name: "Analyze"
-    model: opus
-    depends_on: [collect]
-    prompt_file: steps/analyze.md
-    output: telegram
-```
-```
-
-**Step fields:**
-- `id` — unique slug in kebab-case
-- `name` — human-readable name
-- `model` — per-step model override
-- `depends_on` — list of step ids that must complete first
-- `prompt_file` — relative path to the step's prompt
-- `timeout` — total time limit in seconds (default: 1200)
-- `inactivity_timeout` — inactivity limit (default: 300)
-- `retry` — attempts on failure (default: 0)
-- `output` — output destination: `telegram` (bot sends file content to Telegram), `none` (silent), `file` (default, saves to data/). If the step already sends to Telegram via its own API, use `none` to avoid duplication
-- `output_file` — custom output filename (default: `{id}.md`). Useful when downstream steps need to reference the file by a specific name
-
-**Behavior:**
-- Steps without `depends_on` run in parallel
-- Shared workspace at `/tmp/claude-pipeline-{name}-{ts}/data/` — each step reads previous outputs automatically
-- Step prompts DO NOT need to mention files — the orchestrator injects workspace context
-- Dual timeout: `inactivity_timeout` kills idle steps, `timeout` is the hard limit
-- Failure without retry cascades SKIPPED to dependents
-- `notify: final|all|summary|none` controls notifications (failures always notify)
-
-### Pipeline graph: parent owns the relationship to its steps
-
-Step files (`Routines/{name}/steps/*.md`) are **pure prompt files** for Claude — not knowledge nodes. They follow special rules:
-
-- **No frontmatter** — read as raw prompt text
-- **No wikilinks anywhere in the body** — wikilink syntax can leak into the LLM response and break downstream parsing
-- **No backlink to the parent pipeline** — the parent owns the relationship
-
-The **parent pipeline file** owns the parent→step edges via an explicit `## Steps` section placed AFTER the ` ```pipeline ` block:
-
-```markdown
 [[Routines]]
 
 ```pipeline
 steps:
-  - id: collect-binance
-    ...
+  - id: collect
+    name: Collect data
+    model: haiku
+    prompt_file: steps/collect.md
+  - id: analyze
+    depends_on: [collect]
+    model: opus
+    prompt_file: steps/analyze.md
+    output: telegram
 ```
 
 ## Steps
 
-- [[collect-binance]]
-- [[collect-sentiment]]
-- [[analyst]]
-- [[writer]]
-- [[publisher]]
+- collect.md
+- analyze.md
 ```
 
-**Why this direction (parent → step, not step → parent):**
-- Step prompts stay clean (zero wikilinks → zero risk of leaking to the model)
-- The graph stays a clean tree (one edge per relationship, owned by the side that decides which steps exist)
-- The `## Steps` section doubles as a human-readable execution order summary
+Step prompt files live under `Routines/{pipeline}/steps/*.md` — they have **no frontmatter and no wikilinks**.
 
-**Auto-managed.** The macOS app regenerates `## Steps` from the actual pipeline block on save (in execution order: parallel collectors first, then dependent steps). When pipelines are created via Telegram, the [[create-pipeline]] skill writes the section. **You should not edit `## Steps` manually** — edit the steps in the pipeline block and let the section regenerate.
-
-**Bot safety net.** The bot strips any trailing wikilink line from step prompts before sending them to the Claude CLI (handles legacy `routine: [[name]]` / `rotina: [[name]]` formats). This is a fallback — new step files should have zero wikilinks, period.
-
-### Wikilink discipline (general)
-
-**Use `[[wikilink]]` only for direct, structural relationships:**
-- Index → its direct children (`Routines.md` → each routine)
-- Pipeline parent → its steps (`## Steps` section)
-- Skill → its own sub-files
-- Leaf → parent index (first line of body)
-
-**Use plain text (filename with extension) for everything else:**
-- Cross-references that aren't dependencies: `see analyst.md for the format`
-- Runtime file paths in step prompts: `data/collect-github.md`
-- Mentions of skills/notes for context
-
-Each `[[wikilink]]` adds an edge to the Obsidian graph. Edges should represent meaningful structural relationships, not casual mentions. Fewer edges = a more navigable graph.
-
-## Agents (`Agents/`)
-
-Specialized agents with their own workspace. Each agent is a directory with 3 files + Journal.
-
-```
-Agents/{id}/
-  agent.md       # Metadata (frontmatter parsed by the bot, empty body)
-  CLAUDE.md      # Instructions for Claude Code (NO frontmatter, NO wikilinks)
-  {id}.md        # Agent's internal link hub in the graph
-  Journal/       # Agent's own journal
-```
-
-**agent.md** — metadata parsed by the bot. Empty body:
+### Agent
 ```yaml
 ---
 title: Name
@@ -442,74 +296,17 @@ personality: Tone and style
 model: sonnet
 icon: "🤖"
 default: false
-chat_id: "-100XXXXXXXXXX"   # Telegram chat/group ID for agent notifications
-thread_id: 123              # Telegram topic/thread ID (for groups with topics)
+chat_id: "-100XXXXXXXXXX"   # optional — Telegram group ID for notifications
+thread_id: 123              # optional — Telegram topic ID
 ---
 ```
 
-The `chat_id` and `thread_id` fields are optional. When present, pipelines and routines linked to the agent send notifications directly to that channel/topic, instead of relying on an active session.
-
-**CLAUDE.md** — instructions read by Claude Code when the agent is active. NO frontmatter. NO wikilinks. Contains only:
-```markdown
-# {Name} {emoji}
-
-## Personality
-{tone and style description}
-
-## Instructions
-- Record conversations in own Journal: Journal/YYYY-MM-DD.md
-- {specific instructions}
-
-## Specializations
-- {focus areas}
-```
-
-**{id}.md** — agent's hub in the Obsidian graph. Contains wikilinks ONLY to other knowledge files in the agent's folder (e.g., reference docs, glossaries). Empty body is fine if the agent has no sub-knowledge — the hub still receives an inbound edge from `Agents.md`.
-
-```markdown
-[[expressions-glossary]]
-```
-
-**Do not** add `[[agent]]`, `[[CLAUDE]]`, or `[[{id}/Journal|Journal]]` here — `agent.md` and `CLAUDE.md` are not graph nodes (excluded), and the Journal directory has no index file to point to.
-
-**Workspace:** when active, `cwd` changes to `Agents/{id}/`. Claude reads the agent's CLAUDE.md + this vault CLAUDE.md (automatic hierarchy).
-
-**Creation:** `/agent new` or `/agent import` on Telegram.
-
-## Images (`Images/`)
-
-Telegram images arrive as temporary files at `/tmp/claude-bot-images/`. Analyze them normally.
-
-**Save to vault only when the user explicitly asks** (e.g., "save this image", "keep this").
-
-When saving, organize in thematic subfolders:
-```
-Images/
-├── screenshots/
-├── diagrams/
-├── references/
-└── ...
-```
-
-Record in Journal when saving: `Image saved to [[Images/subfolder/name.ext]]`.
-
-## Credentials (`.env`)
-
-Read with the Read tool when you need API keys or tokens to access external services. The `.env` file in this directory contains variables like `NOTION_API_KEY`, `FIGMA_TOKEN`, etc.
+`agent.md` is metadata only (empty body). The real instructions live in `CLAUDE.md` inside the same folder.
 
 ## Tools (`Tooling.md`)
 
-Map of preferences: which tool to use for each type of task. Consult before choosing an approach.
+Map of preferences: which tool to use for each type of task. Consult before choosing an approach. This file is shared across all agents — the whole vault uses the same tool preferences.
 
-**Reading:** Before choosing a tool for a task, read Tooling.md to check if there is a configured preference.
+**Reading:** Before choosing a tool for a task, read Tooling.md.
 
-**Writing:** When the user informs about a new tool, tooling preference, or useful command — **update Tooling.md** (do not save to auto-memory). Tooling.md is the canonical location for tool preferences in the vault. Include: tool name, when to use it, main commands, and relevant notes.
-
-## Writing principles for the graph
-
-1. **Atomicity** — each note about a single concept. Better 3 short linked notes than 1 long note.
-2. **Intentional links** — link ONLY real dependencies. Don't link out of courtesy. Fewer links = more readable graph.
-3. **Discoverability** — tags in frontmatter for search. `## Related` only in notes (never in indexes).
-4. **Stability** — filenames are permalinks. Renaming breaks links. Choose well at creation.
-5. **Incrementality** — never delete, always add. A note's evolution history has value.
-6. **Tree first** — the graph is a tree (README → Index → Leaf). Cross-links are the exception, not the rule.
+**Writing:** When the user informs about a new tool, tooling preference, or useful command — update Tooling.md (do not save to auto-memory).

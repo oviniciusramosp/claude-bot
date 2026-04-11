@@ -53,9 +53,34 @@ runner.run(
 
 The `ClaudeRunner` builds the command with `--print --dangerously-skip-permissions --output-format stream-json`. The `--append-system-prompt` instructs Claude to read the vault (Journal, Tooling, etc.) — it can be omitted via `system_prompt=None` when the routine uses `context: minimal`.
 
-**Default workspace:** `vault/` — the bot operates inside the vault by default. Agents change the cwd to `vault/Agents/{id}/`. Claude CLI loads CLAUDE.md walking up the hierarchy, so:
-- Normal session: `vault/CLAUDE.md` (primary) + this file (parent)
-- Active agent: `Agents/{id}/CLAUDE.md` + `vault/CLAUDE.md` + this file
+**Default workspace (v3.1):** `vault/main/` — the bot operates as the Main agent by default. Every session has an explicit `agent` string (defaults to `"main"`) and the cwd is always `vault/<agent>/`. Claude CLI loads CLAUDE.md walking up the hierarchy, so:
+- Main session: `vault/main/CLAUDE.md` + `vault/CLAUDE.md` (universal rules) + this file
+- Named agent (e.g. crypto-bro): `vault/crypto-bro/CLAUDE.md` + `vault/CLAUDE.md` + this file
+
+**v3.1 flat per-agent vault layout — agents live directly under the vault root:**
+
+```
+vault/
+├── CLAUDE.md        # universal rules (frontmatter, graph, linking) + wikilinks to each agent-info
+├── README.md        # root hub
+├── Tooling.md       # shared
+├── main/
+│   ├── agent-info.md   # metadata (frontmatter) + hub wikilinks (body)
+│   ├── CLAUDE.md       # personality/instructions (not a graph node)
+│   ├── Skills/, Routines/, Journal/, Reactions/, Lessons/, Notes/, workspace/
+├── crypto-bro/
+│   └── ... same structure (private to crypto-bro)
+└── parmeirense/
+    └── ...
+```
+
+**Isolamento total:** there is no inheritance between agents. When a session is on crypto-bro, only `crypto-bro/Skills/`, `Routines/`, `Journal/`, etc. are discoverable. To share a skill with another agent, copy the file explicitly.
+
+**Agent detection.** A top-level directory counts as an agent if and only if it contains `agent-info.md`. That's the single source of truth — `iter_agent_ids()` on the Python side and `iterAgentIds()` on the Swift side both use this rule. Reserved vault names (`README.md`, `CLAUDE.md`, `Tooling.md`, `Images`, `.graphs`, `.obsidian`) are never treated as agents.
+
+**`agent-info.md`** combines two roles the old layout split across two files:
+- **Frontmatter**: metadata (`name`, `icon`, `model`, `description`, optional `chat_id`/`thread_id`, etc.). Replaces the legacy `agent.md`.
+- **Body**: wikilinks `[[Skills]]`, `[[Routines]]`, `[[Journal]]`, `[[Reactions]]`, `[[Lessons]]`, `[[Notes]]`. Replaces the legacy `<id>.md` graph hub. These wikilinks resolve (via the per-agent resolver in `scripts/vault-graph-builder.py`) to the agent's own sub-indexes, keeping the Obsidian graph a single connected tree: `README → CLAUDE → <agent>/agent-info → <sub-index> → leaves`.
 
 ## Configuration
 
@@ -70,7 +95,7 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager (macOS app).
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Telegram bot token from @BotFather |
 | `TELEGRAM_CHAT_ID` | Yes | — | Authorized Telegram chat ID |
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI binary |
-| `CLAUDE_WORKSPACE` | No | `vault/` | Working directory for Claude sessions |
+| `CLAUDE_WORKSPACE` | No | `vault/main/` | Working directory for Main sessions (named agents override this with their own folder) |
 
 **Edited via:** ClaudeBotManager → Settings, or directly in the file.
 
@@ -225,6 +250,23 @@ Commit immediately after:
 - Changes to CLAUDE.md (root or vault)
 - Changes to configuration (`.env`, plist, `settings.local.json`)
 
+## Migration to v3.1 (flat per-agent layout)
+
+Existing users upgrading from any earlier version (pre-v3 legacy or the v3.0 `Agents/` wrapper) run the same one-shot migration script:
+
+```bash
+python3 scripts/migrate_vault_per_agent.py --dry-run   # preview
+python3 scripts/migrate_vault_per_agent.py             # live
+```
+
+The live run creates a timestamped backup at `vault.backup-YYYYMMDD-HHMMSS/`, auto-detects the starting layout (`legacy`, `v30`, `v31`, or `fresh`), and applies the right transform:
+
+- **legacy**: moves `vault/Skills/*`, `vault/Routines/*`, `vault/Journal/*`, `vault/Reactions/*`, `vault/Lessons/*`, `vault/Notes/*` into `vault/main/`. Routines with `agent: <X>` in frontmatter go to `vault/<X>/Routines/`. Old `Agents/<id>/` wrappers (if present) are unwrapped to `<id>/`.
+- **v30**: unwraps `Agents/<id>/` to `<id>/` and merges `agent.md` + `<id>.md` into `agent-info.md`.
+- **fresh**: seeds `vault/main/` from `templates/main/` (the starter skill/routine set the repo ships).
+
+The script is idempotent: re-running after a successful migration aborts with "vault is already in v3.1 layout". To re-run after a failure, restore from the backup first.
+
 ## Routines
 
 ### Frontmatter fields
@@ -238,7 +280,7 @@ Commit immediately after:
 | `schedule.monthdays` | list | — | Days of month e.g. `[1, 15]` — filter for both clock and interval modes |
 | `schedule.until` | string | — | End date YYYY-MM-DD (optional) |
 | `model` | string | `sonnet` | Model to use |
-| `agent` | string | — | Agent to route execution to |
+| `agent` | string | — | **Legacy in v3.0.** Folder location is the source of truth: `Agents/<id>/Routines/foo.md` implies `agent=id`. The `agent:` frontmatter field is still accepted for backcompat and logged with a warning if it disagrees with the folder. |
 | `enabled` | bool | `true` | Enable/disable the routine |
 | `context` | string | `full` | `minimal` = skip vault system prompt, use only CLAUDE.md |
 | `effort` | string | — | Reasoning effort: `low`, `medium`, or `high` (CLI default if omitted) |
@@ -283,20 +325,21 @@ The bot supports voice responses (Text-to-Speech) via macOS `say` + ffmpeg (OGG 
 
 Voice follows the `HEAR_LOCALE` (default `pt-BR` → Luciana voice). The TTS prompt instructs Claude to respond in the configured language, without emojis, short and conversational. Emojis are removed from audio via `_strip_markdown()`.
 
-## Active Memory (v2.34.0+)
+## Active Memory (v2.34.0+, isolated per-agent in v3.0)
 
 Active Memory is a deterministic pre-reply hook inspired by OpenClaw v2026.4.10. Before each interactive Claude turn, the bot scores non-skill nodes from `vault/.graphs/graph.json` against the user's prompt and appends a compact `## Active Memory` block — with short (≤400 char) file excerpts — to the system prompt. No LLM call, ~50 ms typical, 200 ms hard budget, fail-open.
 
+- **Isolamento total (v3.0):** only nodes whose `source_file` lives under `Agents/<current-agent>/` qualify. A session on `crypto-bro` never sees Main's or `parmeirense`'s notes.
 - **Scope:** interactive chat only. Routines and pipelines with `context: minimal` automatically skip it because they pass `system_prompt=None`.
-- **Excluded node types:** `skill` (already covered by the skill hint helper below) and `history` (churn-y logs).
-- **Per-session toggle:** `/active-memory [on|off|status]` — persists to `sessions.json` via the new `Session.active_memory` field.
+- **Excluded node types:** `skill` (covered by the skill hint helper) and `history` (churn-y logs).
+- **Per-session toggle:** `/active-memory [on|off|status]` — persists to `sessions.json` via the `Session.active_memory` field.
 - **Global toggle:** `ACTIVE_MEMORY_ENABLED = True` constant at the top of `claude-fallback-bot.py`.
 - **Cache:** `_active_memory_graph_cache` dict keyed by absolute graph path, mtime-invalidated so the daily `vault-graph-update` routine transparently refreshes it.
-- **Tests:** `tests/test_active_memory.py` — 13 tests covering keyword matching, skill/history exclusion, node/excerpt caps, frontmatter stripping, cache invalidation, missing-graph fail-open, global/per-session gating, and command registration.
+- **Tests:** `tests/test_active_memory.py` + `tests/test_agent_isolation.py`.
 
-## Graph-based skill hints
+## Graph-based skill hints (isolated per-agent in v3.0)
 
-Separate from Active Memory but complementary: `_select_relevant_skills()` reads the same `vault/.graphs/graph.json` and injects a short `<hint>Relevant skills for this task: …</hint>` prefix into the user prompt on every interactive message. Filters to `type=="skill"` only. Controlled by `SKILL_HINTS_ENABLED = True`. Tests in `tests/test_skill_hints.py`.
+Separate from Active Memory but complementary: `_select_relevant_skills(agent_id)` reads the same `vault/.graphs/graph.json` and injects a short `<hint>Relevant skills for this task: …</hint>` prefix into the user prompt on every interactive message. Filters to nodes whose `source_file` starts with `Agents/<agent_id>/Skills/`. Controlled by `SKILL_HINTS_ENABLED = True`. Tests in `tests/test_skill_hints.py` + `tests/test_agent_isolation.py`.
 
 The two helpers run in sequence inside `_run_claude_prompt()`:
 1. `_find_relevant_skills()` (via `vault_query`) — appends "## Available Skills" block to the system prompt
@@ -305,10 +348,10 @@ The two helpers run in sequence inside `_run_claude_prompt()`:
 
 ## Lessons (compound engineering)
 
-`vault/Lessons/` captures hard-won knowledge so Claude can scan past failures before starting a similar task. Two entry points:
+Each agent owns its own `Lessons/` folder (`Agents/<id>/Lessons/`) so lessons stay scoped to the context that produced them. Two entry points:
 
 - **Automatic:** the session consolidator records lessons when the session detects a resolved bug or clear learning
-- **Manual:** `/lesson <text>` writes `vault/Lessons/manual-YYYY-MM-DD-HHMM.md` with structured frontmatter (`type: lesson`, `status: recorded`)
+- **Manual:** `/lesson <text>` writes `Agents/<current-agent>/Lessons/manual-YYYY-MM-DD-HHMM.md` with structured frontmatter (`type: lesson`, `status: recorded`)
 
 The SYSTEM_PROMPT instructs Claude to scan `Lessons/` before similar tasks. Tests in `tests/test_lessons.py`.
 

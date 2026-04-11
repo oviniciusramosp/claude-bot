@@ -5,8 +5,9 @@ struct Agent: Identifiable, Hashable, Sendable {
     var name: String
     var icon: String        // emoji
     var description: String
-    var personality: String  // kept in agent.md frontmatter for bot routing
+    var personality: String  // kept in agent-<id>.md frontmatter for bot routing
     var model: String       // sonnet | opus | haiku
+    var color: String = "grey"  // graph-view color group: see AGENT_COLOR_PALETTE
     var tags: [String]
     var isDefault: Bool
     var source: String?     // e.g. "openclaw"
@@ -25,6 +26,7 @@ struct Agent: Identifiable, Hashable, Sendable {
     var threadId: String = ""
 
     static let modelOptions = ["sonnet", "opus", "haiku"]
+    static let colorOptions = ["grey", "red", "orange", "yellow", "green", "teal", "blue", "purple"]
 
     // MARK: - CLAUDE.md parsing
 

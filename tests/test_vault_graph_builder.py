@@ -201,44 +201,41 @@ class IsEphemeral(unittest.TestCase):
         self.assertEqual(self.gb.is_ephemeral(p, self.vault), expected, rel)
 
     def test_pipeline_workspace_data_is_ephemeral(self):
-        self._check("Agents/cryptobot/workspace/data/news/collect.md", True)
+        self._check("cryptobot/workspace/data/news/collect.md", True)
 
     def test_workspace_at_any_depth_is_ephemeral(self):
-        self._check("Agents/foo/bar/workspace/x.md", True)
+        self._check("foo/bar/workspace/x.md", True)
 
     def test_reactions_dir_is_ephemeral(self):
-        self._check("Reactions/test-webhook.md", True)
+        # v3.1: reactions live under <agent>/Reactions/ and are runtime config
+        self._check("main/Reactions/test-webhook.md", True)
 
-    def test_daily_journal_root_is_ephemeral(self):
-        self._check("Journal/2026-04-10.md", True)
-
-    def test_daily_journal_agent_is_ephemeral(self):
-        self._check("Agents/parmeirense/Journal/2026-04-10.md", True)
-
-    def test_agent_metadata_is_ephemeral(self):
-        self._check("Agents/parmeirense/agent.md", True)
+    def test_daily_journal_per_agent_is_ephemeral(self):
+        self._check("parmeirense/Journal/2026-04-10.md", True)
 
     def test_agent_claude_md_is_ephemeral(self):
-        self._check("Agents/parmeirense/CLAUDE.md", True)
-
-    def test_keeps_journal_index(self):
-        # Journal.md (the index) is a knowledge node — must NOT be ephemeral
-        self._check("Journal/Journal.md", False)
+        # Each agent's CLAUDE.md is just personality text for Claude CLI.
+        self._check("parmeirense/CLAUDE.md", True)
 
     def test_keeps_root_claude_md(self):
-        # vault/CLAUDE.md (root) is a knowledge node — must NOT be ephemeral
+        # vault/CLAUDE.md is the vault-wide rules hub and carries frontmatter
+        # + wikilinks to each agent's agent-info — it IS a graph node.
         self._check("CLAUDE.md", False)
 
-    def test_keeps_agent_hub(self):
-        # The {id}.md hub IS a graph node
-        self._check("Agents/parmeirense/parmeirense.md", False)
+    def test_keeps_journal_index(self):
+        # agent-journal.md (the per-agent index) is a knowledge node
+        self._check("main/Journal/agent-journal.md", False)
+
+    def test_keeps_agent_info_hub(self):
+        # agent-info.md is the per-agent hub and IS a graph node
+        self._check("parmeirense/agent-info.md", False)
 
     def test_keeps_routine_step(self):
         # Routine step prompts are linked from the parent — keep them
-        self._check("Routines/myname/steps/collect.md", False)
+        self._check("main/Routines/myname/steps/collect.md", False)
 
     def test_keeps_skill(self):
-        self._check("Skills/create-pipeline.md", False)
+        self._check("main/Skills/create-pipeline.md", False)
 
 
 class BuildGraphIgnoresEphemeral(unittest.TestCase):
@@ -263,34 +260,48 @@ class BuildGraphIgnoresEphemeral(unittest.TestCase):
         p.write_text(content, encoding="utf-8")
 
     def test_ephemeral_files_excluded(self):
-        # Knowledge nodes
-        self._write("README.md", '---\ntitle: README\n---\n[[Notes]]')
-        self._write("Notes/Notes.md", '---\ntitle: Notes\n---\n[[my-note]]')
-        self._write("Notes/my-note.md", '---\ntitle: My Note\n---\n[[Notes]]')
-        # Ephemeral files that should be ignored
-        self._write("Journal/2026-04-10.md", '---\ntitle: Journal\n---\n[[Notes]]')
-        self._write("Reactions/webhook.md", '---\ntitle: Webhook\n---\n[[Notes]]')
+        # v3.3 flat layout: agents live directly under the vault root with
+        # `agent-info.md` as the hub and `agent-<folder>.md` as sub-indexes.
+        self._write("README.md", '---\ntitle: README\n---\n[[foo/agent-info|foo]]')
         self._write(
-            "Agents/foo/workspace/data/x/collect.md",
-            '---\ntitle: Collect\n---\n[[Notes]]',
+            "foo/agent-info.md",
+            '---\ntitle: foo\ntype: agent\n---\n[[foo/Notes/agent-notes|Notes]]\n',
         )
-        self._write("Agents/foo/agent.md", '---\ntitle: foo\ntype: agent\n---\n')
-        self._write("Agents/foo/CLAUDE.md", "# foo\n")
+        self._write(
+            "foo/Notes/agent-notes.md",
+            '---\ntitle: Notes\ntype: index\n---\n[[my-note]]\n',
+        )
+        self._write(
+            "foo/Notes/my-note.md",
+            '---\ntitle: My Note\ntype: note\n---\n',
+        )
+        # Ephemeral files that should be ignored
+        self._write(
+            "foo/Journal/2026-04-10.md",
+            '---\ntitle: Journal\n---\n',
+        )
+        self._write(
+            "foo/Reactions/webhook.md",
+            '---\ntitle: Webhook\n---\n',
+        )
+        self._write(
+            "foo/workspace/data/x/collect.md",
+            '---\ntitle: Collect\n---\n',
+        )
+        self._write("foo/CLAUDE.md", "# foo\n")
 
         graph = self.gb.build_graph(self.vault)
         ids = {n["id"] for n in graph["nodes"]}
         # Knowledge nodes present
         self.assertIn("readme", ids)
-        self.assertIn("notes_notes", ids)
-        self.assertIn("notes_my-note", ids)
+        self.assertIn("foo_agent-info", ids)
+        self.assertIn("foo_notes_agent-notes", ids)
+        self.assertIn("foo_notes_my-note", ids)
         # Ephemeral nodes absent
-        self.assertNotIn("journal_2026-04-10", ids)
-        self.assertNotIn("reactions_webhook", ids)
-        self.assertNotIn(
-            "agents_foo_workspace_data_x_collect", ids
-        )
-        self.assertNotIn("agents_foo_agent", ids)
-        self.assertNotIn("agents_foo_claude", ids)
+        self.assertNotIn("foo_journal_2026-04-10", ids)
+        self.assertNotIn("foo_reactions_webhook", ids)
+        self.assertNotIn("foo_workspace_data_x_collect", ids)
+        self.assertNotIn("foo_claude", ids)
 
 
 if __name__ == "__main__":

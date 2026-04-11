@@ -1,5 +1,11 @@
 {
   "alwaysUpdateLinks": true,
   "newFileLocation": "folder",
-  "newFileFolderPath": "Notes"
+  "newFileFolderPath": "Notes",
+  "userIgnoreFilters": [
+    "workspace/",
+    "\\.history/",
+    "\\.activity/",
+    "scripts/"
+  ]
 }

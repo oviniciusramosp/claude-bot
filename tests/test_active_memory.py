@@ -51,7 +51,7 @@ class ActiveMemoryLookupTests(unittest.TestCase):
             {
                 "id": "notes_crypto",
                 "label": "Crypto Strategy",
-                "source_file": "Notes/crypto-strategy.md",
+                "source_file": "main/Notes/crypto-strategy.md",
                 "type": "note",
                 "description": "Durable notes about crypto trading strategies.",
                 "tags": ["crypto", "trading"],
@@ -59,7 +59,7 @@ class ActiveMemoryLookupTests(unittest.TestCase):
             {
                 "id": "routines_update_check",
                 "label": "Update Check",
-                "source_file": "Routines/update-check.md",
+                "source_file": "main/Routines/update-check.md",
                 "type": "routine",
                 "description": "Daily brew and git update check for the bot.",
                 "tags": [],
@@ -75,7 +75,7 @@ class ActiveMemoryLookupTests(unittest.TestCase):
             {
                 "id": "history_log",
                 "label": "History Log",
-                "source_file": "Routines/.history/2026-04.md",
+                "source_file": "main/Routines/.history/2026-04.md",
                 "type": "history",
                 "description": "Churn-y log — should be EXCLUDED.",
                 "tags": [],
@@ -85,18 +85,18 @@ class ActiveMemoryLookupTests(unittest.TestCase):
     def test_matches_note_by_keyword(self) -> None:
         _write_graph(self.vault, self._nodes())
         _write_note(
-            self.vault, "Notes/crypto-strategy.md",
+            self.vault, "main/Notes/crypto-strategy.md",
             "Este é o corpo detalhado da estratégia de crypto — aqui estão as regras e observações.",
             frontmatter={"title": "Crypto Strategy", "type": "note"},
         )
         block = self.bot._active_memory_lookup("Me fale sobre a estratégia de crypto")
         self.assertIsNotNone(block)
         self.assertIn("## Active Memory", block)
-        self.assertIn("Notes/crypto-strategy.md", block)
+        self.assertIn("main/Notes/crypto-strategy.md", block)
         # Skill node must NOT appear — it's covered by _select_relevant_skills
         self.assertNotIn("Skills/example-skill.md", block)
         # History node must NOT appear
-        self.assertNotIn("Routines/.history", block)
+        self.assertNotIn("main/Routines/.history", block)
 
     def test_no_match_returns_none(self) -> None:
         _write_graph(self.vault, self._nodes())
@@ -127,7 +127,7 @@ class ActiveMemoryLookupTests(unittest.TestCase):
         # Five matching note files; cap must limit to ACTIVE_MEMORY_MAX_NODES (3)
         nodes = []
         for i in range(5):
-            rel = f"Notes/note-{i}.md"
+            rel = f"main/Notes/note-{i}.md"
             nodes.append({
                 "id": f"notes_note_{i}",
                 "label": f"Crypto Note {i}",
@@ -147,7 +147,7 @@ class ActiveMemoryLookupTests(unittest.TestCase):
         nodes = [{
             "id": "notes_long",
             "label": "Long Note",
-            "source_file": "Notes/long.md",
+            "source_file": "main/Notes/long.md",
             "type": "note",
             "description": "crypto durable note",
             "tags": ["crypto"],
@@ -155,7 +155,7 @@ class ActiveMemoryLookupTests(unittest.TestCase):
         _write_graph(self.vault, nodes)
         long_body = "crypto " * 2000  # way over the 400 char cap
         _write_note(
-            self.vault, "Notes/long.md", long_body,
+            self.vault, "main/Notes/long.md", long_body,
             frontmatter={"title": "Long Note"},
         )
         block = self.bot._active_memory_lookup("crypto note")
@@ -169,14 +169,14 @@ class ActiveMemoryLookupTests(unittest.TestCase):
         nodes = [{
             "id": "notes_frontmatter",
             "label": "FM Note",
-            "source_file": "Notes/fm.md",
+            "source_file": "main/Notes/fm.md",
             "type": "note",
             "description": "crypto note with frontmatter",
             "tags": ["crypto"],
         }]
         _write_graph(self.vault, nodes)
         _write_note(
-            self.vault, "Notes/fm.md",
+            self.vault, "main/Notes/fm.md",
             "This is the actual body content about crypto markets.",
             frontmatter={"title": "FM Note", "secret_field": "should-not-leak"},
         )
@@ -190,16 +190,16 @@ class ActiveMemoryLookupTests(unittest.TestCase):
         nodes_v1 = [{
             "id": "notes_v1",
             "label": "V1 Note",
-            "source_file": "Notes/v1.md",
+            "source_file": "main/Notes/v1.md",
             "type": "note",
             "description": "crypto v1",
             "tags": [],
         }]
-        _write_note(self.vault, "Notes/v1.md", "body v1")
+        _write_note(self.vault, "main/Notes/v1.md", "body v1")
         graph_path = _write_graph(self.vault, nodes_v1)
         block1 = self.bot._active_memory_lookup("crypto v1")
         self.assertIsNotNone(block1)
-        self.assertIn("Notes/v1.md", block1)
+        self.assertIn("main/Notes/v1.md", block1)
         # Second call with same prompt should hit the cache (no crash, same result)
         block2 = self.bot._active_memory_lookup("crypto v1")
         self.assertEqual(block1, block2)
@@ -208,19 +208,19 @@ class ActiveMemoryLookupTests(unittest.TestCase):
         nodes_v2 = [{
             "id": "notes_v2",
             "label": "V2 Note",
-            "source_file": "Notes/v2.md",
+            "source_file": "main/Notes/v2.md",
             "type": "note",
             "description": "crypto v2",
             "tags": [],
         }]
-        _write_note(self.vault, "Notes/v2.md", "body v2")
+        _write_note(self.vault, "main/Notes/v2.md", "body v2")
         _write_graph(self.vault, nodes_v2)
         # Force mtime to advance so cache invalidates even on fast filesystems
         os.utime(graph_path, (graph_path.stat().st_atime, graph_path.stat().st_mtime + 10))
         block3 = self.bot._active_memory_lookup("crypto v2")
         self.assertIsNotNone(block3)
-        self.assertIn("Notes/v2.md", block3)
-        self.assertNotIn("Notes/v1.md", block3)
+        self.assertIn("main/Notes/v2.md", block3)
+        self.assertNotIn("main/Notes/v1.md", block3)
 
 
 class ActiveMemoryCommandTests(unittest.TestCase):

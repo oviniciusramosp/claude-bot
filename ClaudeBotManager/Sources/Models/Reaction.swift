@@ -28,6 +28,10 @@ struct Reaction: Identifiable, Hashable, Sendable {
     var forwardTemplate: String     // may contain {{key}} or {{raw}}
     var agentId: String?            // overrides routine's agent for forward target
 
+    /// Owning agent id (v3.0 per-agent vault layout). Defaults to "main".
+    /// Distinct from `agentId` (which is the forward/action target agent).
+    var ownerAgentId: String = "main"
+
     // Body (free-form notes)
     var body: String
 
@@ -76,7 +80,7 @@ struct Reaction: Identifiable, Hashable, Sendable {
         return parts.joined(separator: " + ")
     }
 
-    static func newTemplate(id: String = "") -> Reaction {
+    static func newTemplate(id: String = "", ownerAgentId: String = "main") -> Reaction {
         let today = {
             let f = DateFormatter()
             f.dateFormat = "yyyy-MM-dd"
@@ -97,6 +101,7 @@ struct Reaction: Identifiable, Hashable, Sendable {
             forward: true,
             forwardTemplate: "{{raw}}",
             agentId: nil,
+            ownerAgentId: ownerAgentId,
             body: "",
             token: nil,
             hmacSecret: nil

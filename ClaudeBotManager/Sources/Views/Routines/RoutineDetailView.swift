@@ -72,7 +72,7 @@ struct RoutineDetailView: View {
         .confirmationDialog("Move to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) {
                 Task {
-                    try? await appState.deleteRoutine(id: routine.id)
+                    try? await appState.deleteRoutine(routine)
                     dismiss()
                 }
             }
@@ -83,7 +83,9 @@ struct RoutineDetailView: View {
             history = await appState.routineHistory(id: routine.id)
             if routine.isPipeline && routine.pipelineStepDefs.isEmpty {
                 routine.pipelineStepDefs = await appState.loadPipelineStepDefs(
-                    routineId: routine.id, promptBody: routine.promptBody)
+                    routineId: routine.id,
+                    promptBody: routine.promptBody,
+                    ownerAgentId: routine.ownerAgentId)
             }
         }
     }

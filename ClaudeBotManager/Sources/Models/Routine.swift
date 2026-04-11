@@ -17,6 +17,11 @@ struct Routine: Identifiable, Hashable, Sendable {
     var notify: String = "final"         // pipeline notify mode: final | all | summary | none
     var minimalContext: Bool = false      // true = skip vault system prompt, use only CLAUDE.md
     var pipelineStepDefs: [PipelineStepDef] = []  // step definitions for UI editing
+    /// Owning agent id (v3.5 flat per-agent vault layout). Defaults to "main".
+    /// This determines where the routine file lives on disk:
+    /// `vault/<ownerAgentId>/Routines/<id>.md`. It is separate from
+    /// `agentId` which is the execution-time routing target (legacy field).
+    var ownerAgentId: String = "main"
 
     struct Schedule: Hashable, Sendable {
         var times: [String]       // ["HH:MM", ...] — used in clock mode

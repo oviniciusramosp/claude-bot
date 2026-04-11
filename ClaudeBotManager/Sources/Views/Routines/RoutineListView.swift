@@ -5,6 +5,8 @@ struct RoutineListView: View {
     @State private var showCreateSheet = false
     @State private var selectedRoutine: Routine? = nil
     @State private var searchText: String = ""
+    /// Owner-agent filter. "__all__" shows everything; otherwise filters by ownerAgentId.
+    @State private var agentFilter: String = "__all__"
 
     private var search: VaultSearch { VaultSearch(searchText) }
 
@@ -12,11 +14,18 @@ struct RoutineListView: View {
         routines.sorted { ($0.schedule.times.first ?? "99:99") < ($1.schedule.times.first ?? "99:99") }
     }
 
+    /// Routines after applying both the agent filter and the search filter.
+    private var filteredRoutines: [Routine] {
+        appState.routines.filter { r in
+            (agentFilter == "__all__" || r.ownerAgentId == agentFilter) && search.matches(r)
+        }
+    }
+
     private var botRoutines: [Routine] {
-        sorted(appState.routines.filter { $0.isBuiltIn && search.matches($0) })
+        sorted(filteredRoutines.filter { $0.isBuiltIn })
     }
     private var myRoutines: [Routine] {
-        sorted(appState.routines.filter { !$0.isBuiltIn && search.matches($0) })
+        sorted(filteredRoutines.filter { !$0.isBuiltIn })
     }
 
     private var hasFilteredResults: Bool { !botRoutines.isEmpty || !myRoutines.isEmpty }
@@ -24,13 +33,15 @@ struct RoutineListView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: Spacing.xl) {
+                AgentFilterBar(selection: $agentFilter)
+
                 if appState.routines.isEmpty {
                     EmptyStateView(
                         symbol: "clock.arrow.2.circlepath",
                         title: "No Routines",
                         subtitle: "Create a routine to schedule automated tasks."
                     )
-                } else if !hasFilteredResults && !search.isEmpty {
+                } else if !hasFilteredResults {
                     EmptyStateView(
                         symbol: "magnifyingglass",
                         title: "No matches",
@@ -67,7 +78,8 @@ struct RoutineListView: View {
             RoutineDetailView(routine: routine)
         }
         .sheet(isPresented: $showCreateSheet) {
-            RoutineFormSheet()
+            // Pre-select the filter agent for new routine creation (defaults to "main")
+            RoutineFormSheet(initialOwnerAgentId: agentFilter == "__all__" ? "main" : agentFilter)
         }
     }
 
@@ -402,7 +414,7 @@ struct RoutineRow: View {
         if !routine.isBuiltIn {
             Divider()
             Button(role: .destructive) {
-                Task { try? await appState.deleteRoutine(id: routine.id) }
+                Task { try? await appState.deleteRoutine(routine) }
             } label: {
                 Label("Move to Trash", systemImage: "trash")
             }
@@ -514,9 +526,13 @@ struct RoutineRow: View {
                         } else if outType == "none" {
                             // No output badge
                         } else if outType != "file" {
-                            // Vault path
+                            // Vault path — v3.5: resolved against the owning agent's
+                            // folder (`vault/<owner>/<outType>/`), not the legacy
+                            // top-level `vault/<outType>/`.
                             Button {
-                                let vaultPath = (NSHomeDirectory() as NSString).appendingPathComponent("claude-bot/vault/\(outType)")
+                                let owner = routine.ownerAgentId.isEmpty ? "main" : routine.ownerAgentId
+                                let vaultPath = (NSHomeDirectory() as NSString)
+                                    .appendingPathComponent("claude-bot/vault/\(owner)/\(outType)")
                                 NSWorkspace.shared.open(URL(fileURLWithPath: vaultPath))
                             } label: {
                                 HStack(spacing: 2) {

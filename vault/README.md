@@ -1,25 +1,29 @@
 ---
 title: Claude Bot Vault
-description: Central vault index. Root graph hub connecting all areas.
+description: Root of the per-agent vault. Single bridge that connects every agent through path-qualified wikilinks.
 type: index
 created: 2026-04-07
-updated: 2026-04-09
-tags: [index, vault]
+updated: 2026-04-11
+tags: [index, vault, root]
 ---
 
 # Claude Bot Vault
 
-Persistent knowledge graph. Powered by Claude Code, navigable in Obsidian.
+Persistent knowledge graph for the bot. Powered by Claude Code, navigable in Obsidian.
 
-## Areas
+The vault is organized as **one tree per agent**, with this README as the single bridge between agent groups. Each agent owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes — isolamento total, no inheritance.
 
-- [[Journal]] — Daily log of conversations, decisions, and actions
-- [[Notes]] — Durable, incremental knowledge
-- [[Skills]] — Recurring and structured tasks
-- [[Routines]] — Scheduled routines with automatic execution
-- [[Agents]] — Specialized agents with personality and own journal
-- [[Tooling]] — Tool preferences by task type
+## Shared
+
+- [[CLAUDE]] — Universal vault rules (frontmatter, graph, linking)
+- [[Tooling]] — Tool preferences shared across all agents
+
+## Agents
+
+- [[agent-main]]
+- [[agent-crypto-bro]]
+- [[agent-parmeirense]]
 
 ## Credentials
 
-- `.env` — API keys and tokens (gitignored)
+`.env` at the vault root holds shared API keys (gitignored).

@@ -75,17 +75,24 @@ def _parse_directives(raw: str) -> Dict[str, str]:
 
 def _format_row(template: str, f: VaultFile) -> str:
     """Substitute placeholders in `template` with frontmatter values from `f`."""
+    rel = f.rel_path
+    # `link` = vault-root-absolute path WITHOUT the `.md` extension. Use as
+    # `[[{link}|{stem}]]` to write unambiguous wikilinks that Obsidian's
+    # resolver always points at the right file (no shortest-path collisions
+    # when multiple agents have files with the same basename).
+    link = rel[:-3] if rel.endswith(".md") else rel
     synthetic = {
         "stem": f.path.stem,
         "title": f.title,
         "description": f.description,
         "tags": ", ".join(f.tags),
-        "path": f.rel_path,
+        "path": rel,
+        "link": link,
         "type": f.type,
         "node_id": f.node_id,
         # `parent` = name of the directory containing the file. Useful for
-        # files like Agents/{id}/agent.md where the link target is `{id}`,
-        # not `agent`. Falls back to "" at the vault root.
+        # files like <agent>/agent-info.md where the link target is `{agent}`,
+        # not `agent-info`. Falls back to "" at the vault root.
         "parent": f.path.parent.name if f.path.parent.name else "",
     }
 
@@ -133,15 +140,27 @@ def _sort_files(files: List[VaultFile], sort_spec: str) -> List[VaultFile]:
 
 
 def _render_block(vi: VaultIndex, directives: Dict[str, str]) -> str:
-    """Render a single marker block from directives + vault index."""
+    """Render a single marker block from directives + vault index.
+
+    The ``scope`` directive is an ergonomic shortcut for
+    ``path__startswith=<value>`` — the v3.1 per-agent index files use it to
+    restrict listings to a single ``<agent>/<sub>/`` folder, e.g.
+
+        <!-- vault-query:start filter="type=skill" scope="main/Skills" sort="title" -->
+    """
     filter_expr = directives.get("filter", "")
     fmt = directives.get("format", "- [[{stem}]] — {description}")
     sort_spec = directives.get("sort", "title")
     group_by = directives.get("group_by")
     empty_text = directives.get("empty", "_(no matches)_")
     limit = int(directives.get("limit", "0") or 0)
+    scope = directives.get("scope", "").strip()
 
     filters = parse_filter_expression(filter_expr) if filter_expr else {}
+    if scope:
+        # Normalize: trailing / is allowed but we match against raw rel_path
+        # which is posix style without the leading slash.
+        filters["path__startswith"] = scope.rstrip("/") + "/"
     files = vi.find(**filters)
     files = _sort_files(files, sort_spec)
     if limit:
@@ -175,9 +194,37 @@ def _render_block(vi: VaultIndex, directives: Dict[str, str]) -> str:
         return "\n".join(_format_row(fmt, f) for f in files)
 
 
+def _build_fenced_code_spans(text: str) -> List[Tuple[int, int]]:
+    """Return (start, end) byte spans of fenced code blocks (```...```).
+
+    Markers inside these spans are documentation examples and must NOT be
+    regenerated — they're literal sample text that should stay as written.
+    """
+    spans: List[Tuple[int, int]] = []
+    fence_re = re.compile(r"^```", re.MULTILINE)
+    open_pos: Optional[int] = None
+    for m in fence_re.finditer(text):
+        if open_pos is None:
+            open_pos = m.start()
+        else:
+            spans.append((open_pos, m.end()))
+            open_pos = None
+    return spans
+
+
+def _is_inside_span(pos: int, spans: List[Tuple[int, int]]) -> bool:
+    return any(s <= pos < e for s, e in spans)
+
+
 def regenerate_file(filepath: Path, vi: VaultIndex) -> Tuple[bool, str]:
-    """Regenerate marker blocks in a single file. Returns (changed, new_text)."""
+    """Regenerate marker blocks in a single file. Returns (changed, new_text).
+
+    Markers inside fenced code blocks (```...```) are skipped — they're
+    documentation examples (e.g. inside the create-agent skill) and must not
+    be auto-populated.
+    """
     original = filepath.read_text(encoding="utf-8")
+    code_spans = _build_fenced_code_spans(original)
     out: List[str] = []
     pos = 0
     changed = False
@@ -186,6 +233,11 @@ def regenerate_file(filepath: Path, vi: VaultIndex) -> Tuple[bool, str]:
         if not start_match:
             out.append(original[pos:])
             break
+        # Skip markers inside fenced code blocks (documentation examples).
+        if _is_inside_span(start_match.start(), code_spans):
+            out.append(original[pos : start_match.end()])
+            pos = start_match.end()
+            continue
         # Append everything up to the start marker (inclusive)
         out.append(original[pos : start_match.end()])
         end_idx = original.find(MARKER_END, start_match.end())

@@ -36,7 +36,7 @@ class HotCacheReadWriteTest(unittest.TestCase):
     def test_write_then_read_round_trip(self):
         body = "## Active topics\n- topic 1\n- topic 2\n\n## Recent decisions\n- d1"
         self.bot._write_agent_context("crypto-bro", body)
-        path = self.vault / "Agents" / "crypto-bro" / ".context.md"
+        path = self.vault / "crypto-bro" / ".context.md"
         self.assertTrue(path.is_file())
         text = path.read_text()
         self.assertIn("type: context", text)
@@ -49,7 +49,7 @@ class HotCacheReadWriteTest(unittest.TestCase):
     def test_write_preserves_created_date(self):
         body1 = "## Active topics\n- old"
         self.bot._write_agent_context("crypto-bro", body1)
-        path = self.vault / "Agents" / "crypto-bro" / ".context.md"
+        path = self.vault / "crypto-bro" / ".context.md"
         first_text = path.read_text()
         # Manually patch the created date to a known older value
         first_text = first_text.replace("created: ", "created: 2020-01-01\n# original: ")
@@ -198,7 +198,7 @@ class FrozenContextInjectionTest(unittest.TestCase):
         self.home.mkdir()
         self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
         # Seed an agent CLAUDE.md and .context.md
-        agent_dir = self.vault / "Agents" / "alpha"
+        agent_dir = self.vault / "alpha"
         agent_dir.mkdir(parents=True)
         (agent_dir / "CLAUDE.md").write_text("# Alpha\n\nInstructions.\n")
         self.bot._write_agent_context("alpha", "## Active topics\n- the test scenario")

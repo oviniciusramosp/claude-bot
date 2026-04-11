@@ -80,21 +80,55 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     module.REACTION_SECRETS_FILE = data_dir / "reaction-secrets.json"
     if vault_dir is not None:
         module.VAULT_DIR = vault_dir
-        module.ROUTINES_DIR = vault_dir / "Routines"
-        module.AGENTS_DIR = vault_dir / "Agents"
-        module.LESSONS_DIR = vault_dir / "Lessons"
-        module.REACTIONS_DIR = vault_dir / "Reactions"
-        module.ACTIVITY_LOG_DIR = vault_dir / "Journal" / ".activity"
-        module.CLAUDE_WORKSPACE = str(vault_dir)
-        for d in (
-            vault_dir,
-            vault_dir / "Routines",
-            vault_dir / "Agents",
-            vault_dir / "Lessons",
-            vault_dir / "Reactions",
-            vault_dir / "Journal" / ".activity",
-        ):
-            d.mkdir(parents=True, exist_ok=True)
+        # Default workspace points at <vault>/main/ — in v3.1 every agent
+        # (including Main) lives directly at the vault root.
+        module.CLAUDE_WORKSPACE = str(vault_dir / "main")
+        ensure_agent_layout(vault_dir, "main")
+        # Test-only shims: legacy tests wrote fixtures to ``bot.ROUTINES_DIR``,
+        # ``bot.LESSONS_DIR``, etc. Those module-level constants were removed
+        # in v3.0 (replaced by per-agent helper functions); keeping the shims
+        # here lets the existing test suite drop files into Main's folders
+        # without rewriting every fixture. New tests should use the per-agent
+        # helper functions directly.
+        main_base = vault_dir / "main"
+        module.ROUTINES_DIR = main_base / "Routines"
+        module.LESSONS_DIR = main_base / "Lessons"
+        module.REACTIONS_DIR = main_base / "Reactions"
+        module.ACTIVITY_LOG_DIR = main_base / "Journal" / ".activity"
     for d in (data_dir, data_dir / "routines-state"):
         d.mkdir(parents=True, exist_ok=True)
     return module
+
+
+def ensure_agent_layout(vault_dir: Path, agent_id: str = "main") -> Path:
+    """Create the v3.4 flat per-agent folder skeleton used by most tests.
+
+    Writes a minimal ``agent-<id>.md`` hub so ``iter_agent_ids()`` picks up
+    the agent. Returns ``<vault>/<agent_id>/``. Idempotent.
+    """
+    base = vault_dir / agent_id
+    for sub in ("Skills", "Routines", "Journal", "Reactions", "Lessons", "Notes", ".workspace"):
+        (base / sub).mkdir(parents=True, exist_ok=True)
+    (base / "Journal" / ".activity").mkdir(parents=True, exist_ok=True)
+    hub = base / f"agent-{agent_id}.md"
+    if not hub.is_file():
+        hub.write_text(
+            "---\n"
+            f"title: {agent_id}\n"
+            f"description: Test agent {agent_id}\n"
+            "type: agent\n"
+            f"name: {agent_id}\n"
+            "model: sonnet\n"
+            'icon: "🤖"\n'
+            "color: grey\n"
+            "---\n\n"
+            f"- [[{agent_id}/Skills/agent-skills|Skills]]\n"
+            f"- [[{agent_id}/Routines/agent-routines|Routines]]\n"
+            f"- [[{agent_id}/Journal/agent-journal|Journal]]\n"
+            f"- [[{agent_id}/Reactions/agent-reactions|Reactions]]\n"
+            f"- [[{agent_id}/Lessons/agent-lessons|Lessons]]\n"
+            f"- [[{agent_id}/Notes/agent-notes|Notes]]\n"
+            f"- [[{agent_id}/CLAUDE|CLAUDE]]\n",
+            encoding="utf-8",
+        )
+    return base

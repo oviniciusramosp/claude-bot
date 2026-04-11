@@ -155,7 +155,7 @@ class FrontmatterRepair(unittest.TestCase):
         agent_journal = self.ja.get_journal_path(self.tmpdir, "myagent", "2026-04-10")
         self.assertEqual(
             agent_journal,
-            self.tmpdir / "Agents" / "myagent" / "Journal" / "2026-04-10.md",
+            self.tmpdir / "myagent" / "Journal" / "2026-04-10.md",
         )
 
 
@@ -232,8 +232,8 @@ class FullAuditReport(unittest.TestCase):
         actions = self.ja.fix_all(self.vault, "2026-04-10", entries)
         self.assertEqual(len(actions), 1)
         self.assertIn("CREATED", actions[0])
-        # And the file is now there + valid
-        journal = self.vault / "Journal" / "2026-04-10.md"
+        # v3.1: Main's journal lives directly under main/Journal/.
+        journal = self.vault / "main" / "Journal" / "2026-04-10.md"
         self.assertTrue(journal.exists())
         ok, _ = self.ja.validate_frontmatter(journal.read_text())
         self.assertTrue(ok)

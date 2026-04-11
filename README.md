@@ -24,7 +24,7 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Live streaming** -- watch Claude's response build in real-time as Telegram message edits
 - **Status reactions** -- emoji reactions on your message show what Claude is doing (thinking, coding, writing)
 - **Model switching** -- switch between Sonnet, Opus, and Haiku mid-conversation
-- **Knowledge vault** -- Obsidian-compatible vault with daily journal, notes, skills, routines, and lessons
+- **Per-agent vault** (v3.0) -- Obsidian-compatible vault where every agent owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes under `Agents/<id>/`. Isolamento total — no inheritance across agents.
 - **Knowledge graph** -- lightweight deterministic graph (`vault/.graphs/graph.json`) rebuilt daily; powers skill hints and Active Memory
 - **Active Memory** -- before every interactive message, the bot scores vault nodes against your prompt and auto-injects a compact context block (no LLM cost, ~50ms)
 - **Compound engineering (Lessons)** -- `/lesson` captures hard-won knowledge so Claude scans past failures before similar tasks

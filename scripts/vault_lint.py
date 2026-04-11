@@ -50,8 +50,12 @@ from vault_query import VaultFile, VaultIndex, load_vault  # noqa: E402
 
 REQUIRED_FRONTMATTER_KEYS = ("title", "description", "type", "created", "updated", "tags")
 
-# Files that legitimately have no frontmatter (or only partial)
-FRONTMATTER_EXEMPT_NAMES = {"CLAUDE.md", "agent.md"}
+# Files that legitimately have no frontmatter. CLAUDE.md (both the vault-wide
+# rules file and each agent's personality file) is consumed directly by the
+# Claude CLI and is not a graph node. agent-info.md in v3.1 DOES have a full
+# frontmatter (it holds the agent metadata), so it is NOT exempt — it will be
+# validated like any other knowledge node.
+FRONTMATTER_EXEMPT_NAMES = {"CLAUDE.md"}
 
 # Folders whose contents we don't lint (purely runtime data, not knowledge).
 # Mirrors vault-graph-builder.is_ephemeral so the linter and the graph stay
@@ -61,8 +65,9 @@ EXCLUDED_LINT_DIRS = {
     ".obsidian",
     ".claude",
     "__pycache__",
-    "workspace",
-    "Reactions",  # webhook config, see vault/CLAUDE.md "Files that are NOT graph nodes"
+    ".workspace",  # v3.5: pipeline runtime data (dot-prefixed so Obsidian hides it)
+    "workspace",   # pre-v3.5 fallback — still ignored by the linter
+    "Reactions",   # webhook config, see vault/CLAUDE.md "Files that are NOT graph nodes"
 }
 
 
@@ -126,14 +131,39 @@ def _is_lintable(f: VaultFile) -> bool:
 
 
 def _is_step_file(f: VaultFile) -> bool:
-    """Pipeline step files live under Routines/{pipeline}/steps/*.md."""
+    """Pipeline step files live under ``<agent>/Routines/{pipeline}/steps/*.md``.
+
+    Accepts two layouts as a safety net during migrations:
+    - v3.1 flat layout:    <agent>/Routines/<pipeline>/steps/<step>.md
+    - v3.0 wrapped layout: Agents/<agent>/Routines/<pipeline>/steps/<step>.md
+    - Legacy (pre-v3):     Routines/<pipeline>/steps/<step>.md
+    """
     parts = Path(f.rel_path).parts
-    return (
+    if not parts or not parts[-1].endswith(".md"):
+        return False
+    # v3.1 flat: <agent>/Routines/<pipeline>/steps/<step>.md
+    if (
+        len(parts) >= 5
+        and parts[1] == "Routines"
+        and parts[3] == "steps"
+    ):
+        return True
+    # v3.0 wrapped: Agents/<agent>/Routines/<pipeline>/steps/<step>.md
+    if (
+        len(parts) >= 6
+        and parts[0] == "Agents"
+        and parts[2] == "Routines"
+        and parts[4] == "steps"
+    ):
+        return True
+    # Pre-v3 legacy: Routines/<pipeline>/steps/<step>.md
+    if (
         len(parts) >= 4
         and parts[0] == "Routines"
         and parts[2] == "steps"
-        and parts[-1].endswith(".md")
-    )
+    ):
+        return True
+    return False
 
 
 def _is_daily_journal(f: VaultFile) -> bool:
@@ -162,8 +192,24 @@ def _resolve_wikilink_target(link: str, source_dir: Path, vault_dir: Path) -> Op
         source_dir / link / f"{link}.md",
         vault_dir / f"{link}.md",
     ]
-    for subdir in ("Notes", "Skills", "Routines", "Agents", "Journal"):
-        candidates.append(vault_dir / subdir / f"{link}.md")
+    # v3.4: prefer same-agent sibling subfolders first (isolamento total).
+    try:
+        rel_parts = source_dir.relative_to(vault_dir).parts
+        agent_root: Optional[Path] = None
+        if rel_parts:
+            first_candidate = vault_dir / rel_parts[0]
+            if (first_candidate / f"agent-{rel_parts[0]}.md").is_file():
+                agent_root = first_candidate
+        if agent_root is not None:
+            for subdir in ("Skills", "Routines", "Journal", "Notes",
+                           "Reactions", "Lessons", ".workspace"):
+                candidates.append(agent_root / subdir / f"{link}.md")
+            candidates.append(agent_root / f"{link}.md")
+    except ValueError:
+        pass
+    # Path-qualified wikilinks resolve against the vault root.
+    if "/" in link:
+        candidates.append(vault_dir / f"{link}.md")
     for c in candidates:
         if c.exists():
             return c

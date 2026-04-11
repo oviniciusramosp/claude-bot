@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Journal audit — compares vault activity log with journal entries to find gaps.
 
-Reads vault/Journal/.activity/YYYY-MM-DD.jsonl (written by the bot) and compares
-with journal files to identify uncovered sessions and frontmatter issues.
+Reads each agent's ``Agents/<id>/Journal/.activity/YYYY-MM-DD.jsonl`` (written
+by the bot) and compares with journal files to identify uncovered sessions
+and frontmatter issues.
 
 Usage:
     python3 scripts/journal-audit.py [--date YYYY-MM-DD] [--fix]
@@ -36,20 +37,65 @@ def get_vault_dir() -> Path:
 # ---------------------------------------------------------------------------
 
 
-def load_activity_log(vault: Path, target_date: str) -> list[dict]:
-    """Read activity JSONL for the given date."""
-    path = vault / "Journal" / ".activity" / f"{target_date}.jsonl"
-    if not path.exists():
+def _iter_agent_dirs(vault: Path) -> list[Path]:
+    """Yield every direct-child agent directory under the vault.
+
+    In the v3.4 layout agents live directly under the vault root — an agent
+    is any subdirectory containing an ``agent-<dirname>.md`` hub file.
+    """
+    if not vault.is_dir():
         return []
-    entries = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+    out: list[Path] = []
+    for entry in sorted(vault.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if (entry / f"agent-{entry.name}.md").is_file():
+            out.append(entry)
+    return out
+
+
+def load_activity_log(vault: Path, target_date: str) -> list[dict]:
+    """Read activity JSONL for the given date from every agent's journal.
+
+    v3.1: the activity log is per-agent under
+    ``<agent>/Journal/.activity/YYYY-MM-DD.jsonl``. Walks every agent directly
+    under the vault root and concatenates — entries already carry their
+    ``agent`` field so we don't lose attribution when merging.
+
+    Falls back to the v3.0 ``Agents/<id>/Journal/.activity/`` path and the
+    pre-v3 top-level ``Journal/.activity/`` path so an in-progress migration
+    still surfaces data.
+    """
+    entries: list[dict] = []
+    paths: list[Path] = []
+    # v3.1: agents directly under the vault root.
+    for agent_dir in _iter_agent_dirs(vault):
+        candidate = agent_dir / "Journal" / ".activity" / f"{target_date}.jsonl"
+        if candidate.exists():
+            paths.append(candidate)
+    # v3.0 fallback: Agents/<id>/.
+    agents_root = vault / "Agents"
+    if agents_root.is_dir():
+        for agent_dir in sorted(agents_root.iterdir()):
+            if not agent_dir.is_dir():
+                continue
+            candidate = agent_dir / "Journal" / ".activity" / f"{target_date}.jsonl"
+            if candidate.exists():
+                paths.append(candidate)
+    # Pre-v3 fallback.
+    legacy = vault / "Journal" / ".activity" / f"{target_date}.jsonl"
+    if legacy.exists():
+        paths.append(legacy)
+
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
     return entries
 
 
@@ -64,10 +110,8 @@ def discover_agents(entries: list[dict]) -> set[str]:
 
 
 def get_journal_path(vault: Path, agent: str, target_date: str) -> Path:
-    """Return journal file path for an agent."""
-    if agent == "main":
-        return vault / "Journal" / f"{target_date}.md"
-    return vault / "Agents" / agent / "Journal" / f"{target_date}.md"
+    """Return journal file path for an agent under the v3.1 flat layout."""
+    return vault / (agent or "main") / "Journal" / f"{target_date}.md"
 
 
 JOURNAL_TEMPLATE = """\

@@ -103,7 +103,7 @@ class RoutineStateManagerBasic(unittest.TestCase):
 
 class HistoryRollupTest(unittest.TestCase):
     """Verify that completed/failed/cancelled status transitions append to
-    the monthly history rollup at vault/Routines/.history/YYYY-MM.md."""
+    the monthly history rollup at Agents/<owner>/Routines/.history/YYYY-MM.md."""
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -112,8 +112,9 @@ class HistoryRollupTest(unittest.TestCase):
         self.vault = self.tmp / "vault"
         self.home.mkdir()
         self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
-        # Seed a routine file so the rollup can pick up frontmatter
-        routines_dir = self.vault / "Routines"
+        # Seed a routine file so the rollup can pick up frontmatter.
+        # The routine lives under Main — `_find_routine_file` will resolve it.
+        routines_dir = self.bot.ROUTINES_DIR  # test shim = Agents/main/Routines
         routines_dir.mkdir(parents=True, exist_ok=True)
         (routines_dir / "alpha.md").write_text(
             """---
@@ -127,7 +128,7 @@ schedule:
   times: ["09:00"]
   days: ["*"]
 model: sonnet
-agent: alpha-agent
+agent: main
 enabled: true
 ---
 
@@ -135,13 +136,15 @@ Body.
 """,
             encoding="utf-8",
         )
+        # ensure_agent_layout() already wrote the agent-info.md that
+        # iter_agent_ids() looks for — no extra setup needed.
 
     def tearDown(self):
         self._td.cleanup()
 
     def _history_path(self) -> Path:
         month = time.strftime("%Y-%m")
-        return self.vault / "Routines" / ".history" / f"{month}.md"
+        return self.vault / "main" / "Routines" / ".history" / f"{month}.md"
 
     def test_completed_status_appends_record(self):
         sm = self.bot.RoutineStateManager()
@@ -155,7 +158,7 @@ Body.
         self.assertIn("alpha", text)
         self.assertIn("status: completed", text)
         self.assertIn("model: sonnet", text)
-        self.assertIn("agent: alpha-agent", text)
+        self.assertIn("agent: main", text)
 
     def test_failed_status_includes_error(self):
         sm = self.bot.RoutineStateManager()

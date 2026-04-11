@@ -74,17 +74,18 @@ class RecordLessonDraft(unittest.TestCase):
         self.assertIn("truncated", content)
 
     def test_never_raises_on_filesystem_error(self):
-        # Point LESSONS_DIR at a file (not a directory) so mkdir fails
+        # Point the main agent's Lessons folder at a file (not a directory)
+        # so mkdir fails inside record_lesson_draft.
         bogus = self.vault / "not_a_dir.txt"
         bogus.write_text("blocker")
-        original = self.bot.LESSONS_DIR
+        original = self.bot.lessons_dir
         try:
-            self.bot.LESSONS_DIR = bogus
+            self.bot.lessons_dir = lambda agent_id=None: bogus
             result = self.bot.record_lesson_draft("any", "any")
             # Returns None, never raises
             self.assertIsNone(result)
         finally:
-            self.bot.LESSONS_DIR = original
+            self.bot.lessons_dir = original
 
 
 class RecordManualLesson(unittest.TestCase):
@@ -145,8 +146,9 @@ class LessonCommandDispatch(unittest.TestCase):
     def test_lesson_with_text_writes_file(self):
         self.bot._handle_text("/lesson Check auth before long-running jobs")
         last = self._last_send()
-        self.assertIn("vault/Lessons/manual-", last["text"])
-        # Verify a manual- file was created
+        # v3.0: lessons live under Agents/<agent>/Lessons/.
+        self.assertIn("main/Lessons/manual-", last["text"])
+        # Verify a manual- file was created in Main's Lessons folder.
         lessons = list(self.fixture.bot_module.LESSONS_DIR.glob("manual-*.md"))
         self.assertEqual(len(lessons), 1)
         content = lessons[0].read_text(encoding="utf-8")

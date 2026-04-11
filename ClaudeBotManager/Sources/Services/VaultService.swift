@@ -8,37 +8,44 @@ actor VaultService {
         self.vaultURL = URL(fileURLWithPath: vaultPath, isDirectory: true)
     }
 
+    /// v3.3 sub-index naming. Each agent's per-folder index file uses the
+    /// `agent-<folder>` prefix so the LLM treats them as graph hubs and skips
+    /// them when scanning. The bot's loaders filter these names out so the
+    /// indexes never get mistaken for individual items.
+    private static let subIndexFilenames: Set<String> = [
+        "agent-skills.md",
+        "agent-routines.md",
+        "agent-journal.md",
+        "agent-reactions.md",
+        "agent-lessons.md",
+        "agent-notes.md",
+    ]
+
     // MARK: - Agents
 
+    /// v3.4: every agent lives directly under ``vault/<id>/``. An agent is any
+    /// top-level directory containing ``agent-<id>.md`` (the hub file with
+    /// metadata in frontmatter and parent → child wikilinks in the body).
     func loadAgents() throws -> [Agent] {
-        let agentsURL = vaultURL.appending(component: "Agents", directoryHint: .isDirectory)
-        guard fm.fileExists(atPath: agentsURL.path) else { return [] }
-
-        let entries = try fm.contentsOfDirectory(atPath: agentsURL.path)
         var agents: [Agent] = []
-
-        for entry in entries {
-            let agentURL = agentsURL.appending(component: entry, directoryHint: .isDirectory)
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: agentURL.path, isDirectory: &isDir), isDir.boolValue else { continue }
-            guard entry != ".obsidian" else { continue }
-
-            let agentMdURL = agentURL.appending(component: "agent.md")
+        for agentId in iterAgentIds() {
+            let agentURL = agentDirURL(for: agentId)
+            let infoURL = agentURL.appending(component: "agent-\(agentId).md")
             let claudeMdURL = agentURL.appending(component: "CLAUDE.md")
-            guard fm.fileExists(atPath: agentMdURL.path) else { continue }
 
-            let content = try String(contentsOf: agentMdURL, encoding: .utf8)
+            let content = (try? String(contentsOf: infoURL, encoding: .utf8)) ?? ""
             let (fm_data, _) = FrontmatterParser.parse(content)
             let rawClaude = (try? String(contentsOf: claudeMdURL, encoding: .utf8)) ?? ""
             let sections = Agent.parseCLAUDEmd(rawClaude)
 
             let agent = Agent(
-                id: entry,
-                name: fm_data["name"] as? String ?? fm_data["title"] as? String ?? entry,
+                id: agentId,
+                name: fm_data["name"] as? String ?? fm_data["title"] as? String ?? agentId,
                 icon: fm_data["icon"] as? String ?? "🤖",
                 description: fm_data["description"] as? String ?? "",
                 personality: fm_data["personality"] as? String ?? "",
                 model: fm_data["model"] as? String ?? "sonnet",
+                color: fm_data["color"] as? String ?? "grey",
                 tags: fm_data["tags"] as? [String] ?? [],
                 isDefault: fm_data["default"] as? Bool ?? false,
                 source: fm_data["source"] as? String,
@@ -60,23 +67,41 @@ actor VaultService {
     func saveAgent(_ agent: Agent) throws {
         let agentURL = agentDirURL(for: agent.id)
         try fm.createDirectory(at: agentURL, withIntermediateDirectories: true)
-        let journalURL = agentURL.appending(component: "Journal", directoryHint: .isDirectory)
-        if !fm.fileExists(atPath: journalURL.path) {
-            try fm.createDirectory(at: journalURL, withIntermediateDirectories: true)
+
+        // v3.1 flat per-agent vault layout: every agent owns its own copy of
+        // Skills/, Routines/, Reactions/, Lessons/, Notes/, .workspace/, and
+        // Journal/ (with a .activity/ subdir). Isolamento total.
+        //
+        // v3.5: .workspace/ is dot-prefixed so Obsidian's dotfile filter hides
+        // pipeline runtime data from the graph view automatically — no
+        // userIgnoreFilters regex needed.
+        let subdirs = [
+            "Skills", "Routines", "Reactions", "Lessons",
+            "Notes", ".workspace", "Journal", "Journal/.activity",
+        ]
+        for sub in subdirs {
+            let url = agentURL.appending(path: sub, directoryHint: .isDirectory)
+            if !fm.fileExists(atPath: url.path) {
+                try fm.createDirectory(at: url, withIntermediateDirectories: true)
+            }
         }
 
+        // agent-<id>.md — frontmatter carries metadata, body carries the
+        // hub wikilinks that make the agent's subtree reachable from the
+        // Obsidian graph.
         var frontmatter: [String: Any] = [
             "title": agent.name,
             "description": agent.description,
             "type": "agent",
             "created": agent.created,
             "updated": today(),
-            "tags": agent.tags.isEmpty ? ["agent"] : agent.tags,
+            "tags": agent.tags.isEmpty ? ["agent", "hub"] : agent.tags,
             "name": agent.name,
-            "personality": agent.personality,
             "model": agent.model,
             "icon": agent.icon,
-            "default": agent.isDefault
+            "color": agent.color.isEmpty ? "grey" : agent.color,
+            "default": agent.isDefault,
+            "personality": agent.personality
         ]
         if let src = agent.source { frontmatter["source"] = src }
         if let sid = agent.sourceId { frontmatter["source_id"] = sid }
@@ -84,96 +109,132 @@ actor VaultService {
         if !agent.threadId.isEmpty { frontmatter["thread_id"] = Int(agent.threadId) ?? agent.threadId as Any }
 
         let orderedKeys = ["title", "description", "type", "created", "updated", "tags",
-                           "name", "personality", "model", "icon", "default", "chat_id", "thread_id"]
-        let agentMdContent = FrontmatterParser.serialize(frontmatter, orderedKeys: orderedKeys, body: "\n[[Agents]]\n")
-        try agentMdContent.write(to: agentURL.appending(component: "agent.md"), atomically: true, encoding: .utf8)
+                           "name", "model", "icon", "color", "default", "personality",
+                           "chat_id", "thread_id", "source", "source_id"]
+        // v3.3: agent-info points DOWN to its sub-indexes via path-qualified
+        // wikilinks. Each link uses the full vault-relative path so Obsidian's
+        // resolver always picks files from THIS agent (not another agent's
+        // file with the same basename).
+        let hubBody = """
 
-        // CLAUDE.md — structured sections, no frontmatter
+        - [[\(agent.id)/Skills/agent-skills|Skills]]
+        - [[\(agent.id)/Routines/agent-routines|Routines]]
+        - [[\(agent.id)/Journal/agent-journal|Journal]]
+        - [[\(agent.id)/Reactions/agent-reactions|Reactions]]
+        - [[\(agent.id)/Lessons/agent-lessons|Lessons]]
+        - [[\(agent.id)/Notes/agent-notes|Notes]]
+        - [[\(agent.id)/CLAUDE|CLAUDE]]
+
+        """
+        let infoContent = FrontmatterParser.serialize(frontmatter, orderedKeys: orderedKeys, body: hubBody)
+        try infoContent.write(
+            to: agentURL.appending(component: "agent-\(agent.id).md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        // Drop any legacy v3.1/v3.2 hub file from the same dir.
+        let legacyHub = agentURL.appending(component: "agent-info.md")
+        if fm.fileExists(atPath: legacyHub.path) {
+            try? fm.removeItem(at: legacyHub)
+        }
+
+        // CLAUDE.md — structured personality/instructions, no frontmatter.
         try agent.toCLAUDEmd().write(to: agentURL.appending(component: "CLAUDE.md"), atomically: true, encoding: .utf8)
 
-        // {id}.md hub
-        let hubContent = "[[\(agent.id)/CLAUDE|CLAUDE]]\n[[agent]]\n[[\(agent.id)/Journal|Journal]]\n"
-        try hubContent.write(to: agentURL.appending(component: "\(agent.id).md"), atomically: true, encoding: .utf8)
-
-        try updateAgentsIndex(agent)
+        // Clean up legacy files left behind by a v3.0 bundle, if any.
+        for legacy in ["agent.md", "\(agent.id).md"] {
+            let url = agentURL.appending(component: legacy)
+            if fm.fileExists(atPath: url.path) {
+                try? fm.removeItem(at: url)
+            }
+        }
     }
 
     func deleteAgent(id: String) throws {
         let agentURL = agentDirURL(for: id)
         guard fm.fileExists(atPath: agentURL.path) else { return }
         try fm.trashItem(at: agentURL, resultingItemURL: nil)
-        try removeFromAgentsIndex(id: id)
     }
 
     // MARK: - Routines
 
+    /// v3.1: routines live under `<agent>/Routines/`. We walk every agent
+    /// directly under the vault root and return the union, tagging each
+    /// routine with its owning agent id.
     func loadRoutines() throws -> [Routine] {
-        let routinesURL = vaultURL.appending(component: "Routines", directoryHint: .isDirectory)
-        guard fm.fileExists(atPath: routinesURL.path) else { return [] }
-
-        let entries = try fm.contentsOfDirectory(atPath: routinesURL.path)
         var routines: [Routine] = []
 
-        for entry in entries {
-            guard entry.hasSuffix(".md") && entry != "Routines.md" else { continue }
-            let fileURL = routinesURL.appending(component: entry)
-            let content = try String(contentsOf: fileURL, encoding: .utf8)
-            let (fm_data, body) = FrontmatterParser.parse(content)
+        for agentId in iterAgentIds() {
+            let agentDir = agentDirURL(for: agentId)
+            let routinesURL = agentDir.appending(component: "Routines", directoryHint: .isDirectory)
+            guard fm.fileExists(atPath: routinesURL.path) else { continue }
 
-            let name = String(entry.dropLast(3))
-            let scheduleDict = fm_data["schedule"] as? [String: Any] ?? [:]
-            let rawMonthdays = scheduleDict["monthdays"] as? [Any] ?? []
-            let parsedMonthdays = rawMonthdays.compactMap { v -> Int? in
-                if let i = v as? Int { return i }
-                if let s = v as? String { return Int(s) }
-                return nil
+            let entries = (try? fm.contentsOfDirectory(atPath: routinesURL.path)) ?? []
+            for entry in entries {
+                guard entry.hasSuffix(".md") && !Self.subIndexFilenames.contains(entry) else { continue }
+                let fileURL = routinesURL.appending(component: entry)
+                guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+                let (fm_data, body) = FrontmatterParser.parse(content)
+
+                let name = String(entry.dropLast(3))
+                let scheduleDict = fm_data["schedule"] as? [String: Any] ?? [:]
+                let rawMonthdays = scheduleDict["monthdays"] as? [Any] ?? []
+                let parsedMonthdays = rawMonthdays.compactMap { v -> Int? in
+                    if let i = v as? Int { return i }
+                    if let s = v as? String { return Int(s) }
+                    return nil
+                }
+                let schedule = Routine.Schedule(
+                    times: scheduleDict["times"] as? [String] ?? [],
+                    days: scheduleDict["days"] as? [String] ?? ["*"],
+                    until: scheduleDict["until"] as? String,
+                    interval: scheduleDict["interval"] as? String,
+                    monthdays: parsedMonthdays
+                )
+
+                let promptBody = body
+                    .replacingOccurrences(of: "[[Routines]]\n", with: "")
+                    .replacingOccurrences(of: "[[Routines]]", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                // Detect pipeline type and count steps
+                let routineType = fm_data["type"] as? String ?? "routine"
+                var stepCount = 0
+                if routineType == "pipeline" {
+                    stepCount = promptBody.components(separatedBy: "\n")
+                        .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("- id:") }
+                        .count
+                }
+
+                // owner derives from the file path; frontmatter `agent:` is kept
+                // for the legacy execution-routing field (Routine.agentId).
+                var routine = Routine(
+                    id: name,
+                    title: fm_data["title"] as? String ?? name,
+                    description: fm_data["description"] as? String ?? "",
+                    schedule: schedule,
+                    model: fm_data["model"] as? String ?? "sonnet",
+                    agentId: fm_data["agent"] as? String,
+                    enabled: fm_data["enabled"] as? Bool ?? true,
+                    promptBody: promptBody,
+                    created: fm_data["created"] as? String ?? today(),
+                    updated: fm_data["updated"] as? String ?? today(),
+                    tags: fm_data["tags"] as? [String] ?? ["routine"],
+                    routineType: routineType,
+                    stepCount: stepCount,
+                    minimalContext: (fm_data["context"] as? String) == "minimal"
+                )
+                routine.ownerAgentId = agentId
+                routines.append(routine)
             }
-            let schedule = Routine.Schedule(
-                times: scheduleDict["times"] as? [String] ?? [],
-                days: scheduleDict["days"] as? [String] ?? ["*"],
-                until: scheduleDict["until"] as? String,
-                interval: scheduleDict["interval"] as? String,
-                monthdays: parsedMonthdays
-            )
-
-            let promptBody = body
-                .replacingOccurrences(of: "[[Routines]]\n", with: "")
-                .replacingOccurrences(of: "[[Routines]]", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            // Detect pipeline type and count steps
-            let routineType = fm_data["type"] as? String ?? "routine"
-            var stepCount = 0
-            if routineType == "pipeline" {
-                // Count "- id:" occurrences in ```pipeline block
-                stepCount = promptBody.components(separatedBy: "\n")
-                    .filter { $0.trimmingCharacters(in: .whitespaces).hasPrefix("- id:") }
-                    .count
-            }
-
-            let routine = Routine(
-                id: name,
-                title: fm_data["title"] as? String ?? name,
-                description: fm_data["description"] as? String ?? "",
-                schedule: schedule,
-                model: fm_data["model"] as? String ?? "sonnet",
-                agentId: fm_data["agent"] as? String,
-                enabled: fm_data["enabled"] as? Bool ?? true,
-                promptBody: promptBody,
-                created: fm_data["created"] as? String ?? today(),
-                updated: fm_data["updated"] as? String ?? today(),
-                tags: fm_data["tags"] as? [String] ?? ["routine"],
-                routineType: routineType,
-                stepCount: stepCount,
-                minimalContext: (fm_data["context"] as? String) == "minimal"
-            )
-            routines.append(routine)
         }
         return routines.sorted { $0.title < $1.title }
     }
 
     func saveRoutine(_ routine: Routine) throws {
-        let routinesURL = vaultURL.appending(component: "Routines", directoryHint: .isDirectory)
+        let owner = routine.ownerAgentId.isEmpty ? "main" : routine.ownerAgentId
+        let routinesURL = agentDirURL(for: owner)
+            .appending(component: "Routines", directoryHint: .isDirectory)
         try fm.createDirectory(at: routinesURL, withIntermediateDirectories: true)
 
         let isPipeline = routine.routineType == "pipeline"
@@ -216,30 +277,38 @@ actor VaultService {
             let pipelineBlock = PipelineStepDef.buildPipelineBody(routine.pipelineStepDefs)
             // Auto-generated `## Steps` section: parent owns the parent->step edges
             // in the Obsidian graph. Step files MUST NOT contain wikilinks.
-            // See vault/CLAUDE.md "Pipeline graph: parent owns the relationship".
+            // Use vault-root absolute paths so Obsidian's resolver always picks
+            // the right file regardless of basename collisions across pipelines.
             let stepLinks = routine.pipelineStepDefs
                 .filter { !$0.stepId.isEmpty }
-                .map { "- [[\(routine.id)/steps/\($0.stepId)|\($0.stepId)]]" }
+                .map { "- [[\(owner)/Routines/\(routine.id)/steps/\($0.stepId)|\($0.stepId)]]" }
                 .joined(separator: "\n")
             let stepsSection = stepLinks.isEmpty ? "" : "\n\n## Steps\n\n\(stepLinks)\n"
-            body = "\n[[Routines]]\n\n\(pipelineBlock)\(stepsSection)"
+            // v3.3 parent → child convention: leaf files (routines, pipelines)
+            // do NOT carry a `[[Routines]]` parent wikilink — agent-routines.md
+            // points DOWN to them via its marker block.
+            body = "\n\(pipelineBlock)\(stepsSection)"
         } else {
-            body = "\n[[Routines]]\n\n\(routine.promptBody)\n"
+            body = "\n\(routine.promptBody)\n"
         }
 
         let content = FrontmatterParser.serialize(frontmatter, orderedKeys: orderedKeys, body: body)
         let fileURL = routinesURL.appending(component: "\(routine.id).md")
         try content.write(to: fileURL, atomically: true, encoding: .utf8)
-        try updateRoutinesIndex(routine)
+        try updateRoutinesIndex(routine, ownerAgentId: owner)
 
         // Save pipeline step prompt files
         if isPipeline && !routine.pipelineStepDefs.isEmpty {
-            try savePipelineStepFiles(routineId: routine.id, steps: routine.pipelineStepDefs)
+            try savePipelineStepFiles(
+                ownerAgentId: owner,
+                routineId: routine.id,
+                steps: routine.pipelineStepDefs
+            )
         }
     }
 
-    func savePipelineStepFiles(routineId: String, steps: [PipelineStepDef]) throws {
-        let stepsDir = vaultURL
+    func savePipelineStepFiles(ownerAgentId: String, routineId: String, steps: [PipelineStepDef]) throws {
+        let stepsDir = agentDirURL(for: ownerAgentId)
             .appending(component: "Routines", directoryHint: .isDirectory)
             .appending(component: routineId, directoryHint: .isDirectory)
             .appending(component: "steps", directoryHint: .isDirectory)
@@ -263,7 +332,7 @@ actor VaultService {
         }
     }
 
-    func loadPipelineStepDefs(routineId: String, promptBody: String) -> [PipelineStepDef] {
+    func loadPipelineStepDefs(routineId: String, promptBody: String, ownerAgentId: String = "main") -> [PipelineStepDef] {
         // Parse step ids/names/config from the ```pipeline block
         var steps: [PipelineStepDef] = []
         var inBlock = false
@@ -293,8 +362,8 @@ actor VaultService {
         }
         if !current.isEmpty { steps.append(stepDefFromDict(current)) }
 
-        // Load prompt text from files
-        let stepsDir = vaultURL
+        // Load prompt text from files (v3.0: under owning agent's Routines dir)
+        let stepsDir = agentDirURL(for: ownerAgentId.isEmpty ? "main" : ownerAgentId)
             .appending(component: "Routines", directoryHint: .isDirectory)
             .appending(component: routineId, directoryHint: .isDirectory)
             .appending(component: "steps", directoryHint: .isDirectory)
@@ -348,8 +417,10 @@ actor VaultService {
         )
     }
 
-    func deleteRoutine(id: String) throws {
-        let routinesURL = vaultURL.appending(component: "Routines", directoryHint: .isDirectory)
+    func deleteRoutine(id: String, ownerAgentId: String = "main") throws {
+        let owner = ownerAgentId.isEmpty ? "main" : ownerAgentId
+        let routinesURL = agentDirURL(for: owner)
+            .appending(component: "Routines", directoryHint: .isDirectory)
         let fileURL = routinesURL.appending(component: "\(id).md")
         guard fm.fileExists(atPath: fileURL.path) else { return }
         try fm.trashItem(at: fileURL, resultingItemURL: nil)
@@ -358,47 +429,54 @@ actor VaultService {
         if fm.fileExists(atPath: pipelineDir.path) {
             try fm.trashItem(at: pipelineDir, resultingItemURL: nil)
         }
-        try removeFromRoutinesIndex(id: id)
+        try removeFromRoutinesIndex(id: id, ownerAgentId: owner)
     }
 
     // MARK: - Skills
 
+    /// v3.1: skills live under `<agent>/Skills/`. Walk every agent folder.
     func loadSkills() throws -> [Skill] {
-        let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
-        guard fm.fileExists(atPath: skillsURL.path) else { return [] }
-
-        let entries = try fm.contentsOfDirectory(atPath: skillsURL.path)
         var skills: [Skill] = []
 
-        for entry in entries {
-            guard entry.hasSuffix(".md") && entry != "Skills.md" else { continue }
-            let fileURL = skillsURL.appending(component: entry)
-            let content = try String(contentsOf: fileURL, encoding: .utf8)
-            let (fm_data, body) = FrontmatterParser.parse(content)
+        for agentId in iterAgentIds() {
+            let agentDir = agentDirURL(for: agentId)
+            let skillsURL = agentDir.appending(component: "Skills", directoryHint: .isDirectory)
+            guard fm.fileExists(atPath: skillsURL.path) else { continue }
 
-            let name = String(entry.dropLast(3))
-            let cleanBody = body
-                .replacingOccurrences(of: "[[Skills]]\n", with: "")
-                .replacingOccurrences(of: "[[Skills]]", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let entries = (try? fm.contentsOfDirectory(atPath: skillsURL.path)) ?? []
+            for entry in entries {
+                guard entry.hasSuffix(".md") && !Self.subIndexFilenames.contains(entry) else { continue }
+                let fileURL = skillsURL.appending(component: entry)
+                guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+                let (fm_data, body) = FrontmatterParser.parse(content)
 
-            let skill = Skill(
-                id: name,
-                title: fm_data["title"] as? String ?? name,
-                description: fm_data["description"] as? String ?? "",
-                trigger: fm_data["trigger"] as? String ?? "",
-                tags: fm_data["tags"] as? [String] ?? ["skill"],
-                created: fm_data["created"] as? String ?? today(),
-                updated: fm_data["updated"] as? String ?? today(),
-                body: cleanBody
-            )
-            skills.append(skill)
+                let name = String(entry.dropLast(3))
+                let cleanBody = body
+                    .replacingOccurrences(of: "[[Skills]]\n", with: "")
+                    .replacingOccurrences(of: "[[Skills]]", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                var skill = Skill(
+                    id: name,
+                    title: fm_data["title"] as? String ?? name,
+                    description: fm_data["description"] as? String ?? "",
+                    trigger: fm_data["trigger"] as? String ?? "",
+                    tags: fm_data["tags"] as? [String] ?? ["skill"],
+                    created: fm_data["created"] as? String ?? today(),
+                    updated: fm_data["updated"] as? String ?? today(),
+                    body: cleanBody
+                )
+                skill.ownerAgentId = agentId
+                skills.append(skill)
+            }
         }
         return skills.sorted { $0.title < $1.title }
     }
 
     func saveSkill(_ skill: Skill) throws {
-        let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
+        let owner = skill.ownerAgentId.isEmpty ? "main" : skill.ownerAgentId
+        let skillsURL = agentDirURL(for: owner)
+            .appending(component: "Skills", directoryHint: .isDirectory)
         try fm.createDirectory(at: skillsURL, withIntermediateDirectories: true)
 
         let yamlLines = [
@@ -406,6 +484,7 @@ actor VaultService {
             "description: \"\(skill.description)\"",
             "trigger: \"\(skill.trigger)\"",
             "tags: [\(skill.tags.map { "\"\($0)\"" }.joined(separator: ", "))]",
+            "agent: \"\(owner)\"",
             "created: \"\(skill.created.isEmpty ? today() : skill.created)\"",
             "updated: \"\(today())\""
         ]
@@ -413,68 +492,80 @@ actor VaultService {
         let content = "---\n\(yamlLines.joined(separator: "\n"))\n---\n\n\(skill.body)"
         let fileURL = skillsURL.appending(component: "\(skill.id).md")
         try content.write(to: fileURL, atomically: true, encoding: .utf8)
-        try updateSkillsIndex(skill)
+        try updateSkillsIndex(skill, ownerAgentId: owner)
     }
 
-    private func updateSkillsIndex(_ skill: Skill) throws {
-        let indexURL = vaultURL.appending(component: "Skills").appending(component: "Skills.md")
-        var content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+    private func updateSkillsIndex(_ skill: Skill, ownerAgentId: String) throws {
+        // v3.3: per-agent index file is `<agent>/Skills/agent-skills.md`.
+        // The marker block in this file is auto-regenerated by
+        // `scripts/vault_indexes.py`, so the manual append we used to do here
+        // is now best-effort: if the marker block is present, the next /indexes
+        // run will repopulate it from frontmatter, so we don't append anything.
+        let indexURL = agentDirURL(for: ownerAgentId)
+            .appending(component: "Skills")
+            .appending(component: "agent-skills.md")
+        guard fm.fileExists(atPath: indexURL.path) else { return }
+        let content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+        if content.contains("vault-query:start") {
+            return  // marker block — Python regenerates on /indexes
+        }
         if !content.contains("[[\(skill.id)]]") {
-            content += "\n- [[\(skill.id)]] — \(skill.description)"
-            try content.write(to: indexURL, atomically: true, encoding: .utf8)
+            let updated = content + "\n- [[\(skill.id)]] — \(skill.description)"
+            try updated.write(to: indexURL, atomically: true, encoding: .utf8)
         }
     }
 
-    func deleteSkill(id: String) throws {
+    func deleteSkill(id: String, ownerAgentId: String = "main") throws {
         guard !Skill.builtInIds.contains(id) else { return }
-        let skillsURL = vaultURL.appending(component: "Skills", directoryHint: .isDirectory)
+        let owner = ownerAgentId.isEmpty ? "main" : ownerAgentId
+        let skillsURL = agentDirURL(for: owner)
+            .appending(component: "Skills", directoryHint: .isDirectory)
         let fileURL = skillsURL.appending(component: "\(id).md")
         guard fm.fileExists(atPath: fileURL.path) else { return }
         try fm.trashItem(at: fileURL, resultingItemURL: nil)
-        try removeFromSkillsIndex(id: id)
+        try removeFromSkillsIndex(id: id, ownerAgentId: owner)
     }
 
     // MARK: - Index helpers
+    //
+    // v3.1: there is no top-level ``Agents/Agents.md`` anymore — the vault's
+    // shared ``CLAUDE.md`` holds agent wikilinks directly. Per-agent indexes
+    // (Routines.md / Skills.md / …) are still auto-regenerated via marker
+    // blocks handled by ``scripts/vault_indexes.py`` on the Python side.
 
-    private func updateAgentsIndex(_ agent: Agent) throws {
-        let indexURL = vaultURL.appending(component: "Agents").appending(component: "Agents.md")
-        var content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
-        let link = "- [[\(agent.id)/\(agent.id)|\(agent.name)]] — \(agent.description)"
-        if !content.contains("[[\(agent.id)/") {
-            content += "\n\(link)"
-            try content.write(to: indexURL, atomically: true, encoding: .utf8)
-        }
-    }
-
-    private func removeFromAgentsIndex(id: String) throws {
-        let indexURL = vaultURL.appending(component: "Agents").appending(component: "Agents.md")
-        guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
-        let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)/") }
-        content = lines.joined(separator: "\n")
-        try content.write(to: indexURL, atomically: true, encoding: .utf8)
-    }
-
-    private func updateRoutinesIndex(_ routine: Routine) throws {
-        let indexURL = vaultURL.appending(component: "Routines").appending(component: "Routines.md")
-        var content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+    private func updateRoutinesIndex(_ routine: Routine, ownerAgentId: String) throws {
+        // v3.3: index file is `<agent>/Routines/agent-routines.md`.
+        // Marker blocks are auto-regenerated by `scripts/vault_indexes.py`.
+        let indexURL = agentDirURL(for: ownerAgentId)
+            .appending(component: "Routines")
+            .appending(component: "agent-routines.md")
+        guard fm.fileExists(atPath: indexURL.path) else { return }
+        let content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+        if content.contains("vault-query:start") { return }
         let link = "- [[\(routine.id)]] — \(routine.description)"
         if !content.contains("[[\(routine.id)]]") {
-            content += "\n\(link)"
-            try content.write(to: indexURL, atomically: true, encoding: .utf8)
+            let updated = content + "\n\(link)"
+            try updated.write(to: indexURL, atomically: true, encoding: .utf8)
         }
     }
 
-    private func removeFromRoutinesIndex(id: String) throws {
-        let indexURL = vaultURL.appending(component: "Routines").appending(component: "Routines.md")
+    private func removeFromRoutinesIndex(id: String, ownerAgentId: String) throws {
+        let indexURL = agentDirURL(for: ownerAgentId)
+            .appending(component: "Routines")
+            .appending(component: "agent-routines.md")
         guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        if content.contains("vault-query:start") { return }
         let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)]]") }
         content = lines.joined(separator: "\n")
         try content.write(to: indexURL, atomically: true, encoding: .utf8)
     }
 
-    private func removeFromSkillsIndex(id: String) throws {
-        let indexURL = vaultURL.appending(component: "Skills").appending(component: "Skills.md")
+    private func removeFromSkillsIndex(id: String, ownerAgentId: String) throws {
+        let indexURL = agentDirURL(for: ownerAgentId)
+            .appending(component: "Skills")
+            .appending(component: "agent-skills.md")
         guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        if content.contains("vault-query:start") { return }
         let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)]]") }
         content = lines.joined(separator: "\n")
         try content.write(to: indexURL, atomically: true, encoding: .utf8)
@@ -541,11 +632,8 @@ actor VaultService {
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: reactionSecretsURL.path)
     }
 
+    /// v3.1: reactions live under `<agent>/Reactions/`. Walk every agent folder.
     func loadReactions() throws -> [Reaction] {
-        let dir = vaultURL.appending(component: "Reactions", directoryHint: .isDirectory)
-        guard fm.fileExists(atPath: dir.path) else { return [] }
-
-        let entries = try fm.contentsOfDirectory(atPath: dir.path)
         let secrets = loadReactionSecrets()
         let stats = loadReactionStats()
         let iso = ISO8601DateFormatter()
@@ -554,65 +642,75 @@ actor VaultService {
         isoNoFrac.formatOptions = [.withInternetDateTime]
         var reactions: [Reaction] = []
 
-        for entry in entries {
-            guard entry.hasSuffix(".md") && entry != "Reactions.md" else { continue }
-            let fileURL = dir.appending(component: entry)
-            let content = try String(contentsOf: fileURL, encoding: .utf8)
-            let (fm_data, body) = FrontmatterParser.parse(content)
+        for agentId in iterAgentIds() {
+            let agentDir = agentDirURL(for: agentId)
+            let dir = agentDir.appending(component: "Reactions", directoryHint: .isDirectory)
+            guard fm.fileExists(atPath: dir.path) else { continue }
 
-            // Only load files that are actually reactions (guard against stray md files)
-            guard (fm_data["type"] as? String) == "reaction" else { continue }
+            let entries = (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
+            for entry in entries {
+                guard entry.hasSuffix(".md") && !Self.subIndexFilenames.contains(entry) else { continue }
+                let fileURL = dir.appending(component: entry)
+                guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
+                let (fm_data, body) = FrontmatterParser.parse(content)
 
-            let name = String(entry.dropLast(3))
-            let authDict = fm_data["auth"] as? [String: Any] ?? [:]
-            let actionDict = fm_data["action"] as? [String: Any] ?? [:]
-            let modeStr = (authDict["mode"] as? String) ?? "token"
-            let mode = Reaction.AuthMode(rawValue: modeStr) ?? .token
-            let mySecrets = secrets[name] ?? [:]
-            let myStats = stats[name] ?? [:]
+                // Only load files that are actually reactions (guard against stray md files)
+                guard (fm_data["type"] as? String) == "reaction" else { continue }
 
-            // Parse last_fired_at — tolerate both with and without fractional seconds
-            var lastFired: Date? = nil
-            if let s = myStats["last_fired_at"] as? String {
-                lastFired = iso.date(from: s) ?? isoNoFrac.date(from: s)
+                let name = String(entry.dropLast(3))
+                let authDict = fm_data["auth"] as? [String: Any] ?? [:]
+                let actionDict = fm_data["action"] as? [String: Any] ?? [:]
+                let modeStr = (authDict["mode"] as? String) ?? "token"
+                let mode = Reaction.AuthMode(rawValue: modeStr) ?? .token
+                let mySecrets = secrets[name] ?? [:]
+                let myStats = stats[name] ?? [:]
+
+                // Parse last_fired_at — tolerate both with and without fractional seconds
+                var lastFired: Date? = nil
+                if let s = myStats["last_fired_at"] as? String {
+                    lastFired = iso.date(from: s) ?? isoNoFrac.date(from: s)
+                }
+
+                let cleanBody = body
+                    .replacingOccurrences(of: "[[Reactions]]\n", with: "")
+                    .replacingOccurrences(of: "[[Reactions]]", with: "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                var reaction = Reaction(
+                    id: name,
+                    title: fm_data["title"] as? String ?? name,
+                    description: fm_data["description"] as? String ?? "",
+                    enabled: fm_data["enabled"] as? Bool ?? true,
+                    created: fm_data["created"] as? String ?? today(),
+                    updated: fm_data["updated"] as? String ?? today(),
+                    tags: fm_data["tags"] as? [String] ?? ["reaction"],
+                    authMode: mode,
+                    hmacHeader: (authDict["hmac_header"] as? String) ?? "X-Signature",
+                    hmacAlgo: (authDict["hmac_algo"] as? String) ?? "sha256",
+                    routineName: (actionDict["routine"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                    forward: actionDict["forward"] as? Bool ?? false,
+                    forwardTemplate: (actionDict["forward_template"] as? String) ?? "{{raw}}",
+                    agentId: (actionDict["agent"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                    body: cleanBody,
+                    token: mySecrets["token"],
+                    hmacSecret: mySecrets["hmac_secret"],
+                    lastFiredAt: lastFired,
+                    fireCount: (myStats["fire_count"] as? Int) ?? 0,
+                    lastStatus: myStats["last_status"] as? String,
+                    lastForwarded: (myStats["last_forwarded"] as? Bool) ?? false,
+                    lastRoutineEnqueued: (myStats["last_routine_enqueued"] as? Bool) ?? false
+                )
+                reaction.ownerAgentId = agentId
+                reactions.append(reaction)
             }
-
-            let cleanBody = body
-                .replacingOccurrences(of: "[[Reactions]]\n", with: "")
-                .replacingOccurrences(of: "[[Reactions]]", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            let reaction = Reaction(
-                id: name,
-                title: fm_data["title"] as? String ?? name,
-                description: fm_data["description"] as? String ?? "",
-                enabled: fm_data["enabled"] as? Bool ?? true,
-                created: fm_data["created"] as? String ?? today(),
-                updated: fm_data["updated"] as? String ?? today(),
-                tags: fm_data["tags"] as? [String] ?? ["reaction"],
-                authMode: mode,
-                hmacHeader: (authDict["hmac_header"] as? String) ?? "X-Signature",
-                hmacAlgo: (authDict["hmac_algo"] as? String) ?? "sha256",
-                routineName: (actionDict["routine"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                forward: actionDict["forward"] as? Bool ?? false,
-                forwardTemplate: (actionDict["forward_template"] as? String) ?? "{{raw}}",
-                agentId: (actionDict["agent"] as? String).flatMap { $0.isEmpty ? nil : $0 },
-                body: cleanBody,
-                token: mySecrets["token"],
-                hmacSecret: mySecrets["hmac_secret"],
-                lastFiredAt: lastFired,
-                fireCount: (myStats["fire_count"] as? Int) ?? 0,
-                lastStatus: myStats["last_status"] as? String,
-                lastForwarded: (myStats["last_forwarded"] as? Bool) ?? false,
-                lastRoutineEnqueued: (myStats["last_routine_enqueued"] as? Bool) ?? false
-            )
-            reactions.append(reaction)
         }
         return reactions.sorted { $0.title < $1.title }
     }
 
     func saveReaction(_ reaction: Reaction) throws {
-        let dir = vaultURL.appending(component: "Reactions", directoryHint: .isDirectory)
+        let owner = reaction.ownerAgentId.isEmpty ? "main" : reaction.ownerAgentId
+        let dir = agentDirURL(for: owner)
+            .appending(component: "Reactions", directoryHint: .isDirectory)
         try fm.createDirectory(at: dir, withIntermediateDirectories: true)
 
         var authDict: [String: Any] = ["mode": reaction.authMode.rawValue]
@@ -638,7 +736,10 @@ actor VaultService {
             "action": actionDict
         ]
         let orderedKeys = ["title", "description", "type", "created", "updated", "tags", "enabled", "auth", "action"]
-        let body = "\n[[Reactions]]\n\n\(reaction.body)\n"
+        // v3.3 parent → child convention: leaf files (reactions) do NOT carry
+        // a `[[Reactions]]` parent wikilink — agent-reactions.md points DOWN
+        // to them via its marker block.
+        let body = "\n\(reaction.body)\n"
         let content = FrontmatterParser.serialize(frontmatter, orderedKeys: orderedKeys, body: body)
         let fileURL = dir.appending(component: "\(reaction.id).md")
         try content.write(to: fileURL, atomically: true, encoding: .utf8)
@@ -656,11 +757,13 @@ actor VaultService {
         try saveReactionSecrets(secrets)
 
         // Update index
-        try updateReactionsIndex(reaction)
+        try updateReactionsIndex(reaction, ownerAgentId: owner)
     }
 
-    func deleteReaction(id: String) throws {
-        let dir = vaultURL.appending(component: "Reactions", directoryHint: .isDirectory)
+    func deleteReaction(id: String, ownerAgentId: String = "main") throws {
+        let owner = ownerAgentId.isEmpty ? "main" : ownerAgentId
+        let dir = agentDirURL(for: owner)
+            .appending(component: "Reactions", directoryHint: .isDirectory)
         let fileURL = dir.appending(component: "\(id).md")
         if fm.fileExists(atPath: fileURL.path) {
             try fm.trashItem(at: fileURL, resultingItemURL: nil)
@@ -669,7 +772,7 @@ actor VaultService {
         if secrets.removeValue(forKey: id) != nil {
             try saveReactionSecrets(secrets)
         }
-        try removeFromReactionsIndex(id: id)
+        try removeFromReactionsIndex(id: id, ownerAgentId: owner)
     }
 
     /// Generate a fresh random token for a reaction. Prefix `rxn_` + 32 hex chars.
@@ -687,18 +790,25 @@ actor VaultService {
         return bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    private func updateReactionsIndex(_ reaction: Reaction) throws {
-        let indexURL = vaultURL.appending(component: "Reactions").appending(component: "Reactions.md")
-        var content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+    private func updateReactionsIndex(_ reaction: Reaction, ownerAgentId: String) throws {
+        let indexURL = agentDirURL(for: ownerAgentId)
+            .appending(component: "Reactions")
+            .appending(component: "agent-reactions.md")
+        guard fm.fileExists(atPath: indexURL.path) else { return }
+        let content = (try? String(contentsOf: indexURL, encoding: .utf8)) ?? ""
+        if content.contains("vault-query:start") { return }
         if !content.contains("[[\(reaction.id)]]") {
-            content += "\n- [[\(reaction.id)]] — \(reaction.description)"
-            try content.write(to: indexURL, atomically: true, encoding: .utf8)
+            let updated = content + "\n- [[\(reaction.id)]] — \(reaction.description)"
+            try updated.write(to: indexURL, atomically: true, encoding: .utf8)
         }
     }
 
-    private func removeFromReactionsIndex(id: String) throws {
-        let indexURL = vaultURL.appending(component: "Reactions").appending(component: "Reactions.md")
+    private func removeFromReactionsIndex(id: String, ownerAgentId: String) throws {
+        let indexURL = agentDirURL(for: ownerAgentId)
+            .appending(component: "Reactions")
+            .appending(component: "agent-reactions.md")
         guard var content = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        if content.contains("vault-query:start") { return }
         let lines = content.components(separatedBy: "\n").filter { !$0.contains("[[\(id)]]") }
         content = lines.joined(separator: "\n")
         try content.write(to: indexURL, atomically: true, encoding: .utf8)
@@ -735,9 +845,38 @@ actor VaultService {
 
     // MARK: - Helpers
 
+    /// v3.1 flat per-agent layout: every agent lives directly under the vault root.
+    /// ``vault/<id>/`` — no more ``Agents/`` wrapper.
     private func agentDirURL(for id: String) -> URL {
-        vaultURL.appending(component: "Agents", directoryHint: .isDirectory)
-            .appending(component: id, directoryHint: .isDirectory)
+        vaultURL.appending(component: id, directoryHint: .isDirectory)
+    }
+
+    /// Names at the vault root that are NEVER agents. Any other top-level
+    /// directory that contains ``agent-<dirname>.md`` is treated as an agent.
+    private static let reservedVaultNames: Set<String> = [
+        "README.md", "CLAUDE.md", "Tooling.md", ".env",
+        ".graphs", ".obsidian", ".claude", "Images", "__pycache__",
+        "Agents",  // legacy wrapper — treat as reserved during mid-migration
+    ]
+
+    /// Iterate every agent directory under the vault root. An agent is any
+    /// top-level directory whose hub file ``agent-<dirname>.md`` exists.
+    private func iterAgentIds() -> [String] {
+        guard let entries = try? fm.contentsOfDirectory(atPath: vaultURL.path) else { return [] }
+        var ids: [String] = []
+        for entry in entries.sorted() {
+            if entry.hasPrefix(".") { continue }
+            if Self.reservedVaultNames.contains(entry) { continue }
+            let entryURL = vaultURL.appending(component: entry, directoryHint: .isDirectory)
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: entryURL.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            let hub = entryURL.appending(component: "agent-\(entry).md")
+            let legacyHub = entryURL.appending(component: "agent-info.md")
+            if fm.fileExists(atPath: hub.path) || fm.fileExists(atPath: legacyHub.path) {
+                ids.append(entry)
+            }
+        }
+        return ids
     }
 
     private func today() -> String {

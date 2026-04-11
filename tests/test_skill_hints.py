@@ -48,7 +48,7 @@ class SelectRelevantSkills(unittest.TestCase):
     def test_empty_prompt_returns_empty(self):
         _write_graph(self.vault, [{
             "label": "Create Pipeline", "type": "skill",
-            "source_file": "Skills/create-pipeline.md",
+            "source_file": "main/Skills/create-pipeline.md",
             "description": "build pipelines",
         }])
         self.assertEqual(self.bot._select_relevant_skills(""), [])
@@ -58,13 +58,13 @@ class SelectRelevantSkills(unittest.TestCase):
         _write_graph(self.vault, [
             {
                 "label": "Create Pipeline", "type": "skill",
-                "source_file": "Skills/create-pipeline.md",
+                "source_file": "main/Skills/create-pipeline.md",
                 "description": "Build multi-step pipelines with parallel agents.",
                 "tags": ["pipeline", "automation"],
             },
             {
                 "label": "Create Agent", "type": "skill",
-                "source_file": "Skills/create-agent.md",
+                "source_file": "main/Skills/create-agent.md",
                 "description": "Create a specialized agent.",
                 "tags": ["agent"],
             },
@@ -78,7 +78,7 @@ class SelectRelevantSkills(unittest.TestCase):
         nodes = [
             {
                 "label": f"Skill {i}", "type": "skill",
-                "source_file": f"Skills/skill-{i}.md",
+                "source_file": f"main/Skills/skill-{i}.md",
                 "description": "pipeline agent routine workflow automation",
             }
             for i in range(10)
@@ -92,7 +92,7 @@ class SelectRelevantSkills(unittest.TestCase):
     def test_stopwords_filtered_out(self):
         _write_graph(self.vault, [{
             "label": "The Agent", "type": "skill",
-            "source_file": "Skills/the-skill.md",
+            "source_file": "main/Skills/the-skill.md",
             "description": "the and or of to in is it for",
         }])
         # Only stopwords + short words → no match
@@ -102,7 +102,7 @@ class SelectRelevantSkills(unittest.TestCase):
     def test_short_words_ignored(self):
         _write_graph(self.vault, [{
             "label": "api", "type": "skill",
-            "source_file": "Skills/api.md",
+            "source_file": "main/Skills/api.md",
             "description": "api",
         }])
         # All tokens <=3 chars → empty
@@ -113,12 +113,12 @@ class SelectRelevantSkills(unittest.TestCase):
         _write_graph(self.vault, [
             {
                 "label": "pipeline note", "type": "note",
-                "source_file": "Notes/pipeline.md",
+                "source_file": "main/Notes/pipeline.md",
                 "description": "about pipelines",
             },
             {
                 "label": "Real Skill", "type": "skill",
-                "source_file": "Skills/real-skill.md",
+                "source_file": "main/Skills/real-skill.md",
                 "description": "pipeline pipeline pipeline",
             },
         ])
@@ -136,7 +136,7 @@ class SelectRelevantSkills(unittest.TestCase):
     def test_feature_flag_disables(self):
         _write_graph(self.vault, [{
             "label": "Create Pipeline", "type": "skill",
-            "source_file": "Skills/create-pipeline.md",
+            "source_file": "main/Skills/create-pipeline.md",
             "description": "build pipelines",
         }])
         self.bot.SKILL_HINTS_ENABLED = False
@@ -146,7 +146,7 @@ class SelectRelevantSkills(unittest.TestCase):
         # Node without type but with Skills/ path should still be scored
         _write_graph(self.vault, [{
             "label": "Orphan",
-            "source_file": "Skills/orphan.md",
+            "source_file": "main/Skills/orphan.md",
             "description": "pipeline workflow agent",
         }])
         result = self.bot._select_relevant_skills("pipeline workflow agent")

@@ -5,15 +5,19 @@ struct ReactionListView: View {
     @State private var showCreateSheet = false
     @State private var selectedReaction: Reaction? = nil
     @State private var searchText = ""
+    @State private var agentFilter: String = "__all__"
 
     private func newReactionWithToken() -> Reaction {
-        var template = Reaction.newTemplate()
+        let owner = agentFilter == "__all__" ? "main" : agentFilter
+        var template = Reaction.newTemplate(ownerAgentId: owner)
         template.token = appState.generateReactionToken()
         return template
     }
 
     private var filteredReactions: [Reaction] {
-        let items = appState.reactions.sorted { $0.title.lowercased() < $1.title.lowercased() }
+        let items = appState.reactions
+            .filter { agentFilter == "__all__" || $0.ownerAgentId == agentFilter }
+            .sorted { $0.title.lowercased() < $1.title.lowercased() }
         guard !searchText.isEmpty else { return items }
         let q = searchText.lowercased()
         return items.filter {
@@ -29,6 +33,8 @@ struct ReactionListView: View {
                 // Tunnel status banner
                 TunnelStatusBanner()
 
+                AgentFilterBar(selection: $agentFilter)
+
                 if appState.reactions.isEmpty {
                     EmptyStateView(
                         symbol: "bolt.horizontal.circle.fill",
@@ -39,7 +45,9 @@ struct ReactionListView: View {
                     EmptyStateView(
                         symbol: "magnifyingglass",
                         title: "No Results",
-                        subtitle: "No reactions match \"\(searchText)\"."
+                        subtitle: searchText.isEmpty
+                            ? "No reactions for this agent yet."
+                            : "No reactions match \"\(searchText)\"."
                     )
                 } else {
                     VStack(spacing: Spacing.lg) {

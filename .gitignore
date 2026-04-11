@@ -5,49 +5,59 @@
 vault/.env
 
 # ============================================
-# Vault — personal content (not shared)
-# Only .gitkeep files are tracked to preserve
-# the directory structure for new users.
+# Vault — v3.5 flat per-agent layout
+#
+# Every agent (Main + custom) lives directly under the vault root as
+# `vault/<id>/` with a hub file `agent-<id>.md`, a `CLAUDE.md`, and the
+# six per-agent subfolders (Skills/, Routines/, Journal/, Reactions/,
+# Lessons/, Notes/) plus `.workspace/` for pipeline runtime data.
+#
+# Commit policy:
+#   - Shared root files (README.md, CLAUDE.md, Tooling.md) → committed
+#   - `vault/main/` → committed (the "shipped default" Main agent that
+#     every new user inherits from templates/main/ on first install)
+#   - Custom agents (anything other than `main/`) → NOT committed
+#     (personal content, per-machine)
+#   - `.workspace/` and `.activity/` inside any agent → NEVER committed
+#     (pure runtime data, sobrescrita a cada execução)
+#   - `.graphs/` → NOT committed (generated daily by vault-graph-update)
+#
+# New users bootstrap by running:
+#     python3 scripts/migrate_vault_per_agent.py
+# which seeds `vault/main/` from `templates/main/`.
 # ============================================
-vault/Journal/*
-!vault/Journal/.gitkeep
-!vault/Journal/Journal.md
-vault/Notes/*
-!vault/Notes/.gitkeep
-!vault/Notes/Notes.md
+
+# Images are never committed (user-uploaded content, binary noise)
 vault/Images/*
 !vault/Images/.gitkeep
-vault/Skills/*
-!vault/Skills/.gitkeep
-!vault/Skills/Skills.md
-!vault/Skills/create-routine.md
-!vault/Skills/create-agent.md
-!vault/Skills/import-agent.md
-!vault/Skills/create-pipeline.md
-!vault/Skills/extract-knowledge.md
-!vault/Skills/systematic-debugging.md
-!vault/Skills/test-driven-development.md
-!vault/Skills/verify-before-completion.md
-!vault/Skills/audit-insecure-defaults.md
-vault/Routines/*
-!vault/Routines/.gitkeep
-!vault/Routines/Routines.md.template
-!vault/Routines/update-check.md
-!vault/Routines/journal-audit.md
-!vault/Routines/vault-graph-update.md
-!vault/Routines/vault-lint.md
-!vault/Routines/vault-indexes-update.md
-vault/Agents/*
-!vault/Agents/.gitkeep
-!vault/Agents/Agents.md.template
 
-# Knowledge graph (generated)
+# One-shot migration backups produced by scripts/migrate_vault_per_agent.py
+vault.backup-*/
+
+# Knowledge graph (auto-generated daily by vault-graph-update routine)
 vault/.graphs/
 graphify-out/
 
-# Obsidian workspace state (user-specific)
+# Obsidian user-specific state (not workspace files)
 vault/.obsidian/workspace.json
 vault/.obsidian/graph.json
+
+# Runtime data inside ANY agent folder (v3.5 dot-prefixed, hidden from Obsidian)
+vault/*/.workspace/
+vault/*/Journal/.activity/
+vault/*/Routines/.history/
+vault/*/scripts/
+
+# Custom agents — ignore every top-level agent folder EXCEPT main/
+# (main is the shipped default; custom agents are personal)
+vault/*/
+!vault/main/
+!vault/.obsidian/
+
+# But re-exclude main's runtime dirs (the !vault/main/ above would pull them back)
+vault/main/.workspace/
+vault/main/Journal/.activity/
+vault/main/Routines/.history/
 
 # Claude Code local settings (user-specific paths)
 .claude/settings.local.json
@@ -83,3 +93,9 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+
+# ============================================
+# macOS app build artifacts
+# ============================================
+ClaudeBotManager/.build/
+ClaudeBotManager/ClaudeBotManager.app/

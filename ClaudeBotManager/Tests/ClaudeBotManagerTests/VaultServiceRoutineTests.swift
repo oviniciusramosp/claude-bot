@@ -12,11 +12,37 @@ final class VaultServiceRoutineTests: XCTestCase {
         tmpVault = FileManager.default.temporaryDirectory
             .appendingPathComponent("claude-vault-tests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmpVault, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(
-            at: tmpVault.appendingPathComponent("Routines"),
+        // v3.1 layout: each agent needs agent-info.md so iterAgentIds() picks
+        // it up and a Routines/ subfolder.
+        try Self.createAgentSkeleton(vault: tmpVault, id: "main")
+        service = VaultService(vaultPath: tmpVault.path)
+    }
+
+    /// Create a minimal agent-info.md + Routines/ skeleton used by every test.
+    static func createAgentSkeleton(vault: URL, id: String) throws {
+        let fm = FileManager.default
+        let agentDir = vault.appendingPathComponent(id)
+        try fm.createDirectory(
+            at: agentDir.appendingPathComponent("Routines"),
             withIntermediateDirectories: true
         )
-        service = VaultService(vaultPath: tmpVault.path)
+        let info = """
+        ---
+        title: \(id)
+        description: Test agent \(id)
+        type: agent
+        name: \(id)
+        model: sonnet
+        ---
+
+        [[Skills]]
+        [[Routines]]
+        """
+        try info.write(
+            to: agentDir.appendingPathComponent("agent-info.md"),
+            atomically: true,
+            encoding: .utf8
+        )
     }
 
     override func tearDown() async throws {
@@ -138,21 +164,23 @@ final class VaultServiceRoutineTests: XCTestCase {
         try await service.saveRoutine(routine)
 
         // Parent file: must contain `## Steps` section with execution-order links
-        let parentURL = tmpVault.appendingPathComponent("Routines/test-pipe.md")
+        let parentURL = tmpVault.appendingPathComponent("main/Routines/test-pipe.md")
         let parentContent = try String(contentsOf: parentURL, encoding: .utf8)
         XCTAssertTrue(parentContent.contains("## Steps"),
                       "parent pipeline file must include `## Steps` section")
-        XCTAssertTrue(parentContent.contains("[[test-pipe/steps/collect|collect]]"),
-                      "parent must link to first step with path-aliased wikilink")
-        XCTAssertTrue(parentContent.contains("[[test-pipe/steps/analyze|analyze]]"),
-                      "parent must link to second step with path-aliased wikilink")
+        // v3.3: pipeline parents use vault-root absolute paths so Obsidian
+        // resolves the step links unambiguously across pipelines.
+        XCTAssertTrue(parentContent.contains("[[main/Routines/test-pipe/steps/collect|collect]]"),
+                      "parent must link to first step with vault-root absolute wikilink")
+        XCTAssertTrue(parentContent.contains("[[main/Routines/test-pipe/steps/analyze|analyze]]"),
+                      "parent must link to second step with vault-root absolute wikilink")
         // Order matters: collect comes before analyze
         let collectIdx = parentContent.range(of: "collect|collect")!.lowerBound
         let analyzeIdx = parentContent.range(of: "analyze|analyze")!.lowerBound
         XCTAssertLessThan(collectIdx, analyzeIdx, "steps must be listed in execution order")
 
         // Step files: NO wikilinks, NO frontmatter, just the prompt
-        let stepAURL = tmpVault.appendingPathComponent("Routines/test-pipe/steps/collect.md")
+        let stepAURL = tmpVault.appendingPathComponent("main/Routines/test-pipe/steps/collect.md")
         let stepAContent = try String(contentsOf: stepAURL, encoding: .utf8)
         XCTAssertFalse(stepAContent.contains("[["),
                        "step files must contain zero wikilinks")
@@ -165,7 +193,7 @@ final class VaultServiceRoutineTests: XCTestCase {
         XCTAssertEqual(stepAContent.trimmingCharacters(in: .whitespacesAndNewlines),
                        "Fetch data from the API.")
 
-        let stepBURL = tmpVault.appendingPathComponent("Routines/test-pipe/steps/analyze.md")
+        let stepBURL = tmpVault.appendingPathComponent("main/Routines/test-pipe/steps/analyze.md")
         let stepBContent = try String(contentsOf: stepBURL, encoding: .utf8)
         XCTAssertFalse(stepBContent.contains("[["),
                        "step files must contain zero wikilinks")
@@ -202,7 +230,7 @@ final class VaultServiceRoutineTests: XCTestCase {
         try await service.saveRoutine(routine)
 
         // Manually overwrite the step file with the legacy backlink format
-        let stepURL = tmpVault.appendingPathComponent("Routines/legacy/steps/scout.md")
+        let stepURL = tmpVault.appendingPathComponent("main/Routines/legacy/steps/scout.md")
         try "Legacy body content.\n\nrotina: [[legacy]]\n"
             .write(to: stepURL, atomically: true, encoding: .utf8)
 
@@ -210,7 +238,9 @@ final class VaultServiceRoutineTests: XCTestCase {
         let loaded = try await service.loadRoutines()
         XCTAssertEqual(loaded.count, 1)
         let loadedDefs = await service.loadPipelineStepDefs(
-            routineId: "legacy", promptBody: loaded[0].promptBody)
+            routineId: "legacy",
+            promptBody: loaded[0].promptBody,
+            ownerAgentId: loaded[0].ownerAgentId)
         XCTAssertEqual(loadedDefs.count, 1)
         XCTAssertFalse(loadedDefs[0].prompt.contains("[["),
                        "loader must strip trailing wikilinks from legacy step files")
@@ -237,7 +267,7 @@ final class VaultServiceRoutineTests: XCTestCase {
         ---
         Hello from Python.
         """
-        let path = tmpVault.appendingPathComponent("Routines/external.md")
+        let path = tmpVault.appendingPathComponent("main/Routines/external.md")
         try yaml.write(to: path, atomically: true, encoding: .utf8)
 
         let loaded = try await service.loadRoutines()
@@ -247,5 +277,79 @@ final class VaultServiceRoutineTests: XCTestCase {
         XCTAssertEqual(r.schedule.times, ["07:30"])
         XCTAssertEqual(r.model, "opus")
         XCTAssertTrue(r.enabled)
+        XCTAssertEqual(r.ownerAgentId, "main",
+                       "owner must derive from the <id>/ path even when frontmatter omits it")
+    }
+
+    // MARK: - v3.1 flat per-agent vault layout
+
+    func test_saveRoutine_writesUnderOwningAgent() async throws {
+        // Create a second agent directory (with agent-info.md so
+        // iterAgentIds() recognizes it).
+        try Self.createAgentSkeleton(vault: tmpVault, id: "crypto-bro")
+
+        var routine = Routine(
+            id: "crypto-ping",
+            title: "Crypto Ping",
+            description: "Owned by crypto-bro",
+            schedule: Routine.Schedule(times: ["06:00"], days: ["*"], until: nil, interval: nil, monthdays: []),
+            model: "sonnet",
+            agentId: nil,
+            enabled: true,
+            promptBody: "Check BTC.",
+            created: "2026-04-11",
+            updated: "2026-04-11",
+            tags: ["routine"]
+        )
+        routine.ownerAgentId = "crypto-bro"
+
+        try await service.saveRoutine(routine)
+
+        // File must land under crypto-bro/Routines/, not main.
+        let ownedPath = tmpVault.appendingPathComponent("crypto-bro/Routines/crypto-ping.md")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ownedPath.path),
+                      "routine must be written under owning agent's Routines dir")
+
+        let mainPath = tmpVault.appendingPathComponent("main/Routines/crypto-ping.md")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mainPath.path),
+                       "routine must NOT be written under main when owned by crypto-bro")
+
+        // Round-trip load carries the owner id through
+        let loaded = try await service.loadRoutines()
+        XCTAssertEqual(loaded.count, 1)
+        XCTAssertEqual(loaded[0].ownerAgentId, "crypto-bro")
+    }
+
+    func test_loadRoutines_walksAllAgentFolders() async throws {
+        // Two agents, one routine each — both should show up in loadRoutines.
+        try Self.createAgentSkeleton(vault: tmpVault, id: "other")
+
+        var r1 = Routine(
+            id: "from-main",
+            title: "From Main",
+            description: "",
+            schedule: Routine.Schedule(times: ["09:00"], days: ["*"], until: nil, interval: nil, monthdays: []),
+            model: "sonnet",
+            agentId: nil,
+            enabled: true,
+            promptBody: "hi",
+            created: "2026-04-11",
+            updated: "2026-04-11",
+            tags: ["routine"]
+        )
+        r1.ownerAgentId = "main"
+        var r2 = r1
+        r2.id = "from-other"
+        r2.title = "From Other"
+        r2.ownerAgentId = "other"
+
+        try await service.saveRoutine(r1)
+        try await service.saveRoutine(r2)
+
+        let loaded = try await service.loadRoutines()
+        XCTAssertEqual(loaded.count, 2)
+        let byId = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+        XCTAssertEqual(byId["from-main"]?.ownerAgentId, "main")
+        XCTAssertEqual(byId["from-other"]?.ownerAgentId, "other")
     }
 }

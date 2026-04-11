@@ -39,7 +39,7 @@ struct SkillDetailView: View {
             .confirmationDialog("Move Skill to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
                 Button("Move to Trash", role: .destructive) {
                     Task {
-                        try? await appState.deleteSkill(id: skill.id)
+                        try? await appState.deleteSkill(skill)
                         dismiss()
                     }
                 }
