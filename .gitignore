@@ -25,6 +25,10 @@ vault/Skills/*
 !vault/Skills/import-agent.md
 !vault/Skills/create-pipeline.md
 !vault/Skills/extract-knowledge.md
+!vault/Skills/systematic-debugging.md
+!vault/Skills/test-driven-development.md
+!vault/Skills/verify-before-completion.md
+!vault/Skills/audit-insecure-defaults.md
 vault/Routines/*
 !vault/Routines/.gitkeep
 !vault/Routines/Routines.md.template
