@@ -3,7 +3,7 @@ title: Tooling Preferences
 description: Tool preference map by task type. Check before choosing an approach.
 type: reference
 created: 2026-04-07
-updated: 2026-04-09
+updated: 2026-04-11
 tags: [reference, tooling]
 ---
 
@@ -26,3 +26,11 @@ pinchtab snap -i -c --port 9870      # interactive snapshot
 pinchtab click <ref> --port 9870     # click element
 pinchtab fill <ref> "text" --port 9870  # fill form field
 ```
+
+## References
+
+External repositories and documents worth consulting when working on the bot.
+
+- **claude-code-system-prompts** — https://github.com/Piebald-AI/claude-code-system-prompts
+  - Mirror of Claude Code's internal system prompts (Plan/Explore/Task subagents, compact, security review, etc.), updated per release. Useful reference when refining the bot's `SYSTEM_PROMPT` and routine prompts.
+  - Usage: read when designing new routines or auditing the bot's prompt strategy. Cross-check against `claude-fallback-bot.py` to see which pieces of Claude Code's upstream prompting are worth mirroring into the bot's own prompts.
