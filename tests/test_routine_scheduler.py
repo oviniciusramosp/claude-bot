@@ -14,9 +14,9 @@ from tests._botload import load_bot_module
 
 class _FakeTime:
     """Replace bot.time with a frozen-clock impl. tm_wday: 0=Mon."""
-    def __init__(self, year=2026, mon=4, day=10, hour=8, minute=0, wday=4):
+    def __init__(self, year=2026, mon=4, day=10, hour=8, minute=0, wday=4, mday=10):
         # Default: Friday Apr 10 2026 08:00
-        self.y, self.mo, self.d, self.h, self.mi, self.w = year, mon, day, hour, minute, wday
+        self.y, self.mo, self.d, self.h, self.mi, self.w, self.mday = year, mon, day, hour, minute, wday, mday
 
     def strftime(self, fmt):
         if fmt == "%H:%M":
@@ -30,8 +30,7 @@ class _FakeTime:
         return real_time.strftime(fmt)
 
     def localtime(self, *_):
-        # Return an object with tm_wday attribute
-        return type("tm", (), {"tm_wday": self.w})()
+        return type("tm", (), {"tm_wday": self.w, "tm_mday": self.mday})()
 
     def time(self):
         return real_time.time()
@@ -371,6 +370,223 @@ class ListTodayRoutines(unittest.TestCase):
         # Sorted by time
         self.assertEqual(items[0]["time"], "08:00")
         self.assertEqual(items[1]["time"], "20:00")
+
+
+class ParseInterval(unittest.TestCase):
+    """Unit tests for _parse_interval helper."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        (root / "home").mkdir()
+        self.bot = load_bot_module(tmp_home=root / "home", vault_dir=root / "vault")
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_minutes(self):
+        r = self.bot._parse_interval("30m")
+        self.assertEqual(r, {"value": 30, "unit": "m", "seconds": 1800})
+
+    def test_hours(self):
+        r = self.bot._parse_interval("4h")
+        self.assertEqual(r["seconds"], 14400)
+
+    def test_days(self):
+        r = self.bot._parse_interval("3d")
+        self.assertEqual(r["seconds"], 3 * 86400)
+
+    def test_weeks(self):
+        r = self.bot._parse_interval("2w")
+        self.assertEqual(r["seconds"], 2 * 604800)
+
+    def test_uppercase_normalised(self):
+        # Input is lowercased before matching
+        r = self.bot._parse_interval("4H")
+        self.assertIsNotNone(r)
+        self.assertEqual(r["seconds"], 14400)
+
+    def test_invalid_unit_rejected(self):
+        self.assertIsNone(self.bot._parse_interval("5x"))
+
+    def test_zero_rejected(self):
+        self.assertIsNone(self.bot._parse_interval("0h"))
+
+    def test_no_unit_rejected(self):
+        self.assertIsNone(self.bot._parse_interval("30"))
+
+    def test_empty_rejected(self):
+        self.assertIsNone(self.bot._parse_interval(""))
+
+
+class IntervalScheduling(unittest.TestCase):
+    """Tests for schedule.interval mode (every Nm/Nh/Nd/Nw)."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        self.fake_time = _FakeTime()
+        self._real_time = self.bot.time
+        self.bot.time = self.fake_time
+        self.enqueued = []
+        self.notifications = []
+        self.state = self.bot.RoutineStateManager()
+        self.scheduler = self.bot.RoutineScheduler(
+            self.state,
+            enqueue_fn=lambda task: self.enqueued.append(task),
+            enqueue_pipeline_fn=lambda task: None,
+            notify_fn=lambda msg: self.notifications.append(msg),
+        )
+
+    def tearDown(self):
+        self.bot.time = self._real_time
+        self._td.cleanup()
+
+    def _write(self, name, interval, days="*", enabled="true"):
+        content = (
+            "---\n"
+            f"title: {name}\n"
+            "type: routine\n"
+            "model: sonnet\n"
+            f"enabled: {enabled}\n"
+            "schedule:\n"
+            f"  interval: {interval}\n"
+            f'  days: ["{days}"]\n'
+            "---\n"
+            "do it\n"
+        )
+        _write_routine(self.bot.ROUTINES_DIR, name, content)
+
+    def test_fires_when_never_run(self):
+        self._write("hourly", "1h")
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued), 1)
+        self.assertEqual(self.enqueued[0].name, "hourly")
+
+    def test_does_not_fire_twice_within_interval(self):
+        self._write("hourly", "1h")
+        self.scheduler._check_routines()
+        self.scheduler._check_routines()
+        # Second tick: elapsed << 1h, should not re-fire
+        self.assertEqual(len(self.enqueued), 1)
+
+    def test_invalid_interval_notifies_and_skips(self):
+        content = (
+            "---\n"
+            "title: bad_iv\n"
+            "type: routine\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "schedule:\n"
+            "  interval: every_day\n"
+            "---\n"
+            "body\n"
+        )
+        _write_routine(self.bot.ROUTINES_DIR, "bad_iv", content)
+        self.scheduler._check_routines()
+        self.assertEqual(self.enqueued, [])
+        self.assertEqual(len(self.notifications), 1)
+        self.assertIn("bad_iv", self.notifications[0])
+
+    def test_day_filter_skips_wrong_weekday(self):
+        # Fake time is Friday (wday=4); filter mon only → should skip
+        self._write("weekday_only", "4h", days="mon")
+        self.scheduler._check_routines()
+        self.assertEqual(self.enqueued, [])
+
+    def test_day_filter_matches_correct_weekday(self):
+        # Fake time is Friday (wday=4); filter fri → should fire
+        self._write("fri_only", "4h", days="fri")
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued), 1)
+
+    def test_disabled_interval_routine_skipped(self):
+        self._write("off", "1h", enabled="false")
+        self.scheduler._check_routines()
+        self.assertEqual(self.enqueued, [])
+
+
+class MonthDayFilter(unittest.TestCase):
+    """Tests for schedule.monthdays filter in clock mode."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        self.fake_time = _FakeTime(mday=10)  # 10th of the month
+        self._real_time = self.bot.time
+        self.bot.time = self.fake_time
+        self.enqueued = []
+        self.state = self.bot.RoutineStateManager()
+        self.scheduler = self.bot.RoutineScheduler(
+            self.state,
+            enqueue_fn=lambda task: self.enqueued.append(task),
+            enqueue_pipeline_fn=lambda task: None,
+            notify_fn=lambda msg: None,
+        )
+
+    def tearDown(self):
+        self.bot.time = self._real_time
+        self._td.cleanup()
+
+    def _write(self, name, times, monthdays):
+        content = (
+            "---\n"
+            f"title: {name}\n"
+            "type: routine\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "schedule:\n"
+            f'  times: ["{times}"]\n'
+            f"  monthdays: {monthdays}\n"
+            "---\n"
+            "do it\n"
+        )
+        _write_routine(self.bot.ROUTINES_DIR, name, content)
+
+    def test_matches_today_monthday(self):
+        # mday=10, routine on [10]
+        self._write("tenth", "08:00", "[10]")
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued), 1)
+
+    def test_skips_wrong_monthday(self):
+        # mday=10, routine only on 1st and 15th
+        self._write("first_and_fifteenth", "08:00", "[1, 15]")
+        self.scheduler._check_routines()
+        self.assertEqual(self.enqueued, [])
+
+    def test_matches_when_monthday_in_list(self):
+        # mday=10, monthdays includes 10
+        self._write("multi", "08:00", "[5, 10, 20]")
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued), 1)
+
+    def test_monthday_with_interval_mode(self):
+        # interval routine also respects monthdays
+        content = (
+            "---\n"
+            "title: monthly_iv\n"
+            "type: routine\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "schedule:\n"
+            "  interval: 1h\n"
+            "  monthdays: [15]\n"
+            "---\n"
+            "do it\n"
+        )
+        _write_routine(self.bot.ROUTINES_DIR, "monthly_iv", content)
+        # mday=10, not 15 → should skip
+        self.scheduler._check_routines()
+        self.assertEqual(self.enqueued, [])
 
 
 if __name__ == "__main__":

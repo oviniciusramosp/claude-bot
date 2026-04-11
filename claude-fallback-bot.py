@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.23.0"  # feat: YAML block scalars in frontmatter + reaction fire stats sidecar
+BOT_VERSION = "2.24.0"  # feat: interval scheduling (every Nm/Nh/Nd/Nw) + monthdays filter
 
 import hmac
 import hashlib
@@ -691,6 +691,23 @@ def parse_pipeline_body(body: str) -> list:
 
 DAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
 
+_INTERVAL_RE = re.compile(r'^(\d+)([mhdw])$')
+_INTERVAL_UNITS = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+
+
+def _parse_interval(val: str) -> Optional[Dict]:
+    """Parse interval string like '4h', '30m', '3d', '2w' into dict with seconds.
+
+    Returns {'value': int, 'unit': str, 'seconds': int} or None if invalid.
+    """
+    m = _INTERVAL_RE.match(str(val).strip().lower())
+    if not m:
+        return None
+    value, unit = int(m.group(1)), m.group(2)
+    if value <= 0:
+        return None
+    return {'value': value, 'unit': unit, 'seconds': value * _INTERVAL_UNITS[unit]}
+
 
 @dataclass
 class RoutineTask:
@@ -889,6 +906,40 @@ class RoutineStateManager:
         return data.get(pipeline_name, {}).get(time_slot, {}).get("steps", {})
 
 
+class IntervalStateManager:
+    """Tracks cross-day last-run timestamps for interval-based routines.
+
+    Stored in ~/.claude-bot/routines-state/intervals.json:
+    { "routine-name": { "last_run_at": <unix_timestamp_float> } }
+    """
+
+    def __init__(self) -> None:
+        self._path = ROUTINES_STATE_DIR / "intervals.json"
+        self._lock = threading.Lock()
+
+    def get_last_run(self, routine_name: str) -> Optional[float]:
+        """Returns Unix timestamp of last run, or None if never run."""
+        return self._load().get(routine_name, {}).get("last_run_at")
+
+    def record_run(self, routine_name: str) -> None:
+        """Record current time as last run for this routine."""
+        with self._lock:
+            data = self._load()
+            data[routine_name] = {"last_run_at": time.time()}
+            self._save(data)
+
+    def _load(self) -> Dict:
+        if self._path.exists():
+            try:
+                return json.loads(self._path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {}
+
+    def _save(self, data: Dict) -> None:
+        self._path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def _cleanup_stale_pipeline_workspaces() -> None:
     """Remove /tmp/claude-pipeline-* directories older than 24 hours."""
     cutoff = time.time() - PIPELINE_WORKSPACE_MAX_AGE
@@ -970,6 +1021,7 @@ class RoutineScheduler:
     def __init__(self, state: RoutineStateManager, enqueue_fn, enqueue_pipeline_fn=None,
                  notify_fn=None) -> None:
         self.state = state
+        self.interval_state = IntervalStateManager()
         self._enqueue = enqueue_fn
         self._enqueue_pipeline = enqueue_pipeline_fn
         self._notify_fn = notify_fn  # callable(text) to send Telegram messages
@@ -1051,48 +1103,102 @@ class RoutineScheduler:
                         ["Campo `schedule` deve ser um mapeamento (dict), nao " + type(schedule).__name__],
                     )
                     continue
-                if not isinstance(schedule.get("times"), list) or not schedule["times"]:
-                    logger.warning("Routine %s skipped — 'schedule.times' must be a non-empty list",
-                                   md_file.name)
-                    self._notify_invalid_routine(
-                        md_file.stem,
-                        ["Campo `schedule.times` deve ser uma lista nao-vazia"],
-                    )
-                    continue
                 # Check expiry
                 until = schedule.get("until") or fm.get("until")
                 if until and str(until) < today_str:
                     continue
-                # Check day
-                days = schedule.get("days", ["*"])
-                if isinstance(days, list) and "*" not in days:
-                    if not any(DAY_MAP.get(d.lower().strip(), -1) == now_day_idx for d in days):
-                        continue
-                # Check time
-                times = schedule.get("times", [])
                 routine_name = md_file.stem
                 model = str(fm.get("model", "sonnet"))
                 routine_type = str(fm.get("type", "routine"))
-                for t in times:
-                    t_str = str(t).strip()
-                    if t_str == now_time and not self.state.is_executed(routine_name, t_str):
-                        logger.info("Routine matched: %s at %s (type=%s)", routine_name, t_str, routine_type)
-                        if routine_type == "pipeline" and self._enqueue_pipeline:
-                            self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
-                        else:
-                            self.state.set_status(routine_name, t_str, "running")
-                            _effort_raw = str(fm.get("effort", "")).lower().strip()
-                            task = RoutineTask(
-                                name=routine_name,
-                                prompt=body,
-                                model=model,
-                                time_slot=t_str,
-                                agent=fm.get("agent"),
-                                minimal_context=bool(fm.get("context") == "minimal"),
-                                voice=bool(fm.get("voice", False)),
-                                effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
-                            )
-                            self._enqueue(task)
+                interval_str = str(schedule.get("interval", "")).strip()
+
+                if interval_str:
+                    # --- Interval mode: run every N minutes/hours/days/weeks ---
+                    interval = _parse_interval(interval_str)
+                    if not interval:
+                        logger.warning("Routine %s skipped — invalid 'schedule.interval': %s",
+                                       md_file.name, interval_str)
+                        self._notify_invalid_routine(
+                            md_file.stem,
+                            [f"Campo `schedule.interval` inválido: `{interval_str}`. Use ex: `30m`, `4h`, `3d`, `2w`"],
+                        )
+                        continue
+                    # Check day filter (optional — limit interval to certain weekdays)
+                    days = schedule.get("days", ["*"])
+                    if isinstance(days, list) and "*" not in days:
+                        if not any(DAY_MAP.get(d.lower().strip(), -1) == now_day_idx for d in days):
+                            continue
+                    # Check monthdays filter (optional — limit to specific days of month)
+                    monthdays = schedule.get("monthdays", [])
+                    if monthdays:
+                        now_monthday = time.localtime().tm_mday
+                        if not any(int(d) == now_monthday for d in monthdays if str(d).isdigit()):
+                            continue
+                    # Check if enough time has passed since last run
+                    last_run = self.interval_state.get_last_run(routine_name)
+                    if last_run is not None and (time.time() - last_run) < interval['seconds']:
+                        continue
+                    t_str = now_time
+                    logger.info("Interval routine matched: %s (every %s, type=%s)", routine_name, interval_str, routine_type)
+                    self.interval_state.record_run(routine_name)
+                    if routine_type == "pipeline" and self._enqueue_pipeline:
+                        self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
+                    else:
+                        self.state.set_status(routine_name, t_str, "running")
+                        _effort_raw = str(fm.get("effort", "")).lower().strip()
+                        task = RoutineTask(
+                            name=routine_name,
+                            prompt=body,
+                            model=model,
+                            time_slot=t_str,
+                            agent=fm.get("agent"),
+                            minimal_context=bool(fm.get("context") == "minimal"),
+                            voice=bool(fm.get("voice", False)),
+                            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                        )
+                        self._enqueue(task)
+                else:
+                    # --- Clock mode: run at specific times ---
+                    if not isinstance(schedule.get("times"), list) or not schedule["times"]:
+                        logger.warning("Routine %s skipped — 'schedule.times' must be a non-empty list",
+                                       md_file.name)
+                        self._notify_invalid_routine(
+                            md_file.stem,
+                            ["Campo `schedule.times` deve ser uma lista não-vazia (ou use `schedule.interval`)"],
+                        )
+                        continue
+                    # Check day filter
+                    days = schedule.get("days", ["*"])
+                    if isinstance(days, list) and "*" not in days:
+                        if not any(DAY_MAP.get(d.lower().strip(), -1) == now_day_idx for d in days):
+                            continue
+                    # Check monthdays filter
+                    monthdays = schedule.get("monthdays", [])
+                    if monthdays:
+                        now_monthday = time.localtime().tm_mday
+                        if not any(int(d) == now_monthday for d in monthdays if str(d).isdigit()):
+                            continue
+                    # Check time
+                    for t in schedule["times"]:
+                        t_str = str(t).strip()
+                        if t_str == now_time and not self.state.is_executed(routine_name, t_str):
+                            logger.info("Routine matched: %s at %s (type=%s)", routine_name, t_str, routine_type)
+                            if routine_type == "pipeline" and self._enqueue_pipeline:
+                                self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
+                            else:
+                                self.state.set_status(routine_name, t_str, "running")
+                                _effort_raw = str(fm.get("effort", "")).lower().strip()
+                                task = RoutineTask(
+                                    name=routine_name,
+                                    prompt=body,
+                                    model=model,
+                                    time_slot=t_str,
+                                    agent=fm.get("agent"),
+                                    minimal_context=bool(fm.get("context") == "minimal"),
+                                    voice=bool(fm.get("voice", False)),
+                                    effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                                )
+                                self._enqueue(task)
             except Exception as exc:
                 logger.error("Error checking routine %s: %s", md_file.name, exc)
 
@@ -1237,29 +1343,77 @@ class RoutineScheduler:
                 until = schedule.get("until") or fm.get("until")
                 if until and str(until) < today_str:
                     continue
-                days = schedule.get("days", ["*"])
-                if isinstance(days, list) and "*" not in days:
-                    if not any(DAY_MAP.get(d.lower().strip(), -1) == now_day_idx for d in days):
-                        continue
-                times = schedule.get("times", [])
                 routine_name = md_file.stem
-                for t in times:
-                    t_str = str(t).strip()
-                    entry = state.get(routine_name, {}).get(t_str, {})
-                    status = entry.get("status", "pending")
-                    r_entry = {
-                        "name": routine_name,
-                        "title": fm.get("title", routine_name),
-                        "time": t_str,
-                        "model": fm.get("model", "sonnet"),
-                        "status": status,
-                        "error": entry.get("error"),
-                        "type": str(fm.get("type", "routine")),
-                    }
-                    if entry.get("type") == "pipeline":
-                        r_entry["type"] = "pipeline"
-                        r_entry["steps"] = entry.get("steps", {})
-                    routines.append(r_entry)
+                interval_str = str(schedule.get("interval", "")).strip()
+
+                if interval_str:
+                    # Interval mode: include if day/monthday filters match
+                    days = schedule.get("days", ["*"])
+                    if isinstance(days, list) and "*" not in days:
+                        if not any(DAY_MAP.get(d.lower().strip(), -1) == now_day_idx for d in days):
+                            continue
+                    monthdays = schedule.get("monthdays", [])
+                    if monthdays:
+                        now_monthday = time.localtime().tm_mday
+                        if not any(int(d) == now_monthday for d in monthdays if str(d).isdigit()):
+                            continue
+                    today_runs = state.get(routine_name, {})
+                    if today_runs:
+                        for slot, entry in sorted(today_runs.items()):
+                            r_entry = {
+                                "name": routine_name,
+                                "title": fm.get("title", routine_name),
+                                "time": slot,
+                                "model": fm.get("model", "sonnet"),
+                                "status": entry.get("status", "pending"),
+                                "error": entry.get("error"),
+                                "type": str(fm.get("type", "routine")),
+                                "interval": interval_str,
+                            }
+                            if entry.get("type") == "pipeline":
+                                r_entry["type"] = "pipeline"
+                                r_entry["steps"] = entry.get("steps", {})
+                            routines.append(r_entry)
+                    else:
+                        routines.append({
+                            "name": routine_name,
+                            "title": fm.get("title", routine_name),
+                            "time": f"~{interval_str}",
+                            "model": fm.get("model", "sonnet"),
+                            "status": "pending",
+                            "error": None,
+                            "type": str(fm.get("type", "routine")),
+                            "interval": interval_str,
+                        })
+                else:
+                    # Clock mode
+                    days = schedule.get("days", ["*"])
+                    if isinstance(days, list) and "*" not in days:
+                        if not any(DAY_MAP.get(d.lower().strip(), -1) == now_day_idx for d in days):
+                            continue
+                    monthdays = schedule.get("monthdays", [])
+                    if monthdays:
+                        now_monthday = time.localtime().tm_mday
+                        if not any(int(d) == now_monthday for d in monthdays if str(d).isdigit()):
+                            continue
+                    times = schedule.get("times", [])
+                    for t in times:
+                        t_str = str(t).strip()
+                        entry = state.get(routine_name, {}).get(t_str, {})
+                        status = entry.get("status", "pending")
+                        r_entry = {
+                            "name": routine_name,
+                            "title": fm.get("title", routine_name),
+                            "time": t_str,
+                            "model": fm.get("model", "sonnet"),
+                            "status": status,
+                            "error": entry.get("error"),
+                            "type": str(fm.get("type", "routine")),
+                        }
+                        if entry.get("type") == "pipeline":
+                            r_entry["type"] = "pipeline"
+                            r_entry["steps"] = entry.get("steps", {})
+                        routines.append(r_entry)
             except Exception:
                 continue
 

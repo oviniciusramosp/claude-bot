@@ -225,8 +225,10 @@ Commit immediately after:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `type` | string | `routine` | `routine` or `pipeline` |
-| `schedule.times` | list | — | Times HH:MM (24h) |
-| `schedule.days` | list | `["*"]` | Weekdays or `["*"]` for all |
+| `schedule.times` | list | — | Times HH:MM (24h) — required unless `interval` is set |
+| `schedule.interval` | string | — | Run every N units: `30m`, `4h`, `3d`, `2w` — replaces `times` |
+| `schedule.days` | list | `["*"]` | Weekdays or `["*"]` for all (works with `times` and `interval`) |
+| `schedule.monthdays` | list | — | Days of month e.g. `[1, 15]` — filter for both clock and interval modes |
 | `schedule.until` | string | — | End date YYYY-MM-DD (optional) |
 | `model` | string | `sonnet` | Model to use |
 | `agent` | string | — | Agent to route execution to |
