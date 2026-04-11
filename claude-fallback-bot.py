@@ -289,6 +289,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/sessions` — Listar sessões
 • `/switch <nome>` — Trocar sessão
 • `/delete <nome>` — Apagar sessão
+• `/clone <nome>` — Clonar sessão atual (mesma thread do Claude, branch paralela)
 • `/clear` — Resetar sessão atual
 • `/compact` — Compactar contexto
 • `/cost` — Custo e uso de tokens da sessão
@@ -1709,6 +1710,40 @@ class SessionManager:
             self.active_session = next(iter(self.sessions), None)
         self.save()
         return True
+
+    def clone(self, source_name: str, dest_name: str) -> Optional[Session]:
+        """Clone an existing session into a new name.
+
+        The clone shares the same Claude session_id, model, workspace, and agent
+        — meaning it continues the source's Claude-side conversation thread.
+        Cloning lets the user branch a session and try divergent prompts while
+        still keeping the original intact as a rollback point.
+
+        message_count is carried over so context utilization stats are accurate
+        (the cloned Claude session has the same token history). total_turns and
+        created_at are reset because the clone is a NEW Session record.
+
+        Returns the new Session, or None if source is missing / dest already exists.
+        """
+        if source_name not in self.sessions:
+            return None
+        if dest_name in self.sessions:
+            return None
+        src = self.sessions[source_name]
+        clone = Session(
+            name=dest_name,
+            session_id=src.session_id,      # SAME Claude session — continues the thread
+            model=src.model,
+            workspace=src.workspace,
+            agent=src.agent,
+            created_at=time.time(),         # fresh creation timestamp for eviction
+            message_count=src.message_count,  # carry over so auto-compact stats stay accurate
+            total_turns=0,                  # fresh turn counter for this branch
+        )
+        self.sessions[dest_name] = clone
+        self.active_session = dest_name
+        self.save()
+        return clone
 
     def list(self) -> List[Session]:
         return list(self.sessions.values())
@@ -3852,6 +3887,44 @@ class ClaudeTelegramBot:
         else:
             self.send_message(f"❌ Sessão `{name}` não encontrada.")
 
+    def cmd_clone(self, dest_name: str) -> None:
+        """Clone the current active session into a new name and switch to it.
+
+        Usage: /clone <new-name>
+        The clone keeps the same Claude session_id (continues the conversation)
+        so the user can branch and test divergent prompts. Original stays intact.
+        """
+        dest_name = (dest_name or "").strip()
+        if not dest_name:
+            self.send_message(
+                "❌ Use: `/clone <nome>`\n"
+                "_Clona a sessão atual mantendo o mesmo session\\_id do Claude — "
+                "permite testar prompts divergentes sem perder o contexto original._"
+            )
+            return
+        current = self._get_session()
+        if current is None:
+            self.send_message("❌ Nenhuma sessão ativa para clonar.")
+            return
+        if dest_name in self.sessions.sessions:
+            self.send_message(f"❌ Sessão `{dest_name}` já existe. Escolha outro nome.")
+            return
+        try:
+            clone = self.sessions.clone(current.name, dest_name)
+        except Exception as exc:
+            logger.error("Clone failed: source=%s dest=%s err=%s", current.name, dest_name, exc)
+            self.send_message(f"❌ Falha ao clonar sessão: `{str(exc)[:100]}`")
+            return
+        if clone is None:
+            self.send_message(f"❌ Falha ao clonar sessão `{current.name}` para `{dest_name}`.")
+            return
+        self.send_message(
+            f"🌿 Sessão `{current.name}` clonada para `{clone.name}`.\n"
+            f"• Modelo: `{clone.model}`\n"
+            f"• Session ID: `{clone.session_id or 'nenhum'}`\n"
+            f"_Agora ativa nesta branch. Original intacta em `{current.name}`._"
+        )
+
     def cmd_clear(self) -> None:
         # Consolidate before clearing — session_id will be lost
         self._consolidate_session()
@@ -5820,6 +5893,7 @@ class ClaudeTelegramBot:
                 "/sessions": lambda: self.cmd_sessions_list(),
                 "/switch": lambda: self.cmd_switch(arg) if arg else self.send_message("❌ Use: `/switch <nome>`"),
                 "/delete": lambda: self.cmd_delete(arg) if arg else self.send_message("❌ Use: `/delete <nome>`"),
+                "/clone": lambda: self.cmd_clone(arg),
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),
