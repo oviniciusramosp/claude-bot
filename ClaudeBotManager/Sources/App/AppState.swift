@@ -25,7 +25,7 @@ final class AppState: ObservableObject {
     /// minimal fallback so the UI doesn't crash.
     var mainAgent: Agent {
         agents.first(where: { $0.id == "main" })
-            ?? Agent(id: "main", name: "Main", icon: "🧠",
+            ?? Agent(id: "main", name: "Main", icon: "🤖",
                      description: "Default bot agent (not yet initialized — run migrate_vault_per_agent.py)",
                      personality: "", model: "sonnet", color: "grey", tags: [],
                      isDefault: true, source: nil, sourceId: nil,
@@ -44,6 +44,9 @@ final class AppState: ObservableObject {
     @Published var vaultEnvEntries: [VaultEnvEntry] = []
     @Published var vaultPath: String = ""
     @Published var dataDir: String = ""
+    /// Universal vault rules (contents of `vault/CLAUDE.md`). Editable via
+    /// Settings → Customization → Vault Rules. NOT specific to any agent.
+    @Published var vaultClaudeMd: String = ""
 
     // Vault env internals (preserves comments/blanks on save)
     private var vaultEnvRawLines: [String] = []
@@ -197,6 +200,7 @@ final class AppState: ObservableObject {
     func loadAll() async {
         // v3.5: Main is loaded as part of `loadAgents()` — no separate call.
         await loadAgents()
+        await loadVaultClaudeMd()
         await loadRoutines()
         await loadSkills()
         await loadReactions()
@@ -212,6 +216,21 @@ final class AppState: ObservableObject {
             let loaded = try await vs.loadAgents()
             agents = loaded
         } catch {}
+    }
+
+    /// Load the universal vault rules from `vault/CLAUDE.md` so Settings can
+    /// display and edit them. NOT specific to any agent.
+    func loadVaultClaudeMd() async {
+        guard let vs = vaultService else { return }
+        vaultClaudeMd = await vs.loadVaultClaudeMd()
+    }
+
+    /// Save the universal vault rules back to `vault/CLAUDE.md`. Any running
+    /// bot session picks up the new rules on its next Claude CLI invocation
+    /// (the file is walked automatically by the CLAUDE.md hierarchy loader).
+    func saveVaultClaudeMd(_ content: String) async throws {
+        try await vaultService?.saveVaultClaudeMd(content)
+        vaultClaudeMd = content
     }
 
     func loadRoutines() async {

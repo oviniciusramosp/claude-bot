@@ -814,6 +814,27 @@ actor VaultService {
         try content.write(to: indexURL, atomically: true, encoding: .utf8)
     }
 
+    // MARK: - Vault rules (vault/CLAUDE.md)
+    //
+    // The top-level `vault/CLAUDE.md` holds universal vault rules
+    // (frontmatter contract, graph conventions, linking rules). It is NOT
+    // specific to any agent — it is loaded automatically by the Claude CLI
+    // as the parent in the CLAUDE.md hierarchy walk, so every agent session
+    // inherits these rules. The Settings view exposes it so the user can
+    // edit the universal contract without leaving the app.
+
+    private var vaultClaudeURL: URL {
+        vaultURL.appending(component: "CLAUDE.md")
+    }
+
+    func loadVaultClaudeMd() -> String {
+        (try? String(contentsOf: vaultClaudeURL, encoding: .utf8)) ?? ""
+    }
+
+    func saveVaultClaudeMd(_ content: String) throws {
+        try content.write(to: vaultClaudeURL, atomically: true, encoding: .utf8)
+    }
+
     // MARK: - Helpers
     //
     // Note (v3.5): the Main agent is no longer a synthetic placeholder loaded

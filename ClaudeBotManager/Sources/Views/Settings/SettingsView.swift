@@ -18,6 +18,11 @@ struct SettingsView: View {
     @State private var vaultEntries: [VaultEnvEntry] = []
     @State private var showVaultSecrets: Set<String> = []
     @State private var vaultNeedsRestart = false
+
+    // Universal vault rules — editable text for `vault/CLAUDE.md`
+    @State private var vaultClaudeDraft: String = ""
+    @State private var vaultClaudeSaved: Bool = false
+    @State private var vaultClaudeSaving: Bool = false
     @State private var expandedGroups: Set<String> = []
     @State private var addingInGroup: String? = nil  // group id currently showing add form
     @State private var newKeyName = ""
@@ -59,6 +64,14 @@ struct SettingsView: View {
             userIds = parsed.users.isEmpty ? [""] : parsed.users
             groupIds = parsed.groups
             vaultEntries = appState.vaultEnvEntries.filter { !$0.isAgentRouting }
+            vaultClaudeDraft = appState.vaultClaudeMd
+        }
+        .onChange(of: appState.vaultClaudeMd) { _, newValue in
+            // Pull disk changes into the editor only when the user hasn't
+            // touched the draft yet (avoid trampling unsaved edits).
+            if !vaultClaudeSaving && vaultClaudeDraft == "" {
+                vaultClaudeDraft = newValue
+            }
         }
         .alert("Validation Error", isPresented: $showValidationAlert) {
             Button("OK", role: .cancel) {}
@@ -331,6 +344,58 @@ struct SettingsView: View {
                  : "Voz nativa macOS — robótica, funciona offline")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+
+        // Vault Rules (universal — vault/CLAUDE.md)
+        SectionCard(title: "Vault Rules", symbol: "doc.text.fill") {
+            Text("vault/CLAUDE.md — universal rules loaded by every agent session. Contains the frontmatter contract, graph conventions, and linking rules. NOT specific to any agent — the Main agent's personality lives in vault/main/CLAUDE.md.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, Spacing.xs)
+
+            TextEditor(text: $vaultClaudeDraft)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(minHeight: 280)
+                .padding(Spacing.sm)
+                .scrollContentBackground(.hidden)
+                .background(Color.black.opacity(0.04))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                )
+
+            HStack {
+                if vaultClaudeSaved {
+                    Label("Saved", systemImage: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(Color.statusGreen)
+                }
+                Spacer()
+                Button("Reload from disk") {
+                    Task {
+                        await appState.loadVaultClaudeMd()
+                        vaultClaudeDraft = appState.vaultClaudeMd
+                        vaultClaudeSaved = false
+                    }
+                }
+                .buttonStyle(.bordered)
+                .disabled(vaultClaudeSaving)
+
+                Button(vaultClaudeSaving ? "Saving…" : "Save Rules") {
+                    vaultClaudeSaving = true
+                    vaultClaudeSaved = false
+                    let draft = vaultClaudeDraft
+                    Task {
+                        try? await appState.saveVaultClaudeMd(draft)
+                        vaultClaudeSaving = false
+                        vaultClaudeSaved = true
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(vaultClaudeSaving || vaultClaudeDraft == appState.vaultClaudeMd)
+            }
+            .padding(.top, Spacing.xs)
         }
 
         // Save (customization)
