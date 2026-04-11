@@ -34,8 +34,8 @@ When diagnosing bot issues, read `~/.claude-bot/bot.log` (last ~50 lines).
 
 ### Key Classes
 
-- **`Session`** (dataclass) — Holds session state: name, claude session ID, model, workspace, message count
-- **`SessionManager`** — CRUD for sessions, persists to `sessions.json`
+- **`Session`** (dataclass) — Holds session state: name, Claude session ID, model, workspace, agent, created_at, message_count, total_turns, active_memory (per-session toggle for proactive vault context injection, default `True`)
+- **`SessionManager`** — CRUD for sessions, persists to `sessions.json`. `_load()` filters unknown keys so adding new fields is forward-compatible.
 - **`ClaudeRunner`** — Spawns Claude CLI as subprocess, handles streaming JSON output, cancellation (SIGINT → SIGTERM → SIGKILL)
 - **`ClaudeTelegramBot`** — Main orchestrator: Telegram long-polling, command routing, inline keyboards, message splitting
 
@@ -98,10 +98,14 @@ Read by Claude Code when executing tasks in the vault context (routines, interac
 | `/sessions` | List all sessions |
 | `/switch <name>` | Switch session |
 | `/delete <name>` | Delete session |
+| `/clone <name>` | Clone the current session into a new branch (same Claude thread, fresh turn counter) |
 | `/run [name]` | Manually trigger a routine/pipeline |
 | `/compact` | Auto-compact context |
 | `/cost` | Token usage and cost for current session |
 | `/doctor` | Check Claude Code installation health |
+| `/lint` | Audit the vault (frontmatter, wikilinks, schedules, stale routines) |
+| `/find <expr>` | Query the vault by frontmatter (e.g. `type=routine model=opus`) |
+| `/indexes` | Regenerate vault index marker blocks (Routines.md, Skills.md, Agents.md) |
 | `/btw <msg>` | Inject message to running Claude process (native); falls back to queue |
 | `/delegate <prompt>` | Spawn an isolated subagent (fresh context, 10min hard limit), inject result back into parent session |
 | `/stop` | Cancel running task |
@@ -110,6 +114,8 @@ Read by Claude Code when executing tasks in the vault context (routines, interac
 | `/effort <low\|medium\|high>` | Set reasoning effort |
 | `/clear` | Reset current session |
 | `/important` | Record key points from the current session into today's Journal |
+| `/lesson <text>` | Record a manual lesson in `vault/Lessons/` (compound engineering) |
+| `/active-memory [on\|off\|status]` | Toggle proactive vault context injection (default: on) |
 | `/agent [name\|new\|list]` | Switch/create/list agents (no arg → inline keyboard) |
 | `/routine [list\|status]` | Create a routine interactively, or list/status of today's routines |
 | `/skill [name]` | Run a vault skill directly |
@@ -143,8 +149,9 @@ When encountering an error, **never treat it as a one-off**. Follow this mandato
 ### Adding a new command
 
 1. Add a `cmd_<name>` method to the `ClaudeTelegramBot` class
-2. Register it in the `handler_map` dict inside `_handle_text()` (around line 5188)
-3. Add it to the help text in `cmd_help()`
+2. Register it in the `handler_map` dict inside `_handle_text()` (search `handler_map = {`)
+3. Add it to `HELP_TEXT` so `cmd_help()` surfaces it
+4. Add a dispatch test in `tests/test_bot_integration.py` and, if the command mutates state, a round-trip test
 
 ### Changing default model/timeouts
 
@@ -260,7 +267,9 @@ If the output of a routine (not pipeline) is exactly `NO_REPLY`, the bot sends n
 | Routine | Description |
 |---------|-------------|
 | `update-check` | Checks daily for Claude Code CLI (brew) or repo (git) updates. Notifies only when there's something to update. |
-| `vault-graph-update` | Regenerates the vault's lightweight knowledge graph (`vault/.graphs/graph.json`) from frontmatter and wikilinks. No LLM cost. Runs daily at 4am. |
+| `vault-graph-update` | Regenerates the vault's lightweight knowledge graph (`vault/.graphs/graph.json`) from frontmatter and wikilinks. No LLM cost. Runs daily at 4am. Active Memory depends on this graph. |
+| `vault-indexes-update` | Auto-regenerates the marker blocks inside `Routines.md`, `Skills.md`, and `Agents.md` so index files stay in sync with actual vault content. |
+| `vault-lint` | Daily vault hygiene check — frontmatter completeness, broken wikilinks, schedule sanity, orphan notes, stale routines. Runs `scripts/vault_lint.py`. |
 | `journal-audit` | Nightly audit (23:59) that checks all agents' journals for completeness, fixes frontmatter, and fills gaps from the activity log. |
 
 ## Voice / TTS
@@ -273,6 +282,35 @@ The bot supports voice responses (Text-to-Speech) via macOS `say` + ffmpeg (OGG 
 - **`voice: true` in frontmatter** — routines/pipelines deliver response as audio
 
 Voice follows the `HEAR_LOCALE` (default `pt-BR` → Luciana voice). The TTS prompt instructs Claude to respond in the configured language, without emojis, short and conversational. Emojis are removed from audio via `_strip_markdown()`.
+
+## Active Memory (v2.34.0+)
+
+Active Memory is a deterministic pre-reply hook inspired by OpenClaw v2026.4.10. Before each interactive Claude turn, the bot scores non-skill nodes from `vault/.graphs/graph.json` against the user's prompt and appends a compact `## Active Memory` block — with short (≤400 char) file excerpts — to the system prompt. No LLM call, ~50 ms typical, 200 ms hard budget, fail-open.
+
+- **Scope:** interactive chat only. Routines and pipelines with `context: minimal` automatically skip it because they pass `system_prompt=None`.
+- **Excluded node types:** `skill` (already covered by the skill hint helper below) and `history` (churn-y logs).
+- **Per-session toggle:** `/active-memory [on|off|status]` — persists to `sessions.json` via the new `Session.active_memory` field.
+- **Global toggle:** `ACTIVE_MEMORY_ENABLED = True` constant at the top of `claude-fallback-bot.py`.
+- **Cache:** `_active_memory_graph_cache` dict keyed by absolute graph path, mtime-invalidated so the daily `vault-graph-update` routine transparently refreshes it.
+- **Tests:** `tests/test_active_memory.py` — 13 tests covering keyword matching, skill/history exclusion, node/excerpt caps, frontmatter stripping, cache invalidation, missing-graph fail-open, global/per-session gating, and command registration.
+
+## Graph-based skill hints
+
+Separate from Active Memory but complementary: `_select_relevant_skills()` reads the same `vault/.graphs/graph.json` and injects a short `<hint>Relevant skills for this task: …</hint>` prefix into the user prompt on every interactive message. Filters to `type=="skill"` only. Controlled by `SKILL_HINTS_ENABLED = True`. Tests in `tests/test_skill_hints.py`.
+
+The two helpers run in sequence inside `_run_claude_prompt()`:
+1. `_find_relevant_skills()` (via `vault_query`) — appends "## Available Skills" block to the system prompt
+2. `_active_memory_lookup()` — appends "## Active Memory" block to the system prompt
+3. `_select_relevant_skills()` (via graph.json) — prepends `<hint>` to the user prompt
+
+## Lessons (compound engineering)
+
+`vault/Lessons/` captures hard-won knowledge so Claude can scan past failures before starting a similar task. Two entry points:
+
+- **Automatic:** the session consolidator records lessons when the session detects a resolved bug or clear learning
+- **Manual:** `/lesson <text>` writes `vault/Lessons/manual-YYYY-MM-DD-HHMM.md` with structured frontmatter (`type: lesson`, `status: recorded`)
+
+The SYSTEM_PROMPT instructs Claude to scan `Lessons/` before similar tasks. Tests in `tests/test_lessons.py`.
 
 ## Auto-compact and session rotation
 
@@ -387,7 +425,7 @@ The test suite covers the bot's Python code, scripts, and the Swift `ClaudeBotMa
 
 ```bash
 ./test.sh           # Python + Swift (full suite)
-./test.sh py        # Python only (~200 tests, ~5s)
+./test.sh py        # Python only (~380 tests, ~5s)
 ./test.sh swift     # Swift only (~20 tests)
 ./test.sh tests.test_session_manager  # one Python module
 ```
@@ -397,7 +435,7 @@ CI runs on every push/PR via `.github/workflows/tests.yml` (macOS runner — req
 ### Layout
 
 ```
-tests/                              # Python tests
+tests/                              # Python tests (~380 tests, pure stdlib)
   _botload.py                       # imports claude-fallback-bot.py under a tmp HOME
   test_smoke_import.py              # bot module loads cleanly
   test_smoke_compile.py             # all .py + .sh files compile / parse
@@ -411,9 +449,17 @@ tests/                              # Python tests
   test_reactions_and_danger.py      # load_reaction + DANGEROUS_PATTERNS
   test_bot_integration.py           # ClaudeTelegramBot with mocked Telegram API
   test_claude_runner.py             # ClaudeRunner._handle_event (stream-json)
+  test_context_isolation.py         # frozen-context / journal-mtime detection
   test_contracts.py                 # sessions.json, plists, real routines, BOT_VERSION
+  test_hot_cache.py                 # vault hot-file cache
   test_journal_audit.py             # scripts/journal-audit.py
   test_vault_graph_builder.py       # scripts/vault-graph-builder.py
+  test_vault_indexes.py             # vault index auto-regeneration
+  test_vault_lint.py                # scripts/vault_lint.py
+  test_vault_query.py               # scripts/vault_query.py (frontmatter query engine)
+  test_skill_hints.py               # graph-based _select_relevant_skills
+  test_lessons.py                   # /lesson command + record_manual_lesson
+  test_active_memory.py             # Active Memory lookup, cache, gating (v2.34.0)
 
 ClaudeBotManager/Tests/ClaudeBotManagerTests/
   FrontmatterParserTests.swift      # Swift parser parity with Python

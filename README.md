@@ -20,14 +20,19 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 ## What You Get
 
 - **Remote Claude Code access** from any phone via Telegram
-- **Session persistence** -- context carries across messages via Claude's `--resume`
+- **Session persistence** -- context carries across messages via Claude's `--resume`; `/clone` to branch a session
 - **Live streaming** -- watch Claude's response build in real-time as Telegram message edits
 - **Status reactions** -- emoji reactions on your message show what Claude is doing (thinking, coding, writing)
 - **Model switching** -- switch between Sonnet, Opus, and Haiku mid-conversation
-- **Knowledge vault** -- Obsidian-compatible vault with daily journal, notes, skills, and routines
-- **Scheduled routines & pipelines** -- cron-like system that runs prompts on a schedule, with multi-step pipelines
+- **Knowledge vault** -- Obsidian-compatible vault with daily journal, notes, skills, routines, and lessons
+- **Knowledge graph** -- lightweight deterministic graph (`vault/.graphs/graph.json`) rebuilt daily; powers skill hints and Active Memory
+- **Active Memory** -- before every interactive message, the bot scores vault nodes against your prompt and auto-injects a compact context block (no LLM cost, ~50ms)
+- **Compound engineering (Lessons)** -- `/lesson` captures hard-won knowledge so Claude scans past failures before similar tasks
+- **Scheduled routines & pipelines** -- cron-like system that runs prompts on a schedule, with multi-step pipelines and Ralph loops
+- **Isolated sub-agents** -- `/delegate` spawns a fresh Claude with its own context and 10-minute hard limit, result is injected back into the parent session
 - **Image analysis** -- send photos from Telegram for Claude to analyze
-- **Voice input & output** -- send voice messages (transcribed via macOS speech recognition), add `#voice` to any message to get an audio response back
+- **Voice input & output** -- send voice messages (transcribed via macOS speech recognition), add `#voice` to any message or `/voice on` to get audio responses for the whole session
+- **Vault hygiene commands** -- `/lint`, `/find`, `/indexes` to audit and query the vault from Telegram
 - **Auto session management** -- auto-compact every 25 turns, auto-rotate sessions at 80 turns
 - **macOS native app** -- SwiftUI manager app with dashboard, agent/routine/skill management, logs, and settings
 
@@ -117,6 +122,7 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/switch <name>` | Switch session (auto-consolidates first) |
 | `/sessions` | List all sessions |
 | `/delete <name>` | Delete a session |
+| `/clone <name>` | Branch the current session into a new name (same Claude thread, fresh turn counter) |
 | `/clear` | Reset session (drops session ID) |
 | `/compact` | Compact session context |
 
@@ -155,15 +161,27 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/agent new` | Create a new agent (interactive) |
 | `/agent list` | List all agents |
 
-### Journal
+### Journal & Memory
 | Command | Description |
 |---------|-------------|
 | `/important` | Register key points from this session in today's Journal |
+| `/lesson <text>` | Record a manual lesson in `vault/Lessons/` (compound engineering) |
+| `/active-memory [on\|off\|status]` | Toggle proactive vault context injection for this session (default: on) |
+
+### Vault
+| Command | Description |
+|---------|-------------|
+| `/lint` | Audit the vault (frontmatter, wikilinks, schedules, stale routines) |
+| `/find <expr>` | Query the vault by frontmatter (e.g. `type=routine model=opus`) |
+| `/indexes` | Regenerate the auto-index marker blocks inside `Routines.md`, `Skills.md`, `Agents.md` |
+| `/skill [name]` | Run a vault skill directly |
 
 ### Audio
 | Command | Description |
 |---------|-------------|
 | `/audio` | Language picker for voice transcription (inline keyboard) |
+| `/voice [on\|off]` | Toggle TTS (audio responses for all messages in the session) |
+| `#voice` (in message) | One-shot audio response for this message only |
 
 **Text** -- any non-command message goes to Claude as a prompt.
 **Photos** -- images are downloaded and passed to Claude for analysis.
@@ -255,7 +273,10 @@ vault/
 |-- Notes/          Durable knowledge, wikilinked for graph navigation
 |-- Skills/         Reusable task definitions for recurring workflows
 |-- Routines/       Scheduled prompts (cron-like execution)
+|-- Lessons/        Hard-won knowledge captured from past failures (compound engineering)
+|-- Agents/         Specialized personas, each with their own CLAUDE.md and Journal
 |-- Images/         User-requested image storage, organized by theme
+|-- .graphs/        Lightweight knowledge graph (graph.json), regenerated daily
 |-- Tooling.md      Tool preferences (which tool for each task type)
 |-- .env            Project credentials (gitignored)
 '-- README.md       Vault index and rules
@@ -268,6 +289,8 @@ vault/
 - Journal is append-only -- sessions auto-consolidate on `/new`, `/switch`, or `/important`
 - Notes use `[[wikilinks]]` to form a navigable knowledge graph
 - Open the vault in Obsidian to explore connections via Graph View
+- A daily routine (`vault-graph-update`) rebuilds a lightweight deterministic graph at `vault/.graphs/graph.json` from frontmatter and wikilinks — no LLM cost
+- **Active Memory** (v2.34.0+): before every interactive message, the bot scores graph nodes against your prompt and injects a compact `## Active Memory` block with short excerpts of the top 3 matches (notes, references, routines, pipelines, indexes — skills are handled by a separate hint). Zero LLM cost, ~50ms, fail-open. Toggle per session with `/active-memory on|off|status`.
 
 ### Personalizing Your Vault
 
@@ -481,7 +504,7 @@ The repo ships with a full test suite (Python + Swift, no pip dependencies for t
 
 ```bash
 ./test.sh           # Python + Swift (full suite)
-./test.sh py        # Python only (~200 tests, ~5s)
+./test.sh py        # Python only (~380 tests, ~5s, pure stdlib)
 ./test.sh swift     # Swift only (ClaudeBotManager)
 ```
 
