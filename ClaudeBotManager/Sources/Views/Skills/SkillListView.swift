@@ -6,15 +6,10 @@ struct SkillListView: View {
     @State private var searchText = ""
     @State private var showCreateSheet = false
 
+    private var search: VaultSearch { VaultSearch(searchText) }
+
     private func filtered(_ skills: [Skill]) -> [Skill] {
-        guard !searchText.isEmpty else { return skills }
-        let q = searchText.lowercased()
-        return skills.filter {
-            $0.title.lowercased().contains(q)
-            || $0.description.lowercased().contains(q)
-            || $0.trigger.lowercased().contains(q)
-            || $0.tags.contains { $0.lowercased().contains(q) }
-        }
+        skills.filter { search.matches($0) }
     }
 
     private var botSkills: [Skill] { filtered(appState.skills.filter { $0.isBuiltIn }) }
@@ -48,7 +43,11 @@ struct SkillListView: View {
         }
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Skills")
-        .searchable(text: $searchText, placement: .toolbar, prompt: "Search skills")
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: "Filter (e.g. tag:publish trigger:notion)"
+        )
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {

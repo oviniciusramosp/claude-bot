@@ -4,13 +4,22 @@ struct RoutineListView: View {
     @EnvironmentObject var appState: AppState
     @State private var showCreateSheet = false
     @State private var selectedRoutine: Routine? = nil
+    @State private var searchText: String = ""
+
+    private var search: VaultSearch { VaultSearch(searchText) }
 
     private func sorted(_ routines: [Routine]) -> [Routine] {
         routines.sorted { ($0.schedule.times.first ?? "99:99") < ($1.schedule.times.first ?? "99:99") }
     }
 
-    private var botRoutines: [Routine] { sorted(appState.routines.filter { $0.isBuiltIn }) }
-    private var myRoutines: [Routine] { sorted(appState.routines.filter { !$0.isBuiltIn }) }
+    private var botRoutines: [Routine] {
+        sorted(appState.routines.filter { $0.isBuiltIn && search.matches($0) })
+    }
+    private var myRoutines: [Routine] {
+        sorted(appState.routines.filter { !$0.isBuiltIn && search.matches($0) })
+    }
+
+    private var hasFilteredResults: Bool { !botRoutines.isEmpty || !myRoutines.isEmpty }
 
     var body: some View {
         ScrollView {
@@ -20,6 +29,12 @@ struct RoutineListView: View {
                         symbol: "clock.arrow.2.circlepath",
                         title: "No Routines",
                         subtitle: "Create a routine to schedule automated tasks."
+                    )
+                } else if !hasFilteredResults && !search.isEmpty {
+                    EmptyStateView(
+                        symbol: "magnifyingglass",
+                        title: "No matches",
+                        subtitle: "Try a different filter — e.g. `model:opus` or `tag:crypto`."
                     )
                 } else {
                     if !botRoutines.isEmpty {
@@ -32,6 +47,11 @@ struct RoutineListView: View {
             }
             .padding(Spacing.xl)
         }
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: "Filter (e.g. model:opus tag:crypto)"
+        )
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Routines")
         .toolbar {

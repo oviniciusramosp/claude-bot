@@ -5,30 +5,56 @@ struct AgentListView: View {
     @State private var showCreateSheet = false
     @State private var selectedAgent: Agent? = nil
     @State private var showMainDetail = false
+    @State private var searchText: String = ""
+
+    private var search: VaultSearch { VaultSearch(searchText) }
+
+    private var filteredAgents: [Agent] {
+        appState.agents.filter { search.matches($0) }
+    }
+
+    /// Main agent always shows unless the user typed something that would
+    /// exclude it explicitly (e.g. `default:false`).
+    private var showMainAgent: Bool {
+        search.isEmpty || search.matches(appState.mainAgent)
+    }
 
     var body: some View {
         ScrollView {
             VStack(spacing: Spacing.xl) {
                 // Main agent — full width, prominent
-                MainAgentCard(agent: appState.mainAgent)
-                    .onTapGesture { showMainDetail = true }
+                if showMainAgent {
+                    MainAgentCard(agent: appState.mainAgent)
+                        .onTapGesture { showMainDetail = true }
+                }
 
                 // Other agents — 2-column grid
-                if !appState.agents.isEmpty {
+                if !filteredAgents.isEmpty {
                     LazyVGrid(
                         columns: [GridItem(.flexible(), spacing: Spacing.xl),
                                   GridItem(.flexible(), spacing: Spacing.xl)],
                         spacing: Spacing.xl
                     ) {
-                        ForEach(appState.agents) { agent in
+                        ForEach(filteredAgents) { agent in
                             AgentCard(agent: agent)
                                 .onTapGesture { selectedAgent = agent }
                         }
                     }
+                } else if !search.isEmpty && !showMainAgent {
+                    EmptyStateView(
+                        symbol: "magnifyingglass",
+                        title: "No matches",
+                        subtitle: "Try `model:opus` or `tag:crypto`."
+                    )
                 }
             }
             .padding(Spacing.xl)
         }
+        .searchable(
+            text: $searchText,
+            placement: .toolbar,
+            prompt: "Filter (e.g. model:opus tag:crypto)"
+        )
         .background(Color(.windowBackgroundColor))
         .navigationTitle("Agents")
         .toolbar {

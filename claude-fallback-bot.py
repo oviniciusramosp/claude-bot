@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.31.0"  # feat: vault upgrade — auto-regenerated indexes (/indexes), /find frontmatter search, routine execution history rollup, hot cache per agent with Notes auto-extraction
+BOT_VERSION = "2.32.0"  # feat: macOS app frontmatter-aware filter/search via shared VaultSearch matcher (matches bot /find syntax: model:opus tag:crypto agent:foo)
 
 import hmac
 import hashlib
