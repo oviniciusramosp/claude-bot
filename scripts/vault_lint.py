@@ -53,8 +53,17 @@ REQUIRED_FRONTMATTER_KEYS = ("title", "description", "type", "created", "updated
 # Files that legitimately have no frontmatter (or only partial)
 FRONTMATTER_EXEMPT_NAMES = {"CLAUDE.md", "agent.md"}
 
-# Folders whose contents we don't lint (purely runtime data)
-EXCLUDED_LINT_DIRS = {".graphs", ".obsidian", ".claude", "__pycache__", "workspace"}
+# Folders whose contents we don't lint (purely runtime data, not knowledge).
+# Mirrors vault-graph-builder.is_ephemeral so the linter and the graph stay
+# consistent on what counts as a knowledge node.
+EXCLUDED_LINT_DIRS = {
+    ".graphs",
+    ".obsidian",
+    ".claude",
+    "__pycache__",
+    "workspace",
+    "Reactions",  # webhook config, see vault/CLAUDE.md "Files that are NOT graph nodes"
+}
 
 
 @dataclass

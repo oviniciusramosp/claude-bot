@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.26.1"  # feat: vault_query foundation — extract single-source frontmatter parser to scripts/vault_frontmatter.py
+BOT_VERSION = "2.27.0"  # feat: /lint command + vault_lint.py linter (8 categories: missing FM, broken links, orphans, broken prompt_file, stale routines, step leakage, index drift, schedule sanity) + nightly vault-lint routine
 
 import hmac
 import hashlib
@@ -293,6 +293,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/compact` — Compactar contexto
 • `/cost` — Custo e uso de tokens da sessão
 • `/doctor` — Verificar saúde da instalação
+• `/lint` — Auditar o vault (frontmatter, links, schedules)
 
 ⚙️ *Modelo*
 • `/sonnet` — Usar Sonnet
@@ -3746,6 +3747,27 @@ class ClaudeTelegramBot:
     def cmd_doctor(self) -> None:
         self._run_claude_prompt("/doctor")
 
+    def cmd_lint(self) -> None:
+        """Run the vault linter and report results to Telegram."""
+        try:
+            from vault_lint import lint_vault, _format_text_report
+        except Exception as exc:
+            logger.exception("Failed to import vault_lint")
+            self.send_message(f"❌ Vault lint indisponível: `{exc}`")
+            return
+        try:
+            report = lint_vault(VAULT_DIR)
+        except Exception as exc:
+            logger.exception("vault_lint failed")
+            self.send_message(f"❌ Lint falhou: `{exc}`")
+            return
+        text = _format_text_report(report)
+        # Telegram messages have a hard limit; the report is usually small
+        # but let's truncate generously to avoid surprises.
+        if len(text) > 3500:
+            text = text[:3500] + "\n…(truncated)"
+        self.send_message(text)
+
     def cmd_stop(self, arg: str = "") -> None:
         arg = arg.strip().replace(".md", "")
 
@@ -5319,6 +5341,7 @@ class ClaudeTelegramBot:
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),
+                "/lint": lambda: self.cmd_lint(),
                 "/stop": lambda: self.cmd_stop(arg),
                 "/timeout": lambda: self.cmd_timeout(arg) if arg else self.send_message(f"ℹ️ Timeout atual: {self.timeout_seconds}s"),
                 "/workspace": lambda: self.cmd_workspace(arg) if arg else self.send_message("❌ Use: `/workspace <path>`"),
