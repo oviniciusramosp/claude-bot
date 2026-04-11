@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.26.0"  # feat: vault_query foundation — extract single-source frontmatter parser to scripts/vault_frontmatter.py
+BOT_VERSION = "2.26.1"  # feat: vault_query foundation — extract single-source frontmatter parser to scripts/vault_frontmatter.py
 
 import hmac
 import hashlib
@@ -2577,8 +2577,12 @@ class ClaudeTelegramBot:
         self._contexts_lock = threading.RLock()
         self._load_contexts()
 
-        # Active context (set per-message in the polling loop)
-        self._ctx: Optional[ThreadContext] = None
+        # Active context — thread-local. Each thread (polling, update handler,
+        # routine, pipeline, callback, control server) sees its own slot.
+        # This prevents cross-talk when multiple Claude runs execute
+        # concurrently in different Telegram topics. Reads/writes go through
+        # the _ctx property below.
+        self._ctx_local = threading.local()
 
         # Routine scheduler
         self.routine_state = RoutineStateManager()
@@ -3023,8 +3027,23 @@ class ClaudeTelegramBot:
                     pass
 
     @property
+    def _ctx(self) -> Optional[ThreadContext]:
+        """Thread-local active context. Each thread has its own slot."""
+        return getattr(self._ctx_local, "value", None)
+
+    @_ctx.setter
+    def _ctx(self, value: Optional[ThreadContext]) -> None:
+        self._ctx_local.value = value
+
+    @property
     def _chat_id(self) -> str:
-        return self._ctx.chat_id if self._ctx else str(TELEGRAM_CHAT_ID)
+        if self._ctx:
+            return self._ctx.chat_id
+        # Fallback for code paths with no per-thread context (e.g. webhook
+        # server error notifications). Use the first configured chat ID, not
+        # the raw env var (which may be a comma-separated list).
+        raw = str(TELEGRAM_CHAT_ID)
+        return raw.split(",", 1)[0].strip() if "," in raw else raw
 
     @property
     def runner(self) -> ClaudeRunner:
