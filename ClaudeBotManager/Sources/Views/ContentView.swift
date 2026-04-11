@@ -7,6 +7,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case skills = "Skills"
     case reactions = "Reactions"
     case sessions = "Sessions"
+    case usage = "Usage"
     case logs = "Logs"
     case settings = "Settings"
     case changelog = "Changelog"
@@ -21,6 +22,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .skills: "bolt"
         case .reactions: "bolt.horizontal.circle.fill"
         case .sessions: "folder"
+        case .usage: "chart.line.uptrend.xyaxis"
         case .logs: "info.triangle"
         case .settings: "gear"
         case .changelog: "cloud"
@@ -45,6 +47,7 @@ struct ContentView: View {
                 case .skills: SkillListView()
                 case .reactions: ReactionListView()
                 case .sessions: SessionBrowserView()
+                case .usage: UsageView()
                 case .logs: LogViewerView()
                 case .settings: SettingsView()
                 case .changelog: ChangelogPageView()

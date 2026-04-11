@@ -9,6 +9,11 @@ final class AppState: ObservableObject {
     @Published var claudeUsage: ClaudeUsage = .unavailable
     @Published var activeRunners: Int = 0
 
+    // This week's total cost from ~/.claude-bot/costs.json — displayed as
+    // the sidebar badge on the Usage row. Zero when the file is missing or
+    // has no current week.
+    @Published var weeklyCostUSD: Double = 0
+
     // Data
     @Published var mainAgent: Agent = Agent(id: "main", name: "Main", icon: "🤖",
         description: "Default bot — no specific agent active",

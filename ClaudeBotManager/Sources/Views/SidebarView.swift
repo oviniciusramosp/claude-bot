@@ -17,6 +17,7 @@ struct SidebarView: View {
             }
             Section("System") {
                 sidebarLabel(.sessions)
+                sidebarLabel(.usage)
                 sidebarLabel(.logs)
                 sidebarLabel(.settings)
                 sidebarLabel(.changelog)
@@ -25,6 +26,25 @@ struct SidebarView: View {
         .listStyle(.sidebar)
         .navigationTitle("Claude Bot")
         .frame(minWidth: 180, idealWidth: 200)
+        .task {
+            await refreshUsageBadge()
+        }
+        .onChange(of: selection) { _, newValue in
+            if newValue == .usage {
+                Task { await refreshUsageBadge() }
+            }
+        }
+    }
+
+    private func refreshUsageBadge() async {
+        let service = CostHistoryService(dataDir: appState.dataDir)
+        do {
+            let total = try await service.totalThisWeek()
+            appState.weeklyCostUSD = total
+        } catch {
+            // Missing file or decode failure is fine — keep badge hidden.
+            appState.weeklyCostUSD = 0
+        }
     }
 
     private func sidebarLabel(_ item: SidebarItem) -> some View {
@@ -60,6 +80,9 @@ struct SidebarView: View {
         case .reactions:
             let c = appState.reactions.count
             return c > 0 ? "\(c)" : nil
+        case .usage:
+            let cost = appState.weeklyCostUSD
+            return cost > 0 ? String(format: "$%.2f", cost) : nil
         case .logs:
             let errors = appState.routines.flatMap { $0.todayExecutions }.filter { $0.status == .failed }.count
             return errors > 0 ? "⚠ \(errors)" : nil
