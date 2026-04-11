@@ -176,7 +176,17 @@ class VaultIndex:
     # ----- Single-file lookup -----
 
     def get(self, key: str) -> Optional[VaultFile]:
-        """Look up a file by node_id, relative path, or absolute path."""
+        """Look up a file by node_id, relative path, absolute path, or stem.
+
+        Resolution order:
+            1. Exact node_id match
+            2. Exact relative path match
+            3. Absolute path match
+            4. Relative path with .md appended
+            5. File stem match (e.g. 'crypto-bro' resolves to the first
+               file whose stem is 'crypto-bro' — useful for graph hub files
+               and skills)
+        """
         if key in self._by_node_id:
             return self._by_node_id[key]
         if key in self._by_rel_path:
@@ -192,6 +202,14 @@ class VaultIndex:
         # Try relative path with .md added
         if not key.endswith(".md") and (key + ".md") in self._by_rel_path:
             return self._by_rel_path[key + ".md"]
+        # Try stem match (handles agent hub files, skills referenced by stem)
+        if not key.endswith(".md"):
+            target_stem = key
+        else:
+            target_stem = key[:-3]
+        for f in self.files:
+            if f.path.stem == target_stem:
+                return f
         return None
 
     # ----- Bulk filter -----
