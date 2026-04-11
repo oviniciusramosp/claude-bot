@@ -814,36 +814,14 @@ actor VaultService {
         try content.write(to: indexURL, atomically: true, encoding: .utf8)
     }
 
-    // MARK: - Main Agent (project CLAUDE.md)
-
-    private var projectCLAUDEURL: URL {
-        vaultURL.deletingLastPathComponent().appendingPathComponent("CLAUDE.md")
-    }
-
-    func loadMainAgent() -> Agent {
-        let raw = (try? String(contentsOf: projectCLAUDEURL, encoding: .utf8)) ?? ""
-        return Agent(
-            id: "main",
-            name: "Main",
-            icon: "🤖",
-            description: "Default bot — no specific agent active",
-            personality: "",
-            model: "sonnet",
-            tags: [],
-            isDefault: true,
-            source: nil,
-            sourceId: nil,
-            created: "",
-            updated: "",
-            otherInstructions: raw  // Main uses raw CLAUDE.md, not structured sections
-        )
-    }
-
-    func saveMainAgent(rawContent: String) throws {
-        try rawContent.write(to: projectCLAUDEURL, atomically: true, encoding: .utf8)
-    }
-
     // MARK: - Helpers
+    //
+    // Note (v3.5): the Main agent is no longer a synthetic placeholder loaded
+    // from the project-root `CLAUDE.md`. It is a first-class agent that lives
+    // at `vault/main/` with its own `agent-main.md` hub file and `CLAUDE.md`
+    // personality file, and is loaded by `loadAgents()` like every other
+    // agent. The top-level `vault/CLAUDE.md` holds universal vault rules
+    // (frontmatter, graph, linking) and is NOT specific to any agent.
 
     /// v3.1 flat per-agent layout: every agent lives directly under the vault root.
     /// ``vault/<id>/`` — no more ``Agents/`` wrapper.

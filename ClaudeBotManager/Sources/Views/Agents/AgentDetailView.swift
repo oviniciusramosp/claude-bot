@@ -97,13 +97,43 @@ struct AgentDetailView: View {
 
             Spacer()
 
-            Toggle("", isOn: $agent.isDefault)
-                .labelsHidden()
-                .toggleStyle(.switch)
+            // v3.5: Main is the single mandatory default. For Main, show a
+            // static "Default" pin; for custom agents, no toggle — the user
+            // never picks a different default.
+            if agent.id == "main" {
+                HStack(spacing: 4) {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Color.statusBlue)
+                    Text("Default")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color.statusBlue)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.statusBlue.opacity(0.10))
+                .clipShape(Capsule())
+            }
         }
         .padding(.horizontal, 20)
         .padding(.trailing, 12)
         .padding(.vertical, 16)
+    }
+
+    // MARK: - Color swatch helper
+
+    private func colorHex(_ name: String) -> Color {
+        switch name.lowercased() {
+        case "grey":   return Color(red: 0.62, green: 0.62, blue: 0.62)
+        case "red":    return Color(red: 0.96, green: 0.26, blue: 0.21)
+        case "orange": return Color(red: 1.00, green: 0.60, blue: 0.00)
+        case "yellow": return Color(red: 1.00, green: 0.92, blue: 0.23)
+        case "green":  return Color(red: 0.30, green: 0.69, blue: 0.31)
+        case "teal":   return Color(red: 0.00, green: 0.74, blue: 0.83)
+        case "blue":   return Color(red: 0.13, green: 0.59, blue: 0.95)
+        case "purple": return Color(red: 0.61, green: 0.15, blue: 0.69)
+        default:       return Color(red: 0.62, green: 0.62, blue: 0.62)
+        }
     }
 
     // MARK: - Config Section (Model + Telegram)
@@ -126,45 +156,81 @@ struct AgentDetailView: View {
 
     private var configSection: some View {
         detailFormSection(icon: "gear", title: "Configuration") {
-            HStack(alignment: .top, spacing: 40) {
-                // Model
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                    menuPicker(label: modelDisplayName(agent.model), selection: $agent.model, options: [
-                        ("sonnet", modelDisplayName("sonnet")),
-                        ("opus", modelDisplayName("opus")),
-                        ("haiku", modelDisplayName("haiku")),
-                    ])
-                    Text(modelDescription(agent.model))
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color(white: 0.45))
-                }
-                .frame(maxWidth: .infinity)
-
-                // Telegram
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Telegram Topic").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                    HStack(spacing: 8) {
-                        TextField("Chat ID", text: $agent.chatId)
-                            .font(.system(size: 13, design: .monospaced))
-                            .textFieldStyle(.plain)
-                            .padding(.horizontal, 8)
-                            .frame(height: 24)
-                            .background(Color.black.opacity(0.05))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                        TextField("Thread", text: $agent.threadId)
-                            .font(.system(size: 13, design: .monospaced))
-                            .textFieldStyle(.plain)
-                            .padding(.horizontal, 8)
-                            .frame(width: 80, height: 24)
-                            .background(Color.black.opacity(0.05))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 40) {
+                    // Model
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                        menuPicker(label: modelDisplayName(agent.model), selection: $agent.model, options: [
+                            ("sonnet", modelDisplayName("sonnet")),
+                            ("opus", modelDisplayName("opus")),
+                            ("haiku", modelDisplayName("haiku")),
+                        ])
+                        Text(modelDescription(agent.model))
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(white: 0.45))
                     }
-                    Text("Chat and thread where this agent responds")
+                    .frame(maxWidth: .infinity)
+
+                    // Telegram
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Telegram Topic").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                        HStack(spacing: 8) {
+                            TextField("Chat ID", text: $agent.chatId)
+                                .font(.system(size: 13, design: .monospaced))
+                                .textFieldStyle(.plain)
+                                .padding(.horizontal, 8)
+                                .frame(height: 24)
+                                .background(Color.black.opacity(0.05))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            TextField("Thread", text: $agent.threadId)
+                                .font(.system(size: 13, design: .monospaced))
+                                .textFieldStyle(.plain)
+                                .padding(.horizontal, 8)
+                                .frame(width: 80, height: 24)
+                                .background(Color.black.opacity(0.05))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                        }
+                        Text("Chat and thread where this agent responds")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Color(white: 0.45))
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+
+                // Obsidian graph color — drives the per-agent color group in
+                // .obsidian/graph.json, synced automatically by the bot on
+                // startup and whenever an agent is saved.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Obsidian Graph Color").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    HStack(spacing: 8) {
+                        ForEach(Agent.colorOptions, id: \.self) { colorName in
+                            Button {
+                                agent.color = colorName
+                            } label: {
+                                Circle()
+                                    .fill(colorHex(colorName))
+                                    .frame(width: 22, height: 22)
+                                    .overlay(
+                                        Circle()
+                                            .stroke(Color.primary.opacity(agent.color == colorName ? 0.7 : 0.15),
+                                                    lineWidth: agent.color == colorName ? 2 : 1)
+                                    )
+                                    .overlay(
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundStyle(.white)
+                                            .opacity(agent.color == colorName ? 1 : 0)
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .help(colorName.capitalized)
+                        }
+                    }
+                    Text("Used in the Obsidian graph view to group this agent's files.")
                         .font(.system(size: 10))
                         .foregroundStyle(Color(white: 0.45))
                 }
-                .frame(maxWidth: .infinity)
             }
         }
     }
@@ -245,13 +311,16 @@ struct AgentDetailView: View {
 
     private var footerBar: some View {
         HStack(spacing: Spacing.sm) {
-            Button(role: .destructive) {
-                showDeleteConfirm = true
-            } label: {
-                Label("Delete", systemImage: "trash")
+            // Main is the mandatory default agent in v3.5 and cannot be deleted.
+            if agent.id != "main" {
+                Button(role: .destructive) {
+                    showDeleteConfirm = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.statusRed)
             }
-            .buttonStyle(.bordered)
-            .tint(Color.statusRed)
 
             Spacer()
 
@@ -334,107 +403,8 @@ struct AgentDetailView: View {
     }
 }
 
-// MARK: - Main Agent Detail
-
-struct MainAgentDetailView: View {
-    @EnvironmentObject var appState: AppState
-    @Environment(\.dismiss) var dismiss
-
-    @State private var agent: Agent
-    @State private var isSaving = false
-
-    init(agent: Agent) {
-        _agent = State(initialValue: agent)
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                VStack(spacing: 0) {
-                    // Identity
-                    HStack(alignment: .top, spacing: 10) {
-                        Text(agent.icon)
-                            .font(.system(size: 40))
-                            .frame(width: 44)
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(spacing: Spacing.sm) {
-                                Text(agent.name)
-                                    .font(.system(size: 17, weight: .bold))
-                                Image(systemName: "pin.fill")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color.statusBlue)
-                            }
-                            Text(agent.description)
-                                .font(.system(size: 13))
-                                .foregroundStyle(Color(white: 0.45))
-                        }
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.trailing, 12)
-                    .padding(.vertical, 16)
-
-                    Divider().padding(.horizontal, Spacing.xl)
-
-                    // Instructions
-                    HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: "text.alignleft")
-                            .font(.system(size: 17))
-                            .foregroundStyle(Color(white: 0.75))
-                            .frame(width: 22)
-
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("Instructions")
-                                .font(.system(size: 15, weight: .bold))
-                                .tracking(-0.6)
-                                .foregroundStyle(Color.primary.opacity(0.5))
-
-                            Text("~/claude-bot/CLAUDE.md")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color(white: 0.45))
-
-                            TextEditor(text: $agent.otherInstructions)
-                                .font(.system(size: 13))
-                                .frame(minHeight: 360)
-                                .padding(8)
-                                .scrollContentBackground(.hidden)
-                                .background(Color.white)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                                )
-                        }
-                    }
-                    .padding(.leading, 20)
-                    .padding(.trailing, 32)
-                    .padding(.vertical, 16)
-                }
-            }
-
-            Divider()
-
-            HStack(spacing: Spacing.sm) {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                    .buttonStyle(.bordered)
-                Button(isSaving ? "Saving…" : "Save") {
-                    isSaving = true
-                    Task {
-                        try? await appState.saveMainAgent(agent)
-                        isSaving = false
-                        dismiss()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(isSaving)
-            }
-            .padding(.horizontal, Spacing.xl)
-            .padding(.vertical, Spacing.md)
-        }
-        .frame(minWidth: 720, minHeight: 560)
-        .background(Color(.windowBackgroundColor))
-    }
-}
+// v3.5 note: the former `MainAgentDetailView` (which edited the project-root
+// CLAUDE.md as if it were Main's personality) was removed — Main is now a
+// first-class agent loaded via `loadAgents()` and edited via the normal
+// `AgentDetailView` like every other agent. Its personality/instructions
+// live at `vault/main/CLAUDE.md`, metadata at `vault/main/agent-main.md`.

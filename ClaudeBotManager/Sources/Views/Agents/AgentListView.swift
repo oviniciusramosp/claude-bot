@@ -9,12 +9,17 @@ struct AgentListView: View {
 
     private var search: VaultSearch { VaultSearch(searchText) }
 
-    private var filteredAgents: [Agent] {
-        appState.agents.filter { search.matches($0) }
+    /// v3.5: Main is a first-class agent in `appState.agents`. We pull it out
+    /// to render as a prominent MainAgentCard at the top and exclude it from
+    /// the grid so it doesn't appear twice.
+    private var customAgents: [Agent] {
+        appState.agents
+            .filter { $0.id != "main" }
+            .filter { search.matches($0) }
     }
 
     /// Main agent always shows unless the user typed something that would
-    /// exclude it explicitly (e.g. `default:false`).
+    /// exclude it explicitly (e.g. `model:opus`).
     private var showMainAgent: Bool {
         search.isEmpty || search.matches(appState.mainAgent)
     }
@@ -28,14 +33,15 @@ struct AgentListView: View {
                         .onTapGesture { showMainDetail = true }
                 }
 
-                // Other agents — 2-column grid
-                if !filteredAgents.isEmpty {
+                // Other agents — 2-column grid (Main is handled above as the
+                // prominent card, so we filter it out of the grid).
+                if !customAgents.isEmpty {
                     LazyVGrid(
                         columns: [GridItem(.flexible(), spacing: Spacing.xl),
                                   GridItem(.flexible(), spacing: Spacing.xl)],
                         spacing: Spacing.xl
                     ) {
-                        ForEach(filteredAgents) { agent in
+                        ForEach(customAgents) { agent in
                             AgentCard(agent: agent)
                                 .onTapGesture { selectedAgent = agent }
                         }
@@ -67,7 +73,9 @@ struct AgentListView: View {
             }
         }
         .sheet(isPresented: $showMainDetail) {
-            MainAgentDetailView(agent: appState.mainAgent)
+            // v3.5: Main is a first-class agent — edited via the same
+            // AgentDetailView as custom agents.
+            AgentDetailView(agent: appState.mainAgent)
         }
         .sheet(item: $selectedAgent) { agent in
             AgentDetailView(agent: agent)
@@ -132,11 +140,8 @@ struct AgentCard: View {
                     Text(agent.icon)
                         .font(.system(size: 36))
                     Spacer()
-                    if agent.isDefault {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color.statusYellow)
-                    }
+                    // v3.5: Main is the only default and never appears in this
+                    // grid (rendered as MainAgentCard above), so no star badge.
                     ModelBadge(model: agent.model)
                 }
 

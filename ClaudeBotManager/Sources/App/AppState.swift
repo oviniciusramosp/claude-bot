@@ -15,11 +15,22 @@ final class AppState: ObservableObject {
     @Published var weeklyCostUSD: Double = 0
 
     // Data
-    @Published var mainAgent: Agent = Agent(id: "main", name: "Main", icon: "🤖",
-        description: "Default bot — no specific agent active",
-        personality: "", model: "sonnet", tags: [], isDefault: true,
-        source: nil, sourceId: nil, created: "", updated: "")
     @Published var agents: [Agent] = []
+
+    /// v3.5: Main is a first-class agent that lives at `vault/main/` with its
+    /// own `agent-main.md` hub file — no longer a synthetic placeholder. This
+    /// computed property locates Main inside the loaded `agents` array so
+    /// existing views can still read `appState.mainAgent.icon` etc. If Main
+    /// hasn't been loaded yet (e.g. fresh install before migration), return a
+    /// minimal fallback so the UI doesn't crash.
+    var mainAgent: Agent {
+        agents.first(where: { $0.id == "main" })
+            ?? Agent(id: "main", name: "Main", icon: "🧠",
+                     description: "Default bot agent (not yet initialized — run migrate_vault_per_agent.py)",
+                     personality: "", model: "sonnet", color: "grey", tags: [],
+                     isDefault: true, source: nil, sourceId: nil,
+                     created: "", updated: "")
+    }
     @Published var routines: [Routine] = []
     @Published var skills: [Skill] = []
     @Published var reactions: [Reaction] = []
@@ -184,7 +195,7 @@ final class AppState: ObservableObject {
     }
 
     func loadAll() async {
-        await loadMainAgent()
+        // v3.5: Main is loaded as part of `loadAgents()` — no separate call.
         await loadAgents()
         await loadRoutines()
         await loadSkills()
@@ -193,17 +204,6 @@ final class AppState: ObservableObject {
         await loadContexts()
         await refreshBotStatus()
         if let ls = logService { recentLogs = await ls.loadRecent(lines: 200) }
-    }
-
-    func loadMainAgent() async {
-        guard let vs = vaultService else { return }
-        let loaded = await vs.loadMainAgent()
-        mainAgent = loaded
-    }
-
-    func saveMainAgent(_ agent: Agent) async throws {
-        try await vaultService?.saveMainAgent(rawContent: agent.otherInstructions)
-        await loadMainAgent()
     }
 
     func loadAgents() async {
