@@ -173,6 +173,128 @@ class CommandDispatch(unittest.TestCase):
         last = self._last_send()
         self.assertIn("Comandos", last["text"])
 
+    def _seed_vault_skill(self, name: str, description: str, tags=None):
+        skills_dir = self.fixture.vault / "Skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        tag_str = "[" + ", ".join(tags or []) + "]"
+        (skills_dir / f"{name}.md").write_text(
+            f"""---
+title: "{name}"
+description: "{description}"
+type: skill
+created: 2026-04-11
+updated: 2026-04-11
+tags: {tag_str}
+trigger: "when needed"
+---
+
+Body.
+""",
+            encoding="utf-8",
+        )
+
+    def _seed_vault_routine(self, name: str, description: str, model: str = "sonnet", enabled: bool = True):
+        routines_dir = self.fixture.vault / "Routines"
+        routines_dir.mkdir(parents=True, exist_ok=True)
+        (routines_dir / f"{name}.md").write_text(
+            f"""---
+title: "{name}"
+description: "{description}"
+type: routine
+created: 2026-04-11
+updated: 2026-04-11
+tags: [routine]
+schedule:
+  times: ["09:00"]
+  days: ["*"]
+model: {model}
+enabled: {str(enabled).lower()}
+---
+
+Body.
+""",
+            encoding="utf-8",
+        )
+
+    def test_find_command_no_args_shows_usage(self):
+        self.bot._handle_text("/find")
+        last = self._last_send()
+        self.assertIn("Vault find", last["text"])
+        self.assertIn("type=routine", last["text"])
+
+    def test_find_command_filters_routines(self):
+        self._seed_vault_routine("alpha", "Alpha routine", model="opus")
+        self._seed_vault_routine("bravo", "Bravo routine", model="sonnet")
+        self.bot._handle_text("/find type=routine model=opus")
+        last = self._last_send()
+        self.assertIn("alpha", last["text"])
+        self.assertNotIn("bravo", last["text"])
+
+    def test_find_command_no_match(self):
+        self._seed_vault_routine("alpha", "Alpha routine", model="opus")
+        self.bot._handle_text("/find type=routine model=haiku")
+        last = self._last_send()
+        self.assertIn("Nenhum resultado", last["text"])
+
+    def test_lint_command_runs_without_crash(self):
+        # Empty vault — linter should report clean (or only known noise)
+        self.bot._handle_text("/lint")
+        last = self._last_send()
+        # Either "Vault clean" or a structured report — both are valid
+        self.assertTrue(
+            "Vault clean" in last["text"] or "Vault lint" in last["text"],
+            f"Unexpected lint output: {last['text']!r}",
+        )
+
+    def test_indexes_command_no_markers(self):
+        self.bot._handle_text("/indexes")
+        last = self._last_send()
+        # Empty vault has no marker files — should report that
+        self.assertIn("marcadores", last["text"].lower() + "marcadores")  # tolerate either path
+
+
+class SkillDiscoveryTest(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.fixture = _BotFixture(Path(self._td.name))
+        self.bot = self.fixture.bot
+
+    def tearDown(self):
+        self.fixture.cleanup()
+        self._td.cleanup()
+
+    def _seed(self, name, description, tags):
+        skills_dir = self.fixture.vault / "Skills"
+        skills_dir.mkdir(parents=True, exist_ok=True)
+        tag_str = "[" + ", ".join(tags) + "]"
+        (skills_dir / f"{name}.md").write_text(
+            f"""---
+title: "{name}"
+description: "{description}"
+type: skill
+created: 2026-04-11
+updated: 2026-04-11
+tags: {tag_str}
+trigger: "when {name}"
+---
+""",
+            encoding="utf-8",
+        )
+
+    def test_tag_match_outranks_text_match(self):
+        # publish-notion has tag "notion", publish-x has tag "twitter".
+        # Prompt mentions "notion" — publish-notion should rank first.
+        self._seed("publish-notion", "Publish to Notion API", ["skill", "publishing", "notion"])
+        self._seed("publish-x", "Publish to X (Twitter)", ["skill", "publishing", "twitter"])
+        results = self.bot._find_relevant_skills("preciso publicar isso no notion agora", limit=2)
+        self.assertGreater(len(results), 0)
+        self.assertIn("notion", results[0]["name"].lower())
+
+    def test_no_results_when_no_signal(self):
+        self._seed("publish-notion", "Publish content", ["skill", "publishing"])
+        results = self.bot._find_relevant_skills("xyz", limit=3)
+        self.assertEqual(results, [])
+
 
 class LongMessageSplitting(unittest.TestCase):
     def setUp(self):

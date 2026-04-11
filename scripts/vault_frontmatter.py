@@ -312,15 +312,22 @@ def get_frontmatter_and_body(filepath: Path) -> Tuple[Dict[str, Any], str]:
 
 
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def extract_wikilinks(text: str) -> List[str]:
     """Extract wikilink targets from markdown body, skipping frontmatter,
-    fenced code blocks (```...```), and inline code spans (`...`). Wikilinks
-    inside code are documentation examples, not real graph relationships.
+    fenced code blocks (```...```), inline code spans (`...`), and HTML
+    comments (<!-- ... -->). Wikilinks inside any of those are documentation,
+    template placeholders, or vault-query marker directives — not real graph
+    relationships.
     """
     m = FRONTMATTER_RE.match(text)
     body = text[m.end() :] if m else text
+
+    # Strip HTML comments first (they may span multiple lines and contain
+    # vault-query marker directives like format="- [[{stem}]] — ...")
+    body = _HTML_COMMENT_RE.sub("", body)
 
     in_fence = False
     cleaned = []

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "2.27.0"  # feat: /lint command + vault_lint.py linter (8 categories: missing FM, broken links, orphans, broken prompt_file, stale routines, step leakage, index drift, schedule sanity) + nightly vault-lint routine
+BOT_VERSION = "2.31.0"  # feat: vault upgrade — auto-regenerated indexes (/indexes), /find frontmatter search, routine execution history rollup, hot cache per agent with Notes auto-extraction
 
 import hmac
 import hashlib
@@ -294,6 +294,8 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/cost` — Custo e uso de tokens da sessão
 • `/doctor` — Verificar saúde da instalação
 • `/lint` — Auditar o vault (frontmatter, links, schedules)
+• `/find <expr>` — Buscar no vault por frontmatter (ex: `type=routine model=opus`)
+• `/indexes` — Regenerar índices `vault-query` (Routines.md, Skills.md, Agents.md)
 
 ⚙️ *Modelo*
 • `/sonnet` — Usar Sonnet
@@ -575,6 +577,281 @@ class PipelineTask:
     effort: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Hot cache per agent (rolling continuity context across sessions)
+# ---------------------------------------------------------------------------
+#
+# Each agent gets a `vault/Agents/{id}/.context.md` file that captures the
+# agent's rolling state — active topics, recent decisions, open threads.
+#
+# - On session start: the body is injected into the frozen context block so
+#   the next session resumes with prior context (see _build_frozen_context).
+# - After auto-compact: the bot fires a structured "summarize state" prompt
+#   and rewrites .context.md with the new snapshot, plus extracts durable
+#   concepts to vault/Notes/.
+# - On /important: the user can manually trigger a hot-cache update.
+#
+# Pattern inspired by claude-obsidian's "hot cache" (Karpathy LLM Wiki).
+
+# Hard cap on the size of the hot cache body injected into a fresh session.
+# Keeps the prefix-cache window stable and avoids blowing the system prompt.
+HOT_CACHE_MAX_CHARS = 6000  # roughly 1500 tokens at 4 chars/token
+
+_AGENT_CONTEXT_LOCK = threading.Lock()
+
+
+def _agent_context_path(agent_id: str) -> Path:
+    """Resolve the rolling context file for an agent."""
+    return AGENTS_DIR / agent_id / ".context.md"
+
+
+def _read_agent_context(agent_id: Optional[str]) -> str:
+    """Return the body (post-frontmatter) of the agent's .context.md file.
+
+    Returns "" when the agent has no rolling context yet, the file is missing,
+    or the agent_id is None (Main Agent has no per-agent context).
+    """
+    if not agent_id:
+        return ""
+    path = _agent_context_path(agent_id)
+    if not path.is_file():
+        return ""
+    try:
+        _, body = get_frontmatter_and_body(path)
+    except Exception as exc:
+        logger.error("Failed to read agent context for %s: %s", agent_id, exc)
+        return ""
+    if len(body) > HOT_CACHE_MAX_CHARS:
+        return body[:HOT_CACHE_MAX_CHARS] + "\n…(truncated)"
+    return body
+
+
+def _write_agent_context(agent_id: str, body: str) -> None:
+    """Write the rolling state to vault/Agents/{id}/.context.md.
+
+    Creates the file with proper frontmatter on first write so vault_query
+    and the linter recognize it as a `type: context` node.
+    """
+    path = _agent_context_path(agent_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    today = time.strftime("%Y-%m-%d")
+    body = body.strip()
+    if len(body) > HOT_CACHE_MAX_CHARS:
+        body = body[:HOT_CACHE_MAX_CHARS]
+    with _AGENT_CONTEXT_LOCK:
+        # Read existing frontmatter to preserve `created`
+        created = today
+        if path.is_file():
+            try:
+                fm, _ = get_frontmatter_and_body(path)
+                created = str(fm.get("created", today))
+            except Exception:
+                pass
+        text = (
+            f"---\n"
+            f'title: "Context — {agent_id}"\n'
+            f'description: "Rolling state of active topics, recent decisions, '
+            f'and open threads for {agent_id}. Auto-maintained by the bot."\n'
+            f"type: context\n"
+            f"created: {created}\n"
+            f"updated: {today}\n"
+            f"tags: [context, agent, {agent_id}]\n"
+            f"---\n\n"
+            f"{body}\n"
+        )
+        path.write_text(text, encoding="utf-8")
+
+
+# Regex for extracting durable concepts from the LLM response.
+# Format expected: `- {slug} | {high|medium|low} | {one-line summary}`
+_DURABLE_CONCEPT_RE = re.compile(
+    r"^\s*[-*]\s*([a-z0-9][a-z0-9_-]*)\s*\|\s*(high|medium|low)\s*\|\s*(.+?)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _extract_durable_concepts(llm_text: str) -> List[Dict[str, str]]:
+    """Parse a hot-cache update response and return a list of durable concepts.
+
+    Looks for a `## Durable concepts` section. Each entry must follow:
+        - {slug} | {confidence} | {summary}
+
+    Slugs are normalized to kebab-case. Only entries with valid syntax are
+    returned. Confidence values outside high/medium/low are dropped.
+    """
+    out: List[Dict[str, str]] = []
+    in_section = False
+    for raw_line in llm_text.split("\n"):
+        line = raw_line.rstrip()
+        if line.lstrip().startswith("##"):
+            in_section = "durable concepts" in line.lower()
+            continue
+        if not in_section:
+            continue
+        m = _DURABLE_CONCEPT_RE.match(line)
+        if not m:
+            continue
+        slug = re.sub(r"[^a-z0-9-]+", "-", m.group(1).lower()).strip("-")
+        if not slug:
+            continue
+        out.append(
+            {
+                "slug": slug,
+                "confidence": m.group(2).lower(),
+                "summary": m.group(3).strip(),
+            }
+        )
+    return out
+
+
+def _strip_durable_concepts_section(llm_text: str) -> str:
+    """Return llm_text with the `## Durable concepts` section removed.
+
+    Used so the section doesn't bloat the .context.md body — durable concepts
+    are stored in Notes/, the context file keeps only Active topics, Recent
+    decisions, and Open threads.
+    """
+    out_lines: List[str] = []
+    skipping = False
+    for line in llm_text.split("\n"):
+        stripped = line.lstrip()
+        if stripped.startswith("##"):
+            skipping = "durable concepts" in stripped.lower()
+            if skipping:
+                continue
+        if skipping:
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines).rstrip()
+
+
+def _promote_durable_concept_to_notes(
+    concept: Dict[str, str], agent_id: str
+) -> Optional[Path]:
+    """Create or update vault/Notes/{slug}.md for a high-confidence concept.
+
+    Returns the file path on success, None when skipped or failed.
+    Guardrails:
+    - Only promotes confidence=high
+    - If the file already exists with the same agent attribution, append
+      a `## Update YYYY-MM-DD` section instead of overwriting
+    - Always tags the note with `agent:{agent_id}` so cross-agent concepts
+      can be tracked
+    """
+    if concept.get("confidence") != "high":
+        return None
+    slug = concept["slug"]
+    summary = concept["summary"]
+    notes_dir = VAULT_DIR / "Notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    path = notes_dir / f"{slug}.md"
+    today = time.strftime("%Y-%m-%d")
+    try:
+        if path.is_file():
+            # Append an Update section, never overwrite
+            with path.open("a", encoding="utf-8") as f:
+                f.write(f"\n## Update {today}\n\n{summary}\n")
+        else:
+            text = (
+                f"---\n"
+                f'title: "{slug}"\n'
+                f'description: "{summary[:140]}"\n'
+                f"type: note\n"
+                f"created: {today}\n"
+                f"updated: {today}\n"
+                f"tags: [note, auto-extracted, {agent_id}]\n"
+                f"---\n\n"
+                f"[[Notes]]\n\n"
+                f"{summary}\n"
+            )
+            path.write_text(text, encoding="utf-8")
+        return path
+    except OSError as exc:
+        logger.error("Failed to promote concept %s to Notes/: %s", slug, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Routine execution history rollup
+# ---------------------------------------------------------------------------
+
+_HISTORY_LOCK = threading.Lock()
+
+
+def _append_routine_history(
+    name: str,
+    time_slot: str,
+    status: str,
+    error: Optional[str],
+    kind: str = "routine",
+) -> None:
+    """Append a queryable history record to vault/Routines/.history/YYYY-MM.md.
+
+    Each terminal-state transition (completed/failed/cancelled) writes one
+    `## YYYY-MM-DD HH:MM — name` block. The file gets created with required
+    frontmatter on first write so the linter and vault_query treat it as a
+    proper knowledge node.
+
+    This rollup makes the previously-ephemeral execution state queryable
+    via vault_query.find(type="history") and powers the linter's
+    "stale routine" detection.
+    """
+    history_dir = ROUTINES_DIR / ".history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    today = time.strftime("%Y-%m-%d")
+    month = time.strftime("%Y-%m")
+    history_path = history_dir / f"{month}.md"
+
+    # Pull a few useful fields from the routine file (best-effort — if the
+    # file moved or got renamed mid-run we still write the record).
+    routine_path = ROUTINES_DIR / f"{name}.md"
+    fm_model = ""
+    fm_agent = ""
+    if routine_path.exists():
+        try:
+            fm, _ = get_frontmatter_and_body(routine_path)
+            fm_model = str(fm.get("model", ""))
+            fm_agent = str(fm.get("agent", ""))
+        except Exception:
+            pass
+
+    icon = {"completed": "✓", "failed": "✗", "cancelled": "⊘"}.get(status, "?")
+
+    record_lines = [
+        f"## {today} {time_slot} — {name}",
+        f"- status: {status} {icon}",
+        f"- kind: {kind}",
+    ]
+    if fm_model:
+        record_lines.append(f"- model: {fm_model}")
+    if fm_agent:
+        record_lines.append(f"- agent: {fm_agent}")
+    if error:
+        # Single-line, truncated, indent code-friendly
+        clean = error.replace("\n", " ")[:200]
+        record_lines.append(f"- error: {clean}")
+    record_lines.append("")  # blank line separator
+    record = "\n".join(record_lines)
+
+    with _HISTORY_LOCK:
+        if not history_path.exists():
+            header = (
+                f"---\n"
+                f"title: \"Execution history {month}\"\n"
+                f"description: \"Routine and pipeline execution log for {month}. "
+                f"Auto-appended by the bot on terminal status transitions.\"\n"
+                f"type: history\n"
+                f"created: {today}\n"
+                f"updated: {today}\n"
+                f"tags: [history, routines]\n"
+                f"---\n\n"
+            )
+            history_path.write_text(header + record + "\n", encoding="utf-8")
+        else:
+            with history_path.open("a", encoding="utf-8") as f:
+                f.write(record + "\n")
+
+
 class RoutineStateManager:
     """Tracks daily routine execution state in ~/.claude-bot/routines-state/YYYY-MM-DD.json."""
 
@@ -653,6 +930,14 @@ class RoutineStateManager:
                 entry["error"] = error
             data[routine_name][time_slot] = entry
             self._save(data)
+        # Outside the state lock — history writes use their own lock and
+        # touch a different file, so this avoids holding the state lock
+        # across disk I/O.
+        if status in ("completed", "failed", "cancelled"):
+            try:
+                _append_routine_history(routine_name, time_slot, status, error, kind="routine")
+            except Exception as exc:
+                logger.error("History rollup failed for %s: %s", routine_name, exc)
 
     def get_today_state(self) -> Dict:
         return self._load()
@@ -690,6 +975,12 @@ class RoutineStateManager:
                 entry["steps"] = steps
             data[name][time_slot] = entry
             self._save(data)
+        # Outside the state lock — see set_status for rationale.
+        if status in ("completed", "failed", "cancelled"):
+            try:
+                _append_routine_history(name, time_slot, status, error, kind="pipeline")
+            except Exception as exc:
+                logger.error("History rollup failed for pipeline %s: %s", name, exc)
 
     def set_step_status(self, pipeline_name: str, time_slot: str, step_id: str,
                         status: str, error: Optional[str] = None, attempt: Optional[int] = None) -> None:
@@ -3578,8 +3869,10 @@ class ClaudeTelegramBot:
     def _build_frozen_context(self, session: Session) -> tuple:
         """Build a compact context snapshot to inject once on the first message of a session.
 
-        Includes agent CLAUDE.md (truncated) and the last portion of today's journal.
-        Frozen at session start — does not change mid-session — to preserve prefix cache hits.
+        Includes agent CLAUDE.md (truncated), the agent's hot-cache context
+        (rolling state from previous sessions), and the last portion of
+        today's journal. Frozen at session start — does not change mid-session
+        — to preserve prefix cache hits.
 
         Returns (context_str, journal_mtime) where journal_mtime is 0.0 if no journal exists.
         """
@@ -3596,6 +3889,17 @@ class ClaudeTelegramBot:
                         parts.append(f"# Agent Instructions ({session.agent})\n\n{content}")
                 except OSError:
                     pass
+
+            # Hot cache: rolling state from previous sessions for this agent.
+            # Maintained by `_update_agent_context()` which fires after auto-rotate
+            # and on /important. Capped to ~HOT_CACHE_INJECT_TOKENS chars.
+            hot_cache_body = _read_agent_context(session.agent)
+            if hot_cache_body:
+                parts.append(
+                    f"# Continuity ({session.agent})\n\n"
+                    f"_Rolling context from prior sessions. Use it as memory; "
+                    f"do not repeat back unless asked._\n\n{hot_cache_body}"
+                )
 
         # Recent journal entries (last 1500 chars of today's journal)
         journal_path = Path(self._get_journal_path())
@@ -3626,41 +3930,61 @@ class ClaudeTelegramBot:
     def _find_relevant_skills(self, prompt: str, limit: int = 3) -> List[Dict[str, str]]:
         """Return up to `limit` skills that match the prompt.
 
-        Scoring (zero LLM cost):
-          +2 per prompt word that exactly matches a skill word (after normalization)
-          +1 per prompt word that is a substring of any skill word (catches partial matches)
-        Short words (<= 3 chars) are ignored to avoid noise.
+        Hybrid scoring (zero LLM cost):
+          +5 per skill tag that appears in the prompt (highest signal — tags
+              are deliberately chosen by the skill author)
+          +3 per exact word match against the trigger field
+          +2 per exact word match against title/description
+          +1 per substring match anywhere
+
+        Short words (<= 3 chars) are ignored to avoid noise. Skills with score
+        0 are filtered out. Uses vault_query for the load step so it benefits
+        from the same parser used by /find and the linter.
+
         Returns list of {name, description, path}.
         """
-        skills_dir = VAULT_DIR / "Skills"
-        if not skills_dir.is_dir():
-            return []
         norm_prompt = self._normalize_text(prompt)
         prompt_words = {w for w in norm_prompt.split() if len(w) > 3}
         if not prompt_words:
             return []
+        try:
+            from vault_query import load_vault
+            vi = load_vault(VAULT_DIR)
+            skills = vi.find(type="skill")
+        except Exception:
+            logger.exception("vault_query load failed in _find_relevant_skills")
+            return []
+
         scored: List[tuple] = []
-        for md_file in skills_dir.glob("*.md"):
-            try:
-                fm, _ = get_frontmatter_and_body(md_file)
-                name = fm.get("name", md_file.stem)
-                desc = fm.get("description", "")
-                skill_text = self._normalize_text(f"{name} {desc}")
-                skill_words = set(skill_text.split())
-                score = 0
-                for pw in prompt_words:
-                    if pw in skill_words:
-                        score += 2          # exact word match
-                    elif any(pw in sw for sw in skill_words):
-                        score += 1          # substring match (e.g. "journal" in "journaling")
-                if score > 0:
-                    scored.append((score, {
-                        "name": name,
-                        "description": desc,
-                        "path": str(md_file),
-                    }))
-            except Exception:
-                continue
+        for f in skills:
+            name = str(f.frontmatter.get("title", f.path.stem))
+            desc = f.description
+            trigger = str(f.frontmatter.get("trigger", ""))
+            tags = [self._normalize_text(t) for t in f.tags]
+
+            score = 0
+            # +5 per tag overlap (highest signal)
+            for tag in tags:
+                if tag and tag in norm_prompt:
+                    score += 5
+            # +3 per exact match against trigger
+            trigger_words = set(self._normalize_text(trigger).split())
+            for pw in prompt_words:
+                if pw in trigger_words:
+                    score += 3
+            # +2 per exact match against title/description
+            text_words = set(self._normalize_text(f"{name} {desc}").split())
+            for pw in prompt_words:
+                if pw in text_words:
+                    score += 2
+                elif any(pw in tw for tw in text_words):
+                    score += 1
+            if score > 0:
+                scored.append((score, {
+                    "name": name,
+                    "description": desc,
+                    "path": str(f.path),
+                }))
         scored.sort(key=lambda x: -x[0])
         return [s[1] for s in scored[:limit]]
 
@@ -3709,7 +4033,9 @@ class ClaudeTelegramBot:
     def _auto_compact(self, session: Session) -> None:
         """Run /compact in background to keep session context manageable.
 
-        First snapshots the session to today's journal, then compacts.
+        First snapshots the session to today's journal, then compacts. After
+        compacting, refreshes the agent's hot-cache (.context.md) so the next
+        session for the same agent resumes with rolling continuity.
         """
         if not session.session_id:
             return
@@ -3736,10 +4062,79 @@ class ClaudeTelegramBot:
                     session.session_id = runner.captured_session_id
                     self.sessions.save()
                 logger.info("Auto-compact completed for session %s", session.name)
+                # 3. Refresh agent hot cache for cross-session continuity
+                if session.agent:
+                    self._update_agent_hot_cache(session)
             except Exception as exc:
                 logger.error("Auto-compact failed: %s", exc)
 
         threading.Thread(target=_worker, daemon=True, name="auto-compact").start()
+
+    def _update_agent_hot_cache(self, session: Session) -> None:
+        """Refresh vault/Agents/{id}/.context.md with the agent's rolling state.
+
+        Fires a structured prompt that asks Claude to summarize the current
+        session into Active topics / Recent decisions / Open threads, plus
+        a Durable concepts section. Writes the first three sections to
+        .context.md and promotes high-confidence durable concepts to
+        vault/Notes/{slug}.md.
+
+        Best-effort — never raises. Logs failures and moves on.
+        """
+        if not session.session_id or not session.agent:
+            return
+        agent_id = session.agent
+        prompt = (
+            "You are updating the rolling context file for this agent. Reflect "
+            "on the current session and produce a structured snapshot in the "
+            "EXACT format below. Be terse — no preamble. Each bullet should be "
+            "one short sentence.\n\n"
+            "## Active topics\n"
+            "- topic 1\n"
+            "- topic 2\n\n"
+            "## Recent decisions\n"
+            "- decision 1\n"
+            "- decision 2\n\n"
+            "## Open threads\n"
+            "- thread 1 (what is mid-flight, awaiting what)\n\n"
+            "## Durable concepts\n"
+            "(Each bullet must be a fact/concept worth keeping FOREVER, not a "
+            "transient status. Use this exact format: "
+            "`- {kebab-slug} | {high|medium|low} | {one-line summary}`. "
+            "If nothing is durable, leave this section empty.)\n"
+        )
+        try:
+            runner = ClaudeRunner()
+            runner.run(
+                prompt=prompt,
+                model=session.model,
+                session_id=session.session_id,
+                workspace=session.workspace,
+                system_prompt=None,
+            )
+            snapshot = (runner.result_text or runner.accumulated_text or "").strip()
+            if not snapshot:
+                logger.info("Hot cache refresh for %s: empty response", agent_id)
+                return
+            # Extract durable concepts BEFORE stripping the section
+            concepts = _extract_durable_concepts(snapshot)
+            # Body of .context.md = snapshot minus the durable concepts section
+            body = _strip_durable_concepts_section(snapshot)
+            _write_agent_context(agent_id, body)
+            logger.info(
+                "Hot cache refreshed for agent %s (%d chars, %d durable concepts)",
+                agent_id, len(body), len(concepts),
+            )
+            # Promote high-confidence concepts to Notes/
+            promoted = 0
+            for c in concepts:
+                if _promote_durable_concept_to_notes(c, agent_id) is not None:
+                    promoted += 1
+            if promoted:
+                logger.info("Promoted %d durable concept(s) to Notes/ for agent %s",
+                            promoted, agent_id)
+        except Exception as exc:
+            logger.error("Hot cache refresh failed for agent %s: %s", agent_id, exc)
 
     def cmd_cost(self) -> None:
         self._run_claude_prompt("/cost")
@@ -3767,6 +4162,93 @@ class ClaudeTelegramBot:
         if len(text) > 3500:
             text = text[:3500] + "\n…(truncated)"
         self.send_message(text)
+
+    def cmd_find(self, expr: str) -> None:
+        """Run a frontmatter-aware vault query and report results to Telegram.
+
+        Examples:
+          /find type=routine model=opus
+          /find type=skill tags__contains=publish
+          /find type=pipeline agent=crypto-bro enabled=true
+
+        With no arguments, shows usage. With `--text <query>`, runs a free-text
+        search across title/description/tags instead of a structured filter.
+        """
+        if not expr.strip():
+            self.send_message(
+                "🔎 *Vault find*\n\n"
+                "Uso: `/find <chave>=<valor> [...]`\n\n"
+                "Exemplos:\n"
+                "• `/find type=routine model=opus`\n"
+                "• `/find type=skill tags__contains=publish`\n"
+                "• `/find type=pipeline agent=crypto-bro enabled=true`\n"
+                "• `/find type=skill trigger__exists=true`\n\n"
+                "Sufixos suportados: `__contains`, `__in`, `__startswith`, "
+                "`__endswith`, `__exists`."
+            )
+            return
+        try:
+            from vault_query import load_vault, parse_filter_expression
+        except Exception as exc:
+            logger.exception("vault_query import failed")
+            self.send_message(f"❌ vault_query indisponível: `{exc}`")
+            return
+        try:
+            vi = load_vault(VAULT_DIR)
+            filters = parse_filter_expression(expr)
+            results = vi.find(**filters)
+        except Exception as exc:
+            logger.exception("vault_query find failed")
+            self.send_message(f"❌ Find falhou: `{exc}`")
+            return
+        if not results:
+            self.send_message(f"🔎 Nenhum resultado para `{expr}`")
+            return
+        lines = [f"🔎 *{len(results)} resultado(s)* para `{expr}`\n"]
+        # Group by type so the output is scannable
+        by_type: Dict[str, List] = {}
+        for r in results:
+            by_type.setdefault(r.type, []).append(r)
+        for t in sorted(by_type.keys()):
+            lines.append(f"\n*{t}*")
+            for r in by_type[t][:15]:
+                desc = r.description[:80] + "…" if len(r.description) > 80 else r.description
+                lines.append(f"• `{r.path.stem}` — {desc}")
+            if len(by_type[t]) > 15:
+                lines.append(f"  …e mais {len(by_type[t]) - 15}")
+        text = "\n".join(lines)
+        if len(text) > 3500:
+            text = text[:3500] + "\n…(truncated)"
+        self.send_message(text)
+
+    def cmd_indexes(self) -> None:
+        """Regenerate vault index marker blocks from frontmatter."""
+        try:
+            from vault_indexes import regenerate_vault
+        except Exception as exc:
+            logger.exception("Failed to import vault_indexes")
+            self.send_message(f"❌ Vault indexes indisponível: `{exc}`")
+            return
+        try:
+            changed, scanned = regenerate_vault(VAULT_DIR)
+        except Exception as exc:
+            logger.exception("vault_indexes failed")
+            self.send_message(f"❌ Index regen falhou: `{exc}`")
+            return
+        if not scanned:
+            self.send_message("ℹ️ Nenhum arquivo com marcadores `vault-query` encontrado.")
+            return
+        if not changed:
+            self.send_message(f"✅ Todos os {len(scanned)} index files já estão atualizados.")
+            return
+        lines = [f"📚 *Vault indexes regenerated* ({len(changed)}/{len(scanned)})"]
+        for f in changed:
+            try:
+                rel = f.relative_to(VAULT_DIR)
+            except ValueError:
+                rel = f
+            lines.append(f"  • `{rel}`")
+        self.send_message("\n".join(lines))
 
     def cmd_stop(self, arg: str = "") -> None:
         arg = arg.strip().replace(".md", "")
@@ -5342,6 +5824,8 @@ class ClaudeTelegramBot:
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),
                 "/lint": lambda: self.cmd_lint(),
+                "/find": lambda: self.cmd_find(arg),
+                "/indexes": lambda: self.cmd_indexes(),
                 "/stop": lambda: self.cmd_stop(arg),
                 "/timeout": lambda: self.cmd_timeout(arg) if arg else self.send_message(f"ℹ️ Timeout atual: {self.timeout_seconds}s"),
                 "/workspace": lambda: self.cmd_workspace(arg) if arg else self.send_message("❌ Use: `/workspace <path>`"),

@@ -275,6 +275,25 @@ Also `[[skill-name]]` is just a placeholder.
         links = vfm.extract_wikilinks(text)
         self.assertEqual(set(links), {"foo", "bar"})
 
+    def test_extract_wikilinks_skips_html_comments(self):
+        text = """---
+t: x
+---
+
+Real link: [[foo]]
+
+<!-- vault-query:start filter="type=routine" format="- [[{stem}]] — {description}" -->
+- [[crypto-news]] — generated content
+<!-- vault-query:end -->
+
+[[bar]]
+"""
+        links = vfm.extract_wikilinks(text)
+        # The marker comments should be stripped, but the rendered content
+        # between them is real wikilinks (and so is foo/bar).
+        self.assertEqual(set(links), {"foo", "crypto-news", "bar"})
+        self.assertNotIn("{stem}", links)
+
     def test_get_frontmatter_and_body(self):
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
