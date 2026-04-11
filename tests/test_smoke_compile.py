@@ -10,10 +10,16 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Files that should compile. Globbed at runtime so new files are picked up.
+# Note: mcp-server/ depends on the optional `mcp` SDK at runtime, but
+# py_compile only parses — it does not execute imports — so it's safe to
+# include here. This catches syntax errors in the MCP server before any
+# user installs the optional dependency.
 PYTHON_FILES = [
     REPO_ROOT / "claude-fallback-bot.py",
     REPO_ROOT / "claude-bot-menubar.py",
-] + sorted((REPO_ROOT / "scripts").glob("*.py"))
+] + sorted((REPO_ROOT / "scripts").glob("*.py")) + sorted(
+    (REPO_ROOT / "mcp-server").glob("*.py")
+)
 
 
 class CompilesCleanly(unittest.TestCase):
