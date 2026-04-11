@@ -82,6 +82,7 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
         module.VAULT_DIR = vault_dir
         module.ROUTINES_DIR = vault_dir / "Routines"
         module.AGENTS_DIR = vault_dir / "Agents"
+        module.LESSONS_DIR = vault_dir / "Lessons"
         module.REACTIONS_DIR = vault_dir / "Reactions"
         module.ACTIVITY_LOG_DIR = vault_dir / "Journal" / ".activity"
         module.CLAUDE_WORKSPACE = str(vault_dir)
@@ -89,6 +90,7 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
             vault_dir,
             vault_dir / "Routines",
             vault_dir / "Agents",
+            vault_dir / "Lessons",
             vault_dir / "Reactions",
             vault_dir / "Journal" / ".activity",
         ):

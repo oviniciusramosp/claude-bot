@@ -100,6 +100,7 @@ LOG_FILE = DATA_DIR / "bot.log"
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_DIR = VAULT_DIR / "Routines"
 AGENTS_DIR = VAULT_DIR / "Agents"
+LESSONS_DIR = VAULT_DIR / "Lessons"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 ACTIVITY_LOG_DIR = VAULT_DIR / "Journal" / ".activity"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
@@ -227,6 +228,7 @@ SYSTEM_PROMPT = (
     "Check Journal/ for recent context. "
     "Read Tooling.md for tool preferences. "
     "Read .env for project credentials when needed. "
+    "Scan Lessons/ before similar tasks — previous failures drafted there so you don't repeat them. "
     "All vault .md files MUST have YAML frontmatter (title, description, type, created/updated, tags). "
     "Use the description field to scan files before reading them fully. "
     "\n\n"
@@ -314,6 +316,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 📓 *Journal*
 • `/important` — Registrar pontos importantes da sessão no diário
+• `/lesson <texto>` — Registrar lição manual em `vault/Lessons/`
 
 🔁 *Rotinas*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
@@ -1605,6 +1608,126 @@ def _log_activity(entry: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Lessons — compound-engineering failure drafts
+# ---------------------------------------------------------------------------
+
+
+def _sanitize_lesson_slug(name: str) -> str:
+    """Normalize a routine/pipeline name into a filename-safe slug.
+
+    Collapses any sequence of non [a-zA-Z0-9_-] chars (INCLUDING dots) into a
+    single hyphen to prevent path traversal sequences like `..` from surviving.
+    """
+    slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", name.strip())
+    slug = slug.strip("-_") or "unknown"
+    return slug[:80]
+
+
+def record_lesson_draft(trigger_name: str, error_summary: str,
+                        kind: str = "routine") -> Optional[Path]:
+    """Append a draft lesson to vault/Lessons/draft-YYYY-MM-DD-{name}.md on failure.
+
+    Idempotent per day+trigger: if the draft file already exists it appends a new
+    `## HH:MM — error` section instead of overwriting. Returns the file Path on
+    success, None on failure (errors are logged but never raised).
+    """
+    try:
+        LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+        today = time.strftime("%Y-%m-%d")
+        slug = _sanitize_lesson_slug(trigger_name)
+        path = LESSONS_DIR / f"draft-{today}-{slug}.md"
+        safe_error = (error_summary or "(no error text)").strip()
+        if len(safe_error) > 1500:
+            safe_error = safe_error[:1500] + "... [truncated]"
+        if path.exists():
+            # Append another occurrence — the draft is still pending
+            now_hm = time.strftime("%H:%M")
+            addendum = (
+                f"\n\n## {now_hm} — Additional failure\n\n"
+                f"```\n{safe_error}\n```\n"
+            )
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(addendum)
+            return path
+        # Fresh draft
+        frontmatter = (
+            "---\n"
+            f"title: \"Draft lesson — {trigger_name}\"\n"
+            f"description: Auto-draft from {kind} failure; needs user to fill Fix and Detect sections.\n"
+            "type: lesson\n"
+            "status: draft\n"
+            f"trigger: {trigger_name}\n"
+            f"kind: {kind}\n"
+            f"date: {today}\n"
+            f"created: {today}\n"
+            f"updated: {today}\n"
+            "tags: [lesson, draft, postmortem]\n"
+            "---\n\n"
+        )
+        body = (
+            f"# Draft lesson — {trigger_name}\n\n"
+            "## What went wrong\n\n"
+            f"```\n{safe_error}\n```\n\n"
+            "## Fix\n\n"
+            "TODO\n\n"
+            "## How to detect next time\n\n"
+            "TODO\n"
+        )
+        path.write_text(frontmatter + body, encoding="utf-8")
+        logger.info("Lesson draft recorded: %s", path)
+        return path
+    except Exception as exc:
+        logger.error("Failed to record lesson draft for %s: %s", trigger_name, exc)
+        return None
+
+
+def record_manual_lesson(text: str) -> Optional[Path]:
+    """Append a user-supplied lesson to vault/Lessons/manual-YYYY-MM-DD-HHMM.md.
+
+    Returns the file Path on success, None on failure.
+    """
+    try:
+        LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+        now = time.strftime("%Y-%m-%d-%H%M")
+        today = time.strftime("%Y-%m-%d")
+        # Collision-safe: if two lessons arrive in the same minute, append a counter
+        base_path = LESSONS_DIR / f"manual-{now}.md"
+        path = base_path
+        counter = 1
+        while path.exists():
+            counter += 1
+            path = LESSONS_DIR / f"manual-{now}-{counter}.md"
+        body = (text or "").strip()
+        if not body:
+            raise ValueError("lesson text is empty")
+        frontmatter = (
+            "---\n"
+            f"title: \"Manual lesson — {now}\"\n"
+            "description: User-supplied lesson captured via /lesson command on Telegram.\n"
+            "type: lesson\n"
+            "status: recorded\n"
+            f"date: {today}\n"
+            f"created: {today}\n"
+            f"updated: {today}\n"
+            "tags: [lesson, manual]\n"
+            "---\n\n"
+        )
+        markdown = (
+            f"# Manual lesson\n\n"
+            "## Context\n\n"
+            f"{body}\n\n"
+            "## Fix\n\nTODO\n\n"
+            "## How to detect next time\n\nTODO\n"
+        )
+        path.write_text(frontmatter + markdown, encoding="utf-8")
+        logger.info("Manual lesson recorded: %s", path)
+        return path
+    except Exception as exc:
+        logger.error("Failed to record manual lesson: %s", exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
 
@@ -2872,6 +2995,20 @@ class PipelineExecutor:
         except Exception as exc:
             logger.error("Pipeline notify_failure send failed: %s", exc)
 
+        # Compound engineering: auto-draft a lesson so we learn from this failure.
+        # record_lesson_draft never raises — errors are logged and swallowed.
+        lesson_path = record_lesson_draft(self.task.name, error, kind="pipeline")
+        if lesson_path:
+            try:
+                self.bot.send_message(
+                    f"📝 Rascunho de lição criado em `vault/Lessons/{lesson_path.name}` "
+                    f"— complete as seções Fix e Detect.",
+                    chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
+                    disable_notification=True,
+                )
+            except Exception as exc:
+                logger.error("Pipeline lesson-draft notify failed: %s", exc)
+
         # Activity log
         _log_activity({
             "agent": self.task.agent or "main",
@@ -3886,6 +4023,29 @@ class ClaudeTelegramBot:
             self.send_message(f"🗑 Sessão `{name}` apagada.")
         else:
             self.send_message(f"❌ Sessão `{name}` não encontrada.")
+
+    def cmd_lesson(self, text: str) -> None:
+        """Record a manual lesson into vault/Lessons/.
+
+        Usage: /lesson <text>
+        Persists as manual-YYYY-MM-DD-HHMM.md with structured frontmatter.
+        """
+        text = (text or "").strip()
+        if not text:
+            self.send_message(
+                "❌ Use: `/lesson <texto>`\n"
+                "_Registra uma lição manual em `vault/Lessons/`. "
+                "Útil para capturar aprendizados durante a conversa._"
+            )
+            return
+        path = record_manual_lesson(text)
+        if path is None:
+            self.send_message("❌ Falha ao gravar lição. Veja o log para detalhes.")
+            return
+        self.send_message(
+            f"📝 Lição registrada em `vault/Lessons/{path.name}`.\n"
+            f"_Complete as seções Fix e Detect quando puder._"
+        )
 
     def cmd_clone(self, dest_name: str) -> None:
         """Clone the current active session into a new name and switch to it.
@@ -5820,6 +5980,16 @@ class ClaudeTelegramBot:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", runner.error_text[:200])
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {runner.error_text[:200]}")
+                # Compound engineering: draft a lesson from this failure
+                lesson_path = record_lesson_draft(task.name, runner.error_text, kind="routine")
+                if lesson_path:
+                    try:
+                        self.send_message(
+                            f"📝 Rascunho de lição: `vault/Lessons/{lesson_path.name}`",
+                            disable_notification=True,
+                        )
+                    except Exception as exc:
+                        logger.error("Routine lesson-draft notify failed: %s", exc)
             else:
                 # Success — commit checkpoint (drop stash, keep new state)
                 if checkpoint_ref:
@@ -5837,6 +6007,16 @@ class ClaudeTelegramBot:
                 self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
             else:
                 self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+            # Compound engineering: draft a lesson from this failure
+            lesson_path = record_lesson_draft(task.name, str(exc), kind="routine")
+            if lesson_path:
+                try:
+                    self.send_message(
+                        f"📝 Rascunho de lição: `vault/Lessons/{lesson_path.name}`",
+                        disable_notification=True,
+                    )
+                except Exception as notify_exc:
+                    logger.error("Routine lesson-draft notify failed: %s", notify_exc)
         finally:
             self.effort = saved_effort
 
@@ -5894,6 +6074,7 @@ class ClaudeTelegramBot:
                 "/switch": lambda: self.cmd_switch(arg) if arg else self.send_message("❌ Use: `/switch <nome>`"),
                 "/delete": lambda: self.cmd_delete(arg) if arg else self.send_message("❌ Use: `/delete <nome>`"),
                 "/clone": lambda: self.cmd_clone(arg),
+                "/lesson": lambda: self.cmd_lesson(arg),
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),
