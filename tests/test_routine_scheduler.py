@@ -317,6 +317,62 @@ class SchedulerPipelineCycle(unittest.TestCase):
         self.assertEqual(publish_step.output_type, "telegram")
         self.assertTrue(publish_step.output_to_telegram)
 
+    def test_pipeline_loop_fields_parsed(self):
+        """Ralph loop fields propagate from frontmatter into PipelineStep."""
+        self._write_pipeline("loopy",
+            "steps:\n"
+            "  - id: iterate\n"
+            "    name: Iterate\n"
+            "    prompt: refine\n"
+            "    loop_until: DONE\n"
+            "    loop_max_iterations: 4\n"
+            "    loop_on_no_progress: continue\n"
+            "  - id: report\n"
+            "    name: Report\n"
+            "    prompt: summarize\n"
+            "    depends_on: [iterate]\n"
+        )
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued_pipelines), 1)
+        task = self.enqueued_pipelines[0]
+        iterate_step = [s for s in task.steps if s.id == "iterate"][0]
+        self.assertEqual(iterate_step.loop_until, "DONE")
+        self.assertEqual(iterate_step.loop_max_iterations, 4)
+        self.assertEqual(iterate_step.loop_on_no_progress, "continue")
+        self.assertTrue(iterate_step.has_loop)
+        # Step without loop fields keeps defaults
+        report_step = [s for s in task.steps if s.id == "report"][0]
+        self.assertIsNone(report_step.loop_until)
+        self.assertFalse(report_step.has_loop)
+
+    def test_pipeline_loop_max_iterations_clamped(self):
+        """loop_max_iterations must be clamped to MAX_LOOP_ITERATIONS."""
+        self._write_pipeline("clamp",
+            "steps:\n"
+            "  - id: iter\n"
+            "    name: Iter\n"
+            "    prompt: go\n"
+            "    loop_until: STOP\n"
+            "    loop_max_iterations: 999\n"
+        )
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued_pipelines), 1)
+        step = self.enqueued_pipelines[0].steps[0]
+        self.assertEqual(step.loop_max_iterations, self.bot.MAX_LOOP_ITERATIONS)
+
+    def test_pipeline_loop_invalid_no_progress_falls_back_to_abort(self):
+        self._write_pipeline("bad_np",
+            "steps:\n"
+            "  - id: iter\n"
+            "    name: Iter\n"
+            "    prompt: go\n"
+            "    loop_until: STOP\n"
+            "    loop_on_no_progress: bogus\n"
+        )
+        self.scheduler._check_routines()
+        step = self.enqueued_pipelines[0].steps[0]
+        self.assertEqual(step.loop_on_no_progress, "abort")
+
     def test_pipeline_no_steps_skipped(self):
         body = (
             "---\n"
@@ -460,6 +516,146 @@ class PipelineStepWikilinkStripping(unittest.TestCase):
         prompt = self._loaded_prompt()
         self.assertEqual(prompt.strip(),
                          "Just a clean prompt.\n\nWith multiple paragraphs.")
+
+
+class PipelineLoopExecution(unittest.TestCase):
+    """Tests the Ralph-loop execution path with a mocked step invocation."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        self.state = self.bot.RoutineStateManager()
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _build_executor(self, step, **task_overrides):
+        """Build a PipelineExecutor with a single-step task and no bot side effects."""
+        defaults = dict(
+            name="looptest", title="Loop test", steps=[step],
+            model="sonnet", time_slot="08:00", agent=None, notify="none",
+            minimal_context=True, voice=False, effort=None,
+        )
+        defaults.update(task_overrides)
+        task = self.bot.PipelineTask(**defaults)
+        fake_bot = MagicMock()
+        fake_bot.send_message = MagicMock()
+        fake_bot.edit_message = MagicMock()
+        fake_bot.delete_message = MagicMock()
+        fake_ctx = MagicMock()
+        fake_ctx.chat_id = "1"
+        fake_ctx.thread_id = None
+        executor = self.bot.PipelineExecutor(task, fake_bot, fake_ctx, self.state)
+        executor.workspace = self.vault / "pipe-tmp"
+        executor.workspace.mkdir(parents=True, exist_ok=True)
+        return executor, fake_bot
+
+    def _make_step(self, **kwargs):
+        defaults = dict(
+            id="it", name="Iterate", model="sonnet",
+            prompt="base prompt",
+            depends_on=[],
+            loop_until="DONE",
+            loop_max_iterations=5,
+            loop_on_no_progress="abort",
+        )
+        defaults.update(kwargs)
+        return self.bot.PipelineStep(**defaults)
+
+    def test_loop_breaks_on_marker(self):
+        step = self._make_step(loop_until="ALL_DONE", loop_max_iterations=5)
+        executor, _ = self._build_executor(step)
+        outputs = iter(["partial work step 1", "still working", "finished: ALL_DONE"])
+        calls = []
+
+        def fake_invoke(s, prompt, ws):
+            out = next(outputs)
+            calls.append(prompt)
+            return out
+
+        executor._run_step_invocation = fake_invoke
+        data_dir = executor.workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        executor._execute_loop_step(step, data_dir)
+        # Third call found marker -> step completed
+        self.assertEqual(executor._step_status[step.id], "completed")
+        self.assertEqual(len(calls), 3)
+        # Output file persisted
+        self.assertTrue((data_dir / step.resolved_filename).exists())
+        self.assertIn("ALL_DONE", (data_dir / step.resolved_filename).read_text())
+        # Iteration-2 and 3 prompts include LOOP ITERATION context
+        self.assertNotIn("LOOP ITERATION", calls[0])
+        self.assertIn("LOOP ITERATION", calls[1])
+
+    def test_loop_fails_on_max_iterations(self):
+        step = self._make_step(loop_until="NEVER", loop_max_iterations=3)
+        executor, fake_bot = self._build_executor(step)
+        counter = {"n": 0}
+        def fake_invoke(s, p, w):
+            counter["n"] += 1
+            return f"iteration {counter['n']} output without marker"
+        executor._run_step_invocation = fake_invoke
+        data_dir = executor.workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        executor._execute_loop_step(step, data_dir)
+        self.assertEqual(executor._step_status[step.id], "failed")
+        err = executor._step_errors[step.id]
+        self.assertIn("max_iterations", err)
+        # Should have called exactly the capped number of times
+        self.assertEqual(counter["n"], 3)
+
+    def test_loop_no_progress_abort(self):
+        step = self._make_step(
+            loop_until="FINAL", loop_max_iterations=5,
+            loop_on_no_progress="abort",
+        )
+        executor, _ = self._build_executor(step)
+        # Same output every call -> should abort on iter 2
+        executor._run_step_invocation = lambda s, p, w: "same exact output"
+        data_dir = executor.workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        executor._execute_loop_step(step, data_dir)
+        self.assertEqual(executor._step_status[step.id], "failed")
+        err = executor._step_errors[step.id]
+        self.assertIn("stalled", err.lower())
+
+    def test_loop_no_progress_continue_exhausts_iterations(self):
+        step = self._make_step(
+            loop_until="FINAL", loop_max_iterations=3,
+            loop_on_no_progress="continue",
+        )
+        executor, _ = self._build_executor(step)
+        calls = []
+        def fake_invoke(s, p, w):
+            calls.append(p)
+            return "same exact output"
+        executor._run_step_invocation = fake_invoke
+        data_dir = executor.workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        executor._execute_loop_step(step, data_dir)
+        # Should run all 3 iterations and then fail on max
+        self.assertEqual(executor._step_status[step.id], "failed")
+        self.assertEqual(len(calls), 3)
+
+    def test_loop_hard_cap_enforced_at_runtime(self):
+        # Even if loop_max_iterations somehow slipped past parser, the execution
+        # layer uses min(step.loop_max_iterations, MAX_LOOP_ITERATIONS).
+        step = self._make_step(loop_until="NEVER", loop_max_iterations=500)
+        executor, _ = self._build_executor(step)
+        call_count = {"n": 0}
+        def fake_invoke(s, p, w):
+            call_count["n"] += 1
+            return f"output {call_count['n']}"
+        executor._run_step_invocation = fake_invoke
+        data_dir = executor.workspace / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        executor._execute_loop_step(step, data_dir)
+        self.assertEqual(executor._step_status[step.id], "failed")
+        self.assertLessEqual(call_count["n"], self.bot.MAX_LOOP_ITERATIONS)
 
 
 class ListTodayRoutines(unittest.TestCase):

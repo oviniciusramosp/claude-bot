@@ -154,6 +154,7 @@ SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
 SKILL_HINTS_ENABLED = True   # inject top-N skill hints from vault/.graphs/graph.json
+MAX_LOOP_ITERATIONS = 10     # hard cap for pipeline step loop (Ralph technique)
 STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
@@ -561,11 +562,25 @@ class PipelineStep:
     output_file: Optional[str] = None  # custom output filename (default: {id}.md)
     engine: str = "claude"
     effort: Optional[str] = None
+    # Ralph loop — re-run the step until `loop_until` appears in the output or
+    # `loop_max_iterations` is reached. Inspired by frankbria/ralph-claude-code.
+    # None in loop_until disables looping for this step. When enabled, each
+    # iteration appends the previous output as context to the next iteration
+    # so the agent can make progress. on_no_progress="abort" (default) fails
+    # the step if two consecutive iterations produce identical output;
+    # "continue" keeps looping regardless.
+    loop_until: Optional[str] = None
+    loop_max_iterations: int = 5
+    loop_on_no_progress: str = "abort"  # "abort" or "continue"
 
     @property
     def resolved_filename(self) -> str:
         """Return the output filename: custom if set, otherwise {id}.md."""
         return self.output_file if self.output_file else f"{self.id}.md"
+
+    @property
+    def has_loop(self) -> bool:
+        return bool(self.loop_until)
 
 
 @dataclass
@@ -1373,6 +1388,22 @@ class RoutineScheduler:
                 out_type = "file"
 
             _step_effort = str(s.get("effort", "")).lower().strip()
+            # Ralph loop config — flat keys (the pipeline parser is line-based).
+            # loop_until: substring that marks "done"; empty/None disables loops.
+            loop_until_raw = s.get("loop_until")
+            loop_until = str(loop_until_raw) if loop_until_raw not in (None, "") else None
+            try:
+                loop_max = int(s.get("loop_max_iterations", 5))
+            except (TypeError, ValueError):
+                loop_max = 5
+            if loop_max < 1:
+                loop_max = 1
+            if loop_max > MAX_LOOP_ITERATIONS:
+                logger.warning("Pipeline %s step %s: loop_max_iterations=%d exceeds hard cap %d — clamping",
+                               routine_name, step_id, loop_max, MAX_LOOP_ITERATIONS)
+                loop_max = MAX_LOOP_ITERATIONS
+            _np_raw = str(s.get("loop_on_no_progress", "abort")).lower().strip()
+            loop_np = _np_raw if _np_raw in ("abort", "continue") else "abort"
             steps.append(PipelineStep(
                 id=step_id,
                 name=str(s.get("name", step_id)),
@@ -1388,6 +1419,9 @@ class RoutineScheduler:
                 output_file=s.get("output_file") or None,
                 engine=str(s.get("engine", "claude")),
                 effort=_step_effort if _step_effort in ("low", "medium", "high") else None,
+                loop_until=loop_until,
+                loop_max_iterations=loop_max,
+                loop_on_no_progress=loop_np,
             ))
 
         if not steps:
@@ -2727,6 +2761,12 @@ class PipelineExecutor:
 
     def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute a single pipeline step using ClaudeRunner."""
+        # Ralph loop dispatcher — when the step has loop config, use the
+        # dedicated loop executor. Otherwise fall through to the normal path.
+        if step.has_loop:
+            self._execute_loop_step(step, data_dir)
+            return
+
         attempt = self._step_attempts.get(step.id, 0) + 1
         with self._lock:
             self._step_attempts[step.id] = attempt
@@ -2883,6 +2923,187 @@ class PipelineExecutor:
             with self._lock:
                 self._active_runners.pop(step.id, None)
                 # Release output-file path lock so deferred steps can proceed
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self._remove_step_activity(step.id)
+
+    def _run_step_invocation(self, step: PipelineStep, prompt: str, ws: str) -> str:
+        """Run a single ClaudeRunner invocation for a step and return the raw output.
+
+        Shared helper used by both the normal `_execute_step` path (indirectly via
+        code below) and the Ralph-loop `_execute_loop_step`. Raises on timeout,
+        cancellation, or runner error. Updates the pipeline's active-runners
+        registry so `cancel()` can abort mid-loop.
+        """
+        runner = ClaudeRunner()
+        with self._lock:
+            self._active_runners[step.id] = runner
+        try:
+            runner_thread = threading.Thread(
+                target=runner.run,
+                kwargs={
+                    "prompt": prompt, "model": step.model, "workspace": ws,
+                    "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT,
+                    "effort": step.effort or self.task.effort,
+                },
+                daemon=True, name=f"pipeline-loop-runner-{step.id}",
+            )
+            runner_thread.start()
+            hard_deadline = time.time() + step.timeout
+            last_activity_write = 0.0
+            while runner_thread.is_alive() and time.time() < hard_deadline:
+                if self._cancelled.is_set():
+                    runner.cancel()
+                    break
+                idle = time.time() - runner.last_activity
+                if idle > step.inactivity_timeout and runner.last_activity > runner.start_time:
+                    proc = runner.process
+                    if not (proc and proc.poll() is None):
+                        runner.cancel()
+                        raise TimeoutError(
+                            f"Step {step.id} idle for {int(idle)}s "
+                            f"(inactivity limit: {step.inactivity_timeout}s)"
+                        )
+                now = time.time()
+                if now - last_activity_write >= 3.0:
+                    self._write_step_activity(step.id, runner)
+                    last_activity_write = now
+                time.sleep(1)
+            if runner_thread.is_alive() or runner.running:
+                elapsed = int(time.time() - runner.start_time)
+                runner.cancel()
+                runner_thread.join(timeout=10)
+                raise TimeoutError(f"Step {step.id} exceeded {step.timeout}s hard limit (ran {elapsed}s)")
+            runner_thread.join(timeout=5)
+
+            if self._cancelled.is_set():
+                raise RuntimeError("Pipeline cancelled")
+
+            output = runner.result_text or runner.accumulated_text or ""
+            if runner.error_text and not output:
+                raise RuntimeError(runner.error_text)
+            return output
+        finally:
+            with self._lock:
+                self._active_runners.pop(step.id, None)
+
+    def _execute_loop_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Ralph loop — re-run a step until ``step.loop_until`` appears in the
+        output or the iteration cap is reached.
+
+        Behaviour:
+        - Each iteration appends the previous output as context to the next
+          prompt so the agent can make progress
+        - If ``step.loop_until`` substring appears in the current iteration's
+          output, the loop exits successfully
+        - If ``max_iterations`` is reached, the step is marked FAILED with a
+          clear error (no silent errors)
+        - If ``loop_on_no_progress == "abort"`` and two consecutive iterations
+          produce identical output, the loop aborts as FAILED
+        - Cancellation via ``cancel()`` aborts the loop immediately
+        """
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+        self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "running", attempt=attempt)
+
+        logger.info(
+            "Pipeline %s: step %s starting LOOP (model=%s, until=%r, max=%d)",
+            self.task.name, step.id, step.model, step.loop_until, step.loop_max_iterations,
+        )
+
+        # Resolve workspace for Claude CLI (same rules as _execute_step)
+        ws = str(self.workspace)
+        agent_id_for_ws = step.agent or self.task.agent
+        if agent_id_for_ws:
+            isolated = AGENTS_DIR / agent_id_for_ws / "workspace"
+            if isolated.is_dir():
+                ws = str(isolated)
+            elif (AGENTS_DIR / agent_id_for_ws).is_dir():
+                ws = str(AGENTS_DIR / agent_id_for_ws)
+
+        base_prompt = self._build_step_prompt(step, data_dir)
+        output = ""
+        previous_output = None
+        iterations = 0
+        cap = min(step.loop_max_iterations, MAX_LOOP_ITERATIONS)
+        loop_marker = step.loop_until or ""
+
+        try:
+            for i in range(1, cap + 1):
+                if self._cancelled.is_set():
+                    raise RuntimeError("Pipeline cancelled during loop")
+
+                iterations = i
+                if i == 1:
+                    iter_prompt = base_prompt
+                else:
+                    iter_prompt = (
+                        f"{base_prompt}\n\n"
+                        f"---\n\n"
+                        f"[LOOP ITERATION {i}/{cap}] "
+                        f"Você está em um loop. Continue a tarefa até escrever "
+                        f"exatamente a string `{loop_marker}` no seu output quando "
+                        f"a tarefa estiver concluída. Este é o resultado da iteração anterior:\n\n"
+                        f"{previous_output or '(vazio)'}\n"
+                    )
+                logger.info("Pipeline %s: step %s loop iter %d/%d", self.task.name, step.id, i, cap)
+                output = self._run_step_invocation(step, iter_prompt, ws)
+
+                # Persist the latest output every iteration so a crash mid-loop
+                # leaves the most recent result on disk for debugging.
+                try:
+                    (data_dir / step.resolved_filename).write_text(output, encoding="utf-8")
+                except OSError as ose:
+                    logger.error("Pipeline %s: step %s could not write loop output: %s",
+                                 self.task.name, step.id, ose)
+
+                # Success: loop marker appeared
+                if loop_marker and loop_marker in output:
+                    logger.info("Pipeline %s: step %s loop exited on iter %d (marker found)",
+                                self.task.name, step.id, i)
+                    break
+
+                # No-progress detection
+                if previous_output is not None and output == previous_output:
+                    if step.loop_on_no_progress == "abort":
+                        raise RuntimeError(
+                            f"Loop stalled on iter {i}: two consecutive iterations produced "
+                            f"identical output (on_no_progress=abort)"
+                        )
+                    logger.warning("Pipeline %s: step %s no progress on iter %d (continuing)",
+                                   self.task.name, step.id, i)
+
+                previous_output = output
+            else:
+                # Loop ran to completion without finding marker
+                raise RuntimeError(
+                    f"Loop exceeded max_iterations={cap} without finding marker "
+                    f"{loop_marker!r} (Ralph technique)"
+                )
+
+            with self._lock:
+                self._step_outputs[step.id] = output
+                self._step_status[step.id] = "completed"
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "completed",
+                attempt=attempt,
+            )
+            logger.info("Pipeline %s: step %s loop completed in %d iters",
+                        self.task.name, step.id, iterations)
+        except Exception as exc:
+            err_msg = f"[loop iter {iterations}] {str(exc)[:180]}"
+            with self._lock:
+                self._step_errors[step.id] = err_msg
+                self._step_status[step.id] = "failed"
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "failed",
+                error=err_msg, attempt=attempt,
+            )
+            logger.error("Pipeline %s: step %s loop failed: %s",
+                         self.task.name, step.id, err_msg)
+        finally:
+            with self._lock:
                 if self._output_file_locks.get(step.resolved_filename) == step.id:
                     del self._output_file_locks[step.resolved_filename]
             self._remove_step_activity(step.id)
