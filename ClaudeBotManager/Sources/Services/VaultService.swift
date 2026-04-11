@@ -122,10 +122,18 @@ actor VaultService {
 
             let name = String(entry.dropLast(3))
             let scheduleDict = fm_data["schedule"] as? [String: Any] ?? [:]
+            let rawMonthdays = scheduleDict["monthdays"] as? [Any] ?? []
+            let parsedMonthdays = rawMonthdays.compactMap { v -> Int? in
+                if let i = v as? Int { return i }
+                if let s = v as? String { return Int(s) }
+                return nil
+            }
             let schedule = Routine.Schedule(
                 times: scheduleDict["times"] as? [String] ?? [],
                 days: scheduleDict["days"] as? [String] ?? ["*"],
-                until: scheduleDict["until"] as? String
+                until: scheduleDict["until"] as? String,
+                interval: scheduleDict["interval"] as? String,
+                monthdays: parsedMonthdays
             )
 
             let promptBody = body
@@ -177,10 +185,18 @@ actor VaultService {
             "created": routine.created,
             "updated": today(),
             "tags": routine.tags.isEmpty ? [routine.routineType] : routine.tags,
-            "schedule": [
-                "times": routine.schedule.times,
-                "days": routine.schedule.days
-            ] as [String: Any],
+            "schedule": {
+                var s: [String: Any] = ["days": routine.schedule.days]
+                if let iv = routine.schedule.interval, !iv.isEmpty {
+                    s["interval"] = iv
+                } else {
+                    s["times"] = routine.schedule.times
+                }
+                if !routine.schedule.monthdays.isEmpty {
+                    s["monthdays"] = routine.schedule.monthdays
+                }
+                return s
+            }(),
             "model": routine.model,
             "enabled": routine.enabled
         ]

@@ -19,9 +19,13 @@ struct Routine: Identifiable, Hashable, Sendable {
     var pipelineStepDefs: [PipelineStepDef] = []  // step definitions for UI editing
 
     struct Schedule: Hashable, Sendable {
-        var times: [String]     // ["HH:MM", ...]
-        var days: [String]      // ["mon", "tue", ...] or ["*"]
-        var until: String?      // "YYYY-MM-DD" optional
+        var times: [String]       // ["HH:MM", ...] — used in clock mode
+        var days: [String]        // ["mon", "tue", ...] or ["*"]
+        var until: String?        // "YYYY-MM-DD" optional
+        var interval: String?     // "30m", "4h", "3d", "2w" — replaces times
+        var monthdays: [Int]      // [1, 15] — day-of-month filter (empty = all)
+
+        var isIntervalMode: Bool { interval != nil && !(interval?.isEmpty ?? true) }
     }
 
     // Today's execution status (loaded from routines-state)
@@ -29,12 +33,19 @@ struct Routine: Identifiable, Hashable, Sendable {
 
     var nextExecutionDescription: String {
         guard enabled else { return "Disabled" }
+
+        if schedule.isIntervalMode {
+            guard let iv = schedule.interval else { return "No schedule" }
+            let unitMap = ["m": "min", "h": "h", "d": "d", "w": "w"]
+            if let last = iv.last.map(String.init), let unit = unitMap[last] {
+                let val = String(iv.dropLast())
+                return "Every \(val)\(unit)"
+            }
+            return "Every \(iv)"
+        }
+
         let now = Date()
         let calendar = Calendar.current
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
-
-        let dayMap = ["mon": 2, "tue": 3, "wed": 4, "thu": 5, "fri": 6, "sat": 7, "sun": 1]
         let todayWeekday = calendar.component(.weekday, from: now)
         let allDays = schedule.days.contains("*")
 
@@ -42,21 +53,14 @@ struct Routine: Identifiable, Hashable, Sendable {
             let parts = timeStr.split(separator: ":").compactMap { Int($0) }
             guard parts.count == 2 else { continue }
             var comps = calendar.dateComponents([.year, .month, .day], from: now)
-            comps.hour = parts[0]
-            comps.minute = parts[1]
-            comps.second = 0
+            comps.hour = parts[0]; comps.minute = parts[1]; comps.second = 0
             if let target = calendar.date(from: comps), target > now {
                 if allDays { return "Today at \(timeStr)" }
                 let abbr: String
                 switch todayWeekday {
-                case 1: abbr = "sun"
-                case 2: abbr = "mon"
-                case 3: abbr = "tue"
-                case 4: abbr = "wed"
-                case 5: abbr = "thu"
-                case 6: abbr = "fri"
-                case 7: abbr = "sat"
-                default: abbr = ""
+                case 1: abbr = "sun"; case 2: abbr = "mon"; case 3: abbr = "tue"
+                case 4: abbr = "wed"; case 5: abbr = "thu"; case 6: abbr = "fri"
+                case 7: abbr = "sat"; default: abbr = ""
                 }
                 if schedule.days.contains(abbr) { return "Today at \(timeStr)" }
             }

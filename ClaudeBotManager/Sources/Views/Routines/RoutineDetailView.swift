@@ -11,10 +11,27 @@ struct RoutineDetailView: View {
     @State private var showDeleteConfirm = false
     @State private var history: [RoutineExecution] = []
 
+    // Schedule UI state (separate from routine model to drive the pickers)
+    @State private var scheduleMode: String
+    @State private var intervalValue: String
+    @State private var intervalUnit: String
+    @State private var showMonthdays: Bool
+
     enum DryRunState { case idle, running, sent, failed }
 
     init(routine: Routine) {
         _routine = State(initialValue: routine)
+        let isInterval = routine.schedule.isIntervalMode
+        _scheduleMode = State(initialValue: isInterval ? "interval" : "clock")
+        if let iv = routine.schedule.interval, !iv.isEmpty, let last = iv.last {
+            let unit = String(last)
+            _intervalValue = State(initialValue: String(iv.dropLast()))
+            _intervalUnit = State(initialValue: ["m","h","d","w"].contains(unit) ? unit : "h")
+        } else {
+            _intervalValue = State(initialValue: "1")
+            _intervalUnit = State(initialValue: "h")
+        }
+        _showMonthdays = State(initialValue: !routine.schedule.monthdays.isEmpty)
     }
 
     var body: some View {
@@ -128,43 +145,120 @@ struct RoutineDetailView: View {
     private let weekdays      = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
     private let weekdayLabels = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"]
 
+    private let intervalUnits: [(String, String)] = [
+        ("m", "minutes"), ("h", "hours"), ("d", "days"), ("w", "weeks")
+    ]
+
     private var scheduleSection: some View {
         detailFormSection(icon: "calendar", title: "Schedule") {
+            // Mode toggle
             VStack(alignment: .leading, spacing: 5) {
-                Text("Select the days of the week the routine will repeat")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color(white: 0.45))
+                Text("Repeat mode").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                CustomSegmentedControl(
+                    selection: $scheduleMode,
+                    options: [("clock", "Specific times"), ("interval", "Fixed interval")]
+                )
+            }
 
-                HStack(spacing: 10) {
-                    ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
-                        let isAll      = routine.schedule.days.contains("*")
-                        let isSelected = isAll || routine.schedule.days.contains(day)
-                        Button(label) { toggleDay(day) }
-                            .font(.system(size: 13, weight: .medium))
-                            .frame(width: 64, height: 24)
-                            .background(isSelected ? Color(red: 0.05, green: 0.44, blue: 1.0) : Color.black.opacity(0.05))
-                            .foregroundStyle(isSelected ? .white : Color.primary)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .buttonStyle(.plain)
+            if scheduleMode == "interval" {
+                // Interval row
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Repeat every").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    HStack(spacing: 8) {
+                        TextField("1", text: $intervalValue)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 52)
+                            .multilineTextAlignment(.center)
+                        Picker("", selection: $intervalUnit) {
+                            ForEach(intervalUnits, id: \.0) { unit, label in
+                                Text(label).tag(unit)
+                            }
+                        }
+                        .frame(width: 110)
+                    }
+                }
+
+                // Optional day filter
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Limit to weekdays (optional — all days if none selected)")
+                        .font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    HStack(spacing: 10) {
+                        ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                            let isSelected = routine.schedule.days.contains(day) || routine.schedule.days.contains("*")
+                            Button(label) { toggleDay(day) }
+                                .font(.system(size: 13, weight: .medium))
+                                .frame(width: 64, height: 24)
+                                .background(isSelected ? Color(red: 0.05, green: 0.44, blue: 1.0) : Color.black.opacity(0.05))
+                                .foregroundStyle(isSelected ? .white : Color.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+            } else {
+                // Clock mode — days
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Select the days of the week the routine will repeat")
+                        .font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    HStack(spacing: 10) {
+                        ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                            let isSelected = routine.schedule.days.contains(day) || routine.schedule.days.contains("*")
+                            Button(label) { toggleDay(day) }
+                                .font(.system(size: 13, weight: .medium))
+                                .frame(width: 64, height: 24)
+                                .background(isSelected ? Color(red: 0.05, green: 0.44, blue: 1.0) : Color.black.opacity(0.05))
+                                .foregroundStyle(isSelected ? .white : Color.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                // Clock mode — times
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Time of the day").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    FlowLayout(spacing: 10) {
+                        AddTimeButton { time in
+                            if !routine.schedule.times.contains(time) {
+                                routine.schedule.times.append(time)
+                                routine.schedule.times.sort()
+                            }
+                        }
+                        ForEach(routine.schedule.times, id: \.self) { time in
+                            TimeChip(time: time) { routine.schedule.times.removeAll { $0 == time } }
+                        }
                     }
                 }
             }
 
+            // Monthdays (both modes)
             VStack(alignment: .leading, spacing: 5) {
-                Text("Time of the day")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Color(white: 0.45))
-
-                FlowLayout(spacing: 10) {
-                    AddTimeButton { time in
-                        if !routine.schedule.times.contains(time) {
-                            routine.schedule.times.append(time)
-                            routine.schedule.times.sort()
-                        }
-                    }
-                    ForEach(routine.schedule.times, id: \.self) { time in
-                        TimeChip(time: time) {
-                            routine.schedule.times.removeAll { $0 == time }
+                HStack(spacing: 6) {
+                    Text("Specific days of month").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
+                    Spacer()
+                    Toggle("", isOn: $showMonthdays)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(Color(red: 0.05, green: 0.44, blue: 1.0))
+                        .scaleEffect(0.7)
+                        .frame(width: 40, height: 20)
+                        .onChange(of: showMonthdays) { _, on in if !on { routine.schedule.monthdays = [] } }
+                }
+                if showMonthdays {
+                    let columns = Array(repeating: GridItem(.fixed(36), spacing: 6), count: 10)
+                    LazyVGrid(columns: columns, spacing: 6) {
+                        ForEach(1...31, id: \.self) { day in
+                            let isOn = routine.schedule.monthdays.contains(day)
+                            Button("\(day)") {
+                                if isOn { routine.schedule.monthdays.removeAll { $0 == day } }
+                                else    { routine.schedule.monthdays.append(day) }
+                            }
+                            .font(.system(size: 12, weight: .medium))
+                            .frame(width: 36, height: 24)
+                            .background(isOn ? Color(red: 0.05, green: 0.44, blue: 1.0) : Color.black.opacity(0.05))
+                            .foregroundStyle(isOn ? .white : Color.primary)
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -387,6 +481,13 @@ struct RoutineDetailView: View {
                 .buttonStyle(.bordered)
 
             Button(isSaving ? "Saving…" : "Save") {
+                // Sync schedule mode UI state back to the model before saving
+                if scheduleMode == "interval" {
+                    routine.schedule.interval = "\(intervalValue.trimmingCharacters(in: .whitespaces))\(intervalUnit)"
+                    routine.schedule.times = []
+                } else {
+                    routine.schedule.interval = nil
+                }
                 isSaving = true
                 Task {
                     try? await appState.saveRoutine(routine)

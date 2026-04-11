@@ -7,8 +7,13 @@ struct RoutineFormSheet: View {
     @State private var name = ""
     @State private var title = ""
     @State private var description = ""
+    @State private var scheduleMode: String = "clock"   // "clock" | "interval"
     @State private var times: [String] = ["09:00"]
     @State private var days: [String] = ["mon", "tue", "wed", "thu", "fri"]
+    @State private var intervalValue: String = "1"
+    @State private var intervalUnit: String = "h"        // "m" | "h" | "d" | "w"
+    @State private var monthdays: [Int] = []
+    @State private var showMonthdays: Bool = false
     @State private var model = "sonnet"
     @State private var agentId: String? = nil
     @State private var promptBody = ""
@@ -122,38 +127,123 @@ struct RoutineFormSheet: View {
 
     // MARK: - Schedule Section
 
+    private let intervalUnits: [(String, String)] = [
+        ("m", "minutes"), ("h", "hours"), ("d", "days"), ("w", "weeks")
+    ]
+
     private var scheduleSection: some View {
         formSection(icon: "calendar", title: "Schedule") {
-            // Days
+            // Mode toggle
             VStack(alignment: .leading, spacing: 5) {
-                fieldLabel("Select the days of the week the routine will repeat")
-                HStack(spacing: 10) {
-                    ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
-                        let selected = days.contains(day) || days.contains("*")
-                        Button(label) {
-                            toggleDay(day)
+                fieldLabel("Repeat mode")
+                CustomSegmentedControl(
+                    selection: $scheduleMode,
+                    options: [("clock", "Specific times"), ("interval", "Fixed interval")]
+                )
+            }
+
+            if scheduleMode == "interval" {
+                // Interval row
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Repeat every")
+                    HStack(spacing: 8) {
+                        TextField("1", text: $intervalValue)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 52)
+                            .multilineTextAlignment(.center)
+                        Picker("", selection: $intervalUnit) {
+                            ForEach(intervalUnits, id: \.0) { unit, label in
+                                Text(label).tag(unit)
+                            }
                         }
-                        .font(.system(size: 13, weight: .medium))
-                        .frame(width: 64, height: 24)
-                        .background(selected ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
-                        .foregroundStyle(selected ? .white : Color.primary)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .buttonStyle(.plain)
+                        .frame(width: 110)
+                    }
+                }
+
+                // Optional day filter
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Limit to weekdays (optional — all days if none selected)")
+                    HStack(spacing: 10) {
+                        ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                            let selected = days.contains(day) || days.contains("*")
+                            Button(label) { toggleDay(day) }
+                                .font(.system(size: 13, weight: .medium))
+                                .frame(width: 64, height: 24)
+                                .background(selected ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
+                                .foregroundStyle(selected ? .white : Color.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+            } else {
+                // Clock mode — days
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Select the days of the week the routine will repeat")
+                    HStack(spacing: 10) {
+                        ForEach(Array(zip(weekdays, weekdayLabels)), id: \.0) { day, label in
+                            let selected = days.contains(day) || days.contains("*")
+                            Button(label) { toggleDay(day) }
+                                .font(.system(size: 13, weight: .medium))
+                                .frame(width: 64, height: 24)
+                                .background(selected ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
+                                .foregroundStyle(selected ? .white : Color.primary)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .buttonStyle(.plain)
+                        }
+                    }
+                }
+
+                // Clock mode — times
+                VStack(alignment: .leading, spacing: 5) {
+                    fieldLabel("Time of the day")
+                    FlowLayout(spacing: 10) {
+                        AddTimeButton { t in
+                            if !times.contains(t) { times.append(t); times.sort() }
+                        }
+                        ForEach(times, id: \.self) { time in
+                            TimeChip(time: time) { times.removeAll { $0 == time } }
+                        }
                     }
                 }
             }
 
-            // Times
+            // Monthdays (both modes)
             VStack(alignment: .leading, spacing: 5) {
-                fieldLabel("Time of the day")
-                FlowLayout(spacing: 10) {
-                    AddTimeButton { t in
-                        if !times.contains(t) { times.append(t); times.sort() }
-                    }
-                    ForEach(times, id: \.self) { time in
-                        TimeChip(time: time) { times.removeAll { $0 == time } }
-                    }
+                HStack(spacing: 6) {
+                    fieldLabel("Specific days of month")
+                    Spacer()
+                    Toggle("", isOn: $showMonthdays)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .tint(Color(hex: 0x0D6FFF))
+                        .scaleEffect(0.7)
+                        .frame(width: 40, height: 20)
+                        .onChange(of: showMonthdays) { _, on in if !on { monthdays = [] } }
                 }
+                if showMonthdays {
+                    monthdaysPicker(selected: $monthdays)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func monthdaysPicker(selected: Binding<[Int]>) -> some View {
+        let columns = Array(repeating: GridItem(.fixed(36), spacing: 6), count: 10)
+        LazyVGrid(columns: columns, spacing: 6) {
+            ForEach(1...31, id: \.self) { day in
+                let isOn = selected.wrappedValue.contains(day)
+                Button("\(day)") {
+                    if isOn { selected.wrappedValue.removeAll { $0 == day } }
+                    else    { selected.wrappedValue.append(day) }
+                }
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 36, height: 24)
+                .background(isOn ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
+                .foregroundStyle(isOn ? .white : Color.primary)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .buttonStyle(.plain)
             }
         }
     }
@@ -309,11 +399,20 @@ struct RoutineFormSheet: View {
                 isSaving = true
                 let todayStr = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
                 for i in pipelineSteps.indices { pipelineSteps[i].autoId() }
+                let iv = scheduleMode == "interval"
+                    ? "\(intervalValue.trimmingCharacters(in: .whitespaces))\(intervalUnit)"
+                    : nil
                 let routine = Routine(
                     id: name,
                     title: title,
                     description: description,
-                    schedule: Routine.Schedule(times: times, days: days, until: nil),
+                    schedule: Routine.Schedule(
+                        times: scheduleMode == "clock" ? times : [],
+                        days: days,
+                        until: nil,
+                        interval: iv,
+                        monthdays: monthdays
+                    ),
                     model: model,
                     agentId: agentId,
                     enabled: enabled,
