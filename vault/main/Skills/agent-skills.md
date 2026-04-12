@@ -11,7 +11,7 @@ tags: [index, skills]
 
 <!-- vault-query:start filter="type=skill" scope="main/Skills" sort="title" format="- [[{link}|{stem}]] — {description}" -->
 - [[main/Skills/audit-insecure-defaults|audit-insecure-defaults]] — Detect fail-open insecure defaults (hardcoded secrets, fallback tokens, weak auth, permissive config) in the bot codebase. Use when auditing .env handling, reviewing new config paths, or hardening for distribution.
-- [[main/Skills/create-agent|create-agent]] — Consultative skill for creating specialized agents or reviewing existing ones. Helps decide whether a case requires a dedicated agent or if the Main Agent is sufficient. Generates the 3 files (agent.md, CLAUDE.md, {id}.md) + Journal.
+- [[main/Skills/create-agent|create-agent]] — Consultative skill for creating specialized agents or reviewing existing ones. Helps decide whether a case requires a dedicated agent or if the Main Agent is sufficient. Generates the v3.5 flat per-agent structure (`<id>/agent-<id>.md` + `CLAUDE.md` + sub-indexes + `.workspace/`).
 - [[main/Skills/create-pipeline|create-pipeline]] — Skill for creating or reviewing pipelines with multiple parallel steps. Proactively analyzes parallelism opportunities and anti-patterns in existing pipelines.
 - [[main/Skills/create-routine|create-routine]] — Skill for creating scheduled routines or reviewing existing ones. Proactively analyzes whether the user's use case would work better as a parallel pipeline.
 - [[main/Skills/extract-knowledge|extract-knowledge]] — Extracts durable concepts from pipeline outputs or conversations and creates/updates notes in Notes/. Automates knowledge base population.

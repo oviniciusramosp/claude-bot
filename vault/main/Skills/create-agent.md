@@ -238,9 +238,13 @@ The marker block is auto-populated by `scripts/vault_indexes.py` on the next `/i
 
 ### Step 10 — Sync the Obsidian graph colors
 
-Tell the user to run `/indexes` on Telegram. That command regenerates all vault marker blocks AND syncs `.obsidian/graph.json` so the new agent gets its own colored group in the graph view.
+Run the indexes script directly from the bot root — no need to ask the user:
 
-Alternatively the bot re-syncs on startup, so a `./claude-bot.sh restart` also works.
+```bash
+cd ~/claude-bot && python3 scripts/vault_indexes.py
+```
+
+This regenerates all vault marker blocks AND syncs `.obsidian/graph.json` so the new agent gets its own colored group in the graph view. Do this as part of the creation flow, not as a follow-up instruction to the user.
 
 ### Step 11 — Record in the Main agent's Journal
 
