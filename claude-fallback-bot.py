@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.6.1"  # fix: agent creation auto-syncs colors, updates README, asks for Telegram topic
+BOT_VERSION = "3.6.2"  # fix: SIGTERM consolidation in thread — avoids FileNotFoundError from signal handler
 
 import hmac
 import hashlib
@@ -6135,13 +6135,21 @@ class ClaudeTelegramBot:
 
     def _run_agent_create_skill(self, extra: str = "") -> None:
         prompt = (
-            f"Execute a skill de criacao de agentes. "
+            "Execute a skill de criacao de agentes. "
             "Leia Skills/create-agent.md para instrucoes. "
             "Ajude o usuario a criar um novo agente como subdiretório direto do vault. "
             "Faca as perguntas necessarias sobre: nome, personalidade, especializacoes, "
-            "modelo padrao, icone, e topico do Telegram (chat_id/thread_id, opcional). "
+            "modelo padrao, e icone. "
             "Depois gere os arquivos, atualize vault/README.md, e registre no Journal."
         )
+        # Inject Telegram context so the skill writes it to frontmatter automatically
+        ctx = self._ctx
+        if ctx and ctx.thread_id is not None:
+            prompt += (
+                f"\n\nContexto Telegram (injetado automaticamente pelo bot): "
+                f"chat_id={ctx.chat_id!r}, thread_id={ctx.thread_id}. "
+                "Inclua esses valores no frontmatter do agente — sem perguntar ao usuario."
+            )
         if extra:
             prompt += f"\n\nO usuario disse: {extra}"
         self._run_claude_prompt(prompt)
@@ -8196,9 +8204,17 @@ if __name__ == "__main__":
     if "--run" in sys.argv or len(sys.argv) == 1:
         bot = ClaudeTelegramBot()
 
+        _shutdown_thread: list = [None]  # mutable cell so the join below can access it
+
         def _sigterm_handler(signum, frame):
             logger.info("Received SIGTERM, initiating graceful shutdown.")
-            bot.stop()
+            # Run bot.stop() in a thread — calling subprocess.Popen() (used by
+            # _consolidate_all_sessions) from within a signal handler is unsafe
+            # on macOS (posix_spawn/fork+exec restrictions) and causes a spurious
+            # FileNotFoundError even when the binary exists.
+            t = threading.Thread(target=bot.stop, name="graceful-shutdown", daemon=False)
+            _shutdown_thread[0] = t
+            t.start()
 
         signal.signal(signal.SIGTERM, _sigterm_handler)
 
@@ -8206,3 +8222,9 @@ if __name__ == "__main__":
             bot.run()
         except KeyboardInterrupt:
             bot.stop()
+
+        # If shutdown was triggered by SIGTERM, wait for the consolidation thread
+        # to finish before the process exits so session notes are not lost.
+        t = _shutdown_thread[0]
+        if t and t.is_alive():
+            t.join(timeout=30)
