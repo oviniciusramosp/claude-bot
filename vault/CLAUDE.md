@@ -285,6 +285,8 @@ steps:
 
 Step prompt files live under `Routines/{pipeline}/steps/*.md` — they have **no frontmatter and no wikilinks**.
 
+**Optional `## Example Output` / `## Expected Output` sections.** When a routine or pipeline step produces structured output and the format matters for correctness or downstream parsing, include an inline example at the end of the prompt body. This is especially important for pipeline steps whose output feeds another step. See `Skills/create-routine.md` and `Skills/create-pipeline.md` for detailed guidance and examples.
+
 ### Agent
 ```yaml
 ---

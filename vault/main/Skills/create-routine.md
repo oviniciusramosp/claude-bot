@@ -3,7 +3,7 @@ title: Create or Review Routine
 description: Skill for creating scheduled routines or reviewing existing ones. Proactively analyzes whether the user's use case would work better as a parallel pipeline.
 type: skill
 created: 2026-04-07
-updated: 2026-04-09
+updated: 2026-04-12
 trigger: "when the user wants to create, review, improve, or optimize a routine, schedule a recurring task, or use /routine"
 tags: [skill, routine, automation, review]
 ---
@@ -92,6 +92,35 @@ Help the user formulate an effective prompt. If the provided prompt is vague, su
 - [ ] Fallback instruction (what to do if something fails)
 - [ ] Quantity/limit when applicable (top 5, last 3 days)
 
+#### When to add an `## Example Output` section
+
+If the routine produces structured or formatted output (Telegram message, JSON, markdown report, table), include an `## Example Output` section at the end of the prompt body. Claude reads it at execution time and follows the format automatically — no extra instructions needed.
+
+**Add it when:**
+- The output is a Telegram message with specific formatting (bold, emojis, bullet structure)
+- The output is structured data another system will consume (JSON, YAML, key-value)
+- The output is a report or summary with a specific section layout
+- The format has been a source of inconsistency in past runs
+
+**Skip it when:**
+- The routine uses `NO_REPLY` (no output to format)
+- The prompt is a simple instruction with obvious output ("copy file X to Y")
+- The output format is genuinely open-ended ("reflect on today's journal")
+
+**Example — routine prompt with output guidance:**
+
+```
+List the top 5 Hacker News topics with links. If the API fails, respond "HN unavailable — will retry next run."
+
+## Example Output
+
+- **Show HN: Building a Rust compiler in 30 days** — https://news.ycombinator.com/item?id=12345
+- **PostgreSQL 18 released with native JSON columns** — https://news.ycombinator.com/item?id=12346
+- **The unreasonable effectiveness of plain text** — https://news.ycombinator.com/item?id=12347
+- **Ask HN: How do you manage dotfiles?** — https://news.ycombinator.com/item?id=12348
+- **YC W26 batch announced** — https://news.ycombinator.com/item?id=12349
+```
+
 ### Step 2 — Ask for schedules
 
 At what times should it run? Format HH:MM (24h). Can be multiple: "09:00 and 18:00".
@@ -164,6 +193,12 @@ enabled: true
 ---
 
 {Full prompt to be sent to Claude Code}
+
+{If the output format matters, add:}
+
+## Example Output
+
+{A concrete example of what the output should look like}
 ```
 
 **DO NOT add a `[[Routines]]` wikilink at the top of the body.** In v3.5 the graph is parent → child only — the `agent-routines.md` index lists its children via an auto-regenerated marker block, so leaf files never link up. Adding a parent wikilink would create a duplicate edge and fail the vault lint.

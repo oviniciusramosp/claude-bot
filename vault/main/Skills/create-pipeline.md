@@ -3,7 +3,7 @@ title: Create or Review Multi-Agent Pipeline
 description: Skill for creating or reviewing pipelines with multiple parallel steps. Proactively analyzes parallelism opportunities and anti-patterns in existing pipelines.
 type: skill
 created: 2026-04-08
-updated: 2026-04-09
+updated: 2026-04-12
 trigger: "when the user wants to create, review, improve, or optimize a pipeline, routine with multiple steps, routine with sub-agents, or multi-step workflow"
 tags: [skill, pipeline, routine, automation, multi-agent, review, parallelism]
 ---
@@ -261,6 +261,47 @@ IMPORTANT about step prompts:
 - **NO wikilinks anywhere** in step files — `[[...]]` syntax can leak into the LLM response and break downstream parsing. The parent→step relationship lives in the parent pipeline file's `## Steps` section, not in the step (parent owns the relationship)
 - When a step needs to mention another step's output file, use the plain path: `data/<other-step>.md` — never wrap it in wikilink brackets
 
+**When to add an `## Expected Output` section to step prompts:**
+
+If a step's output is consumed by a downstream step (i.e., another step has `depends_on` pointing to it), include an `## Expected Output` section at the end of the step prompt file. This is critical for pipeline reliability — downstream steps need to parse the output, and ambiguous formats cause cascading failures.
+
+The section should describe:
+- **Format**: JSON, key-value, markdown with specific headers, free text
+- **Key fields/sections**: what will be present and what each means
+- **Approximate size**: one-liner, short block, or multi-section document
+
+Skip it for the final step (`output: telegram`) since nothing downstream consumes its output.
+
+Example step prompt with output contract:
+
+```
+You are a market data collector. Fetch spot prices and 24h changes for BTC, ETH, and SOL.
+
+Use the available API tools to collect current data. Report only factual data — never invent values.
+
+## Expected Output
+
+Write to the output file in this format:
+
+=== BTC ===
+Price: $XX,XXX.XX
+24h: +/-X.XX%
+
+=== ETH ===
+Price: $X,XXX.XX
+24h: +/-X.XX%
+
+=== SOL ===
+Price: $XXX.XX
+24h: +/-X.XX%
+
+=== Collected at YYYY-MM-DD HH:MM UTC ===
+
+The analyst step will parse these sections by header (=== TOKEN ===).
+```
+
+This pattern is already proven in production — step prompts that define their output format (like the scout/write-review chain in crypto-news) have significantly more reliable downstream parsing than those that don't.
+
 #### 10. Let the index regenerate itself
 
 The owning agent's `vault/<agent>/Routines/agent-routines.md` has a `vault-query:start` marker block that auto-picks up any new pipeline on the next `scripts/vault_indexes.py` run (or the daily `vault-indexes-update` routine, or manual `/indexes` on Telegram). No manual editing.
@@ -385,10 +426,24 @@ Read the data collected from the 3 sources and write a concise newsletter with:
 - Tone: informative but accessible, without unnecessary jargon
 - Format: Markdown with headers and bullet points
 
-Save the result as newsletter.md
+## Expected Output
+
+# Weekly Tech Newsletter — YYYY-MM-DD
+
+## 1. [Highlight title]
+[2-3 sentence summary of the highlight, covering what happened and why it matters.]
+Source: [URL]
+
+## 2. [Highlight title]
+[2-3 sentence summary.]
+Source: [URL]
+
+... (up to 7 highlights)
+
+The review step will check structure, tone, and factual accuracy of each highlight.
 ```
 
-Note that the prompt does NOT mention `data/`, input file paths, or instruct about the workspace — all of that is injected automatically by the orchestrator.
+Note that the prompt does NOT mention `data/`, input file paths, or instruct about the workspace — all of that is injected automatically by the orchestrator. The `## Expected Output` section is optional but recommended for steps whose output feeds a downstream step — it acts as a contract that prevents parsing failures.
 
 ---
 
@@ -431,6 +486,7 @@ For each pipeline, read the main file and all step prompts. Evaluate using the c
 - [ ] **Step prompt mentions `data/`?** — Remove it. The orchestrator injects this automatically.
 - [ ] **Too generic a prompt?** — Vague instructions like "analyze the data" without specifying WHAT to analyze.
 - [ ] **Prompt too long?** — If >500 words, consider whether everything is necessary.
+- [ ] **Missing output contract?** — Does a non-final step lack an `## Expected Output` section? If downstream steps parse its output, add one.
 
 #### E. Execution history
 
