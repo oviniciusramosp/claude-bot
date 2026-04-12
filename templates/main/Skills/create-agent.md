@@ -137,11 +137,20 @@ Pick one of the supported palette names for the Obsidian graph-view color group.
 
 Suggest a color that doesn't clash with already-in-use agents. Ask the user, default to `grey` if no preference.
 
-### Step 8 — Generate ID
+### Step 8 — Telegram topic (auto-injected, no need to ask)
+
+The bot automatically injects the Telegram context into this prompt when the skill is invoked. Look for a line like:
+
+> `Contexto Telegram (injetado automaticamente pelo bot): chat_id='...', thread_id=...`
+
+- If both `chat_id` and `thread_id` are present → include them in the hub frontmatter (Step 10). No need to ask the user.
+- If the line is absent (command sent from a private chat or main group without a thread) → omit both fields from the frontmatter entirely.
+
+### Step 9 — Generate ID
 
 kebab-case of the name. E.g.: "CryptoAnalyst" -> `crypto-analyst`
 
-### Step 9 — Create the agent directory at `vault/{id}/`
+### Step 10 — Create the agent directory at `vault/{id}/`
 
 v3.5 flat layout — every agent lives directly under the vault root with the following structure:
 
@@ -178,10 +187,10 @@ icon: "{emoji}"
 color: {palette-name}
 default: false
 personality: {personality in one sentence}
-# Optional — Telegram routing. Let the agent auto-activate when messages
-# arrive on a specific chat/thread. Omit both for a plain agent.
-chat_id: "-100XXXXXXXXXX"    # Telegram group/channel ID (optional)
-thread_id: 123                # Telegram topic ID inside the group (optional)
+# If chat_id and thread_id were provided in Step 8, include them here.
+# Otherwise omit both fields entirely.
+# chat_id: "-100XXXXXXXXXX"
+# thread_id: 123
 ---
 
 - [[{id}/Skills/agent-skills|Skills]]
@@ -236,21 +245,25 @@ The marker block is auto-populated by `scripts/vault_indexes.py` on the next `/i
 
 **Journal/.activity/** and **.workspace/** are runtime directories — the dot-prefix makes Obsidian hide them automatically (hardcoded behavior, no `userIgnoreFilters` needed). `.workspace/data/<pipeline>/` is where pipeline step outputs land at runtime; it's created lazily by the bot's `_get_agent_workspace()` helper the first time a routine or pipeline runs for this agent, so you don't need to pre-create it — just include it in the initial scaffolding so the folder is there from day one.
 
-### Step 10 — Sync the Obsidian graph colors
+### Step 11 — Sync the Obsidian graph colors
 
-Tell the user to run `/indexes` on Telegram. That command regenerates all vault marker blocks AND syncs `.obsidian/graph.json` so the new agent gets its own colored group in the graph view.
+Run `python3 scripts/vault_indexes.py` via Bash from the repo root (the parent of `vault/`). This does three things automatically — no manual `/indexes` needed:
 
-Alternatively the bot re-syncs on startup, so a `./claude-bot.sh restart` also works.
+1. Regenerates all vault marker blocks (Routines.md, Skills.md, Agents.md, etc.)
+2. **Auto-adds the new agent to `vault/README.md`** — the `## Agents` section uses a `vault-query` marker, so the new agent appears there the moment this script runs
+3. Syncs `.obsidian/graph.json` with the agent's color group
 
-### Step 11 — Record in the Main agent's Journal
+The repo root is the parent of the `vault/` directory. Use a relative path like `../../scripts/vault_indexes.py` from the current cwd `vault/main/`, or resolve the absolute path.
+
+### Step 12 — Record in the Main agent's Journal
 
 Append to today's `main/Journal/YYYY-MM-DD.md` — mention in plain text (no wikilink to the agent).
 
-### Step 12 — Confirm
+### Step 13 — Confirm
 
 Inform how to activate: `/agent {name}`
 
-### Step 12 — Suggest next steps
+### Step 14 — Suggest next steps
 
 After creating the agent, proactively suggest:
 

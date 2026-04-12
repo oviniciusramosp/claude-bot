@@ -20,9 +20,12 @@ The vault is organized as **one tree per agent**, with this README as the single
 
 ## Agents
 
-- [[agent-main]]
+<!-- vault-query:start filter="type=agent" sort="name" format="- [[{stem}]]" -->
 - [[agent-crypto-bro]]
+- [[agent-digests]]
+- [[agent-main]]
 - [[agent-parmeirense]]
+<!-- vault-query:end -->
 
 ## Credentials
 
