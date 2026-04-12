@@ -5,12 +5,13 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.6.0"  # feat: add z.AI GLM as second LLM provider via Anthropic-compatible gateway
+BOT_VERSION = "3.6.1"  # fix: agent creation auto-syncs colors, updates README, asks for Telegram topic
 
 import hmac
 import hashlib
 import http.server
 import json
+import socket
 import logging
 import os
 import re
@@ -314,6 +315,91 @@ def model_provider(model: str) -> str:
     if model.startswith("glm-") or model.startswith("glm"):
         return "zai"
     return "anthropic"
+
+
+def _start_zai_proxy(glm_model: str, zai_base_url: str, zai_api_key: str):
+    """
+    Start a local Anthropic-compatible HTTP proxy that rewrites the model field
+    in requests, letting Claude CLI accept any GLM model name even though the CLI
+    validates model names client-side against its own known-model list.
+
+    Flow:
+      Claude CLI  →  http://127.0.0.1:{port}  →  z.AI /api/anthropic
+    Claude CLI sees a valid alias ("claude-sonnet-4-6"); the proxy quietly swaps
+    the model to the requested GLM name before forwarding.
+
+    Returns (server, port). Caller must call server.shutdown() after the run.
+    """
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        _glm_model = glm_model
+        _base_url = zai_base_url.rstrip("/")
+        _api_key = zai_api_key
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            try:
+                data = json.loads(body)
+                data["model"] = self.__class__._glm_model
+                body = json.dumps(data).encode()
+            except Exception:
+                pass
+
+            target = self.__class__._base_url + self.path
+            hdrs = {
+                "Content-Type": "application/json",
+                "Content-Length": str(len(body)),
+                "x-api-key": self.__class__._api_key,
+                "anthropic-version": self.headers.get("anthropic-version", "2023-06-01"),
+            }
+            for h in ("anthropic-beta",):
+                if self.headers.get(h):
+                    hdrs[h] = self.headers[h]
+
+            req = urllib.request.Request(target, data=body, headers=hdrs, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=600) as resp:
+                    self.send_response(resp.status)
+                    for k, v in resp.headers.items():
+                        if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                            self.send_header(k, v)
+                    self.end_headers()
+                    while True:
+                        chunk = resp.read(4096)
+                        if not chunk:
+                            break
+                        try:
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                        except (BrokenPipeError, ConnectionResetError):
+                            break
+            except urllib.error.HTTPError as exc:
+                err_body = exc.read()
+                self.send_response(exc.code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(err_body)))
+                self.end_headers()
+                self.wfile.write(err_body)
+            except Exception as exc:
+                payload = json.dumps({"error": str(exc)}).encode()
+                self.send_response(502)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        def log_message(self, fmt, *args):  # suppress noisy proxy logs
+            pass
+
+    # Bind on a random free port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    srv = http.server.HTTPServer(("127.0.0.1", port), _Handler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True, name=f"zai-proxy-{port}")
+    t.start()
+    return srv, port
 
 
 def _tts_prompt_suffix() -> str:
@@ -2743,11 +2829,16 @@ class ClaudeRunner:
         self.exit_code = None
         self.activity_type = "thinking"
 
+        _proxy_server = None
         try:
             # Strip CLAUDECODE env var to prevent "nested session" errors.
             clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
             # Provider routing: GLM models go through z.AI's Anthropic-compatible gateway.
+            # Claude CLI validates model names client-side, so GLM names ("glm-5.1" etc.)
+            # are rejected before any HTTP call is made. Fix: start a local proxy that
+            # accepts ANY model name from Claude CLI and rewrites it to the real GLM name
+            # before forwarding to z.AI. Claude CLI sees a valid alias ("claude-sonnet-4-6").
             provider = model_provider(model)
             if provider == "zai":
                 if not ZAI_API_KEY:
@@ -2758,12 +2849,21 @@ class ClaudeRunner:
                     logger.error(self.error_text)
                     self.running = False
                     return
-                clean_env["ANTHROPIC_BASE_URL"] = ZAI_BASE_URL
-                clean_env["ANTHROPIC_AUTH_TOKEN"] = ZAI_API_KEY
-                # Strip ANTHROPIC_API_KEY so the CLI prefers our token.
+                _proxy_server, _proxy_port = _start_zai_proxy(model, ZAI_BASE_URL, ZAI_API_KEY)
+                logger.info("ZAI proxy started on port %d for model %s", _proxy_port, model)
+                # Point Claude CLI at our local proxy; use a valid Claude alias so the
+                # CLI's local model validation passes.
+                clean_env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{_proxy_port}"
+                clean_env["ANTHROPIC_AUTH_TOKEN"] = "zai-proxy"
                 clean_env.pop("ANTHROPIC_API_KEY", None)
                 # GLM-5.1 is ~44 tok/s — bump timeout so long generations don't hang.
                 clean_env.setdefault("API_TIMEOUT_MS", "3000000")
+                # Replace the GLM model name in cmd with a valid Claude alias so the
+                # CLI's local model-name check doesn't abort before making the API call.
+                for i, arg in enumerate(cmd):
+                    if arg == "--model" and i + 1 < len(cmd):
+                        cmd[i + 1] = "claude-sonnet-4-6"
+                        break
 
             self.process = subprocess.Popen(
                 cmd,
@@ -2787,6 +2887,8 @@ class ClaudeRunner:
             self.error_text = f"❌ Erro ao executar Claude: {exc}"
             logger.error(self.error_text, exc_info=True)
         finally:
+            if _proxy_server is not None:
+                _proxy_server.shutdown()
             self._cleanup()
 
     def _read_stream(self) -> None:
@@ -6037,7 +6139,8 @@ class ClaudeTelegramBot:
             "Leia Skills/create-agent.md para instrucoes. "
             "Ajude o usuario a criar um novo agente como subdiretório direto do vault. "
             "Faca as perguntas necessarias sobre: nome, personalidade, especializacoes, "
-            "modelo padrao, e icone. Depois gere os arquivos e registre no Journal."
+            "modelo padrao, icone, e topico do Telegram (chat_id/thread_id, opcional). "
+            "Depois gere os arquivos, atualize vault/README.md, e registre no Journal."
         )
         if extra:
             prompt += f"\n\nO usuario disse: {extra}"

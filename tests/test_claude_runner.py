@@ -202,6 +202,8 @@ class ProviderRouting(unittest.TestCase):
         self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
 
     def test_glm_model_injects_zai_env(self):
+        # GLM models now route through a local proxy (bypasses Claude CLI's client-side
+        # model validation). ANTHROPIC_BASE_URL → local proxy; AUTH_TOKEN → "zai-proxy".
         self.bot.ZAI_API_KEY = "fake-key"
         runner = self.bot.ClaudeRunner()
         with patch.object(self.bot.subprocess, "Popen") as mock_popen:
@@ -209,8 +211,12 @@ class ProviderRouting(unittest.TestCase):
             runner.run(prompt="hi", model="glm-4.7", system_prompt=None)
         mock_popen.assert_called_once()
         env = mock_popen.call_args.kwargs["env"]
-        self.assertEqual(env.get("ANTHROPIC_BASE_URL"), "https://api.z.ai/api/anthropic")
-        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "fake-key")
+        base_url = env.get("ANTHROPIC_BASE_URL", "")
+        self.assertTrue(
+            base_url.startswith("http://127.0.0.1:"),
+            f"Expected local proxy URL, got: {base_url}",
+        )
+        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "zai-proxy")
         self.assertEqual(env.get("API_TIMEOUT_MS"), "3000000")
 
     def test_glm_model_strips_anthropic_api_key(self):
