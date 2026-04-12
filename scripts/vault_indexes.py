@@ -52,6 +52,7 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -60,6 +61,17 @@ from typing import Any, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from vault_query import VaultFile, VaultIndex, load_vault, parse_filter_expression  # noqa: E402
+
+AGENT_COLOR_PALETTE: Dict[str, int] = {
+    "grey":   0x9E9E9E,
+    "red":    0xEF4444,
+    "orange": 0xFF9800,
+    "yellow": 0xFBBF24,
+    "green":  0x4CAF50,
+    "teal":   0x14B8A6,
+    "blue":   0x3B82F6,
+    "purple": 0x9333EA,
+}
 
 MARKER_START_RE = re.compile(
     r"<!--\s*vault-query:start\s+(.*?)\s*-->",
@@ -296,6 +308,67 @@ def _default_vault_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "vault"
 
 
+def sync_obsidian_color_groups(vault_dir: Path) -> bool:
+    """Regenerate per-agent color groups in ``.obsidian/graph.json``.
+
+    Walks every agent directory (those containing ``agent-{dirname}.md``),
+    reads the ``color`` field from frontmatter, and rewrites the bot-managed
+    colorGroups block.  User-defined groups that don't match agent path
+    filters are preserved.  Fail-open: returns False on any error.
+    """
+    graph_path = vault_dir / ".obsidian" / "graph.json"
+    if not graph_path.exists():
+        return False
+    try:
+        data = json.loads(graph_path.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+
+    # Discover agent IDs: any immediate child dir that has agent-{name}.md
+    agent_ids: List[str] = []
+    for d in sorted(vault_dir.iterdir()):
+        if d.is_dir() and (d / f"agent-{d.name}.md").exists():
+            agent_ids.append(d.name)
+
+    known_ids = set(agent_ids)
+
+    # Preserve user-defined groups (not bot-managed agent path groups)
+    preserved: List[Any] = []
+    for g in data.get("colorGroups", []):
+        q = g.get("query", "")
+        if isinstance(q, str) and q.startswith("path:"):
+            seg = q[5:].strip().split()[0].rstrip("/") if q[5:].strip() else ""
+            if seg in known_ids:
+                continue  # will be replaced by a fresh bot group
+        preserved.append(g)
+
+    # Build fresh bot-managed groups from each agent's color field
+    bot_groups: List[Any] = []
+    for agent_id in agent_ids:
+        hub = vault_dir / agent_id / f"agent-{agent_id}.md"
+        color_name = "grey"
+        try:
+            text = hub.read_text(encoding="utf-8")
+            m = re.search(r"^color:\s*(\S+)", text, re.MULTILINE)
+            if m:
+                color_name = m.group(1).strip("\"'")
+        except Exception:
+            pass
+        rgb = AGENT_COLOR_PALETTE.get(color_name, AGENT_COLOR_PALETTE["grey"])
+        bot_groups.append({
+            "query": f"path:{agent_id}/",
+            "color": {"a": 1, "rgb": rgb},
+        })
+
+    data["colorGroups"] = bot_groups + preserved
+    graph_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    return True
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description="Regenerate vault index marker blocks.")
     p.add_argument("--vault", type=Path, default=_default_vault_dir())
@@ -324,6 +397,8 @@ def main() -> int:
             print(f"  - {f.relative_to(args.vault)}")
     else:
         print(f"✅ All {len(scanned)} marker files already up to date.")
+    # Also sync Obsidian graph-view color groups from agent frontmatter.
+    sync_obsidian_color_groups(args.vault)
     return 0
 
 
