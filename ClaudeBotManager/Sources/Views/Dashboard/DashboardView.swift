@@ -290,33 +290,196 @@ struct ClaudeUsageCard: View {
     }
 }
 
-// MARK: - Z.AI Usage Card (disconnected placeholder)
+// MARK: - Z.AI Usage Card
 
 struct ZAIUsageCard: View {
+    @EnvironmentObject var appState: AppState
+
+    private var usage: ZAIUsage { appState.zaiUsage }
+
+    private var weekReferencePercent: Double {
+        let now = Date()
+        if let resetsAt = usage.weeklyResetsAt {
+            let windowStart = resetsAt.addingTimeInterval(-7 * 24 * 3600)
+            return max(0, min(1, now.timeIntervalSince(windowStart) / (7 * 24 * 3600)))
+        }
+        let cal = Calendar.current
+        let weekday = cal.component(.weekday, from: now)
+        let dayIndex = (weekday - 2 + 7) % 7
+        let hour   = cal.component(.hour,   from: now)
+        let minute = cal.component(.minute, from: now)
+        return (Double(dayIndex) + (Double(hour) * 60 + Double(minute)) / 1440.0) / 7.0
+    }
+
+    private var effectiveWeeklyPercent: Double {
+        if usage.isAvailable { return usage.weeklyPercent }
+        return 0  // no cost-based fallback — progress bar stays at 0 until API responds
+    }
+
     var body: some View {
         GlassCard(padding: Spacing.xl) {
             VStack(alignment: .leading, spacing: Spacing.md) {
-                cardHeader("Z.AI Usage", symbol: "cpu")
+                cardHeader("Z.AI Usage", symbol: "sparkles")
 
-                Spacer(minLength: 0)
+                if !usage.isConfigured {
+                    notConfiguredView
+                } else if usage.isAvailable {
+                    Text(usage.weeklyLabel)
+                        .font(.system(size: 17, weight: .bold))
+                        .tracking(-0.51)
 
-                VStack(spacing: Spacing.sm) {
-                    Image(systemName: "link.badge.plus")
-                        .font(.title2)
-                        .foregroundStyle(.tertiary)
-                    Text("Not Connected")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(.tertiary)
-                    Text("GLM integration coming soon")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.quaternary)
+                    WeeklySegmentBar(
+                        percent: effectiveWeeklyPercent,
+                        referencePercent: weekReferencePercent,
+                        barColor: effectiveWeeklyPercent > weekReferencePercent
+                            ? Color(red: 1.0, green: 0.220, blue: 0.235) // red when above pace
+                            : .orange
+                    )
+
+                    paceRow
+                    renewRow
+                    statChips
+                } else if usage.hasPlanInfo {
+                    planInfoView
+                } else if usage.hasCostData {
+                    costOnlyView
+                } else {
+                    notConfiguredView  // key set but no data yet — still show CTA
                 }
-                .frame(maxWidth: .infinity)
-
-                Spacer(minLength: 0)
             }
-            .frame(maxHeight: .infinity)
         }
+    }
+
+    private var paceRow: some View {
+        let expected = Int(weekReferencePercent * 100)
+        let actual   = Int(effectiveWeeklyPercent * 100)
+        let offset   = actual - expected
+        let label: String
+        if offset <= 0 {
+            label = "On pace: \(offset)% (expected \(expected)%)"
+        } else {
+            label = "Above pace: +\(offset)% (expected \(expected)%)"
+        }
+
+        return HStack(spacing: 4) {
+            Image(systemName: "gauge.open.with.lines.needle.33percent")
+            Text(label)
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+    }
+
+    @ViewBuilder
+    private var renewRow: some View {
+        if let reset = usage.weeklyResetsAt {
+            let dayName = { () -> String in
+                let f = DateFormatter()
+                f.locale = Locale(identifier: "en_US")
+                f.dateFormat = "EEEE"
+                return f.string(from: reset)
+            }()
+            let timeStr = { () -> String in
+                let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: reset)
+            }()
+            let remaining = { () -> String in
+                let secs = Int(max(0, reset.timeIntervalSinceNow))
+                let d = secs / 86400
+                let h = (secs % 86400) / 3600
+                if d > 0 { return "\(d)d \(h)h" }
+                return "\(h)h"
+            }()
+
+            HStack(spacing: 4) {
+                Image(systemName: "arrow.clockwise.circle")
+                Text("Renew \(dayName) \(timeStr) (\(remaining))")
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+        }
+    }
+
+    /// Stat chips — count where GLM is being used across agents, routines, pipeline steps.
+    private var statChips: some View {
+        HStack(spacing: 5) {
+            DashboardChip(symbol: SidebarItem.agents.symbol, value: glmAgentCount)
+            DashboardChip(symbol: SidebarItem.routines.symbol, value: glmRoutineCount)
+            DashboardChip(symbol: "checklist", value: glmStepCount)
+        }
+    }
+
+    private var glmAgentCount: Int {
+        appState.agents.filter { $0.model.hasPrefix("glm") }.count
+    }
+    private var glmRoutineCount: Int {
+        appState.routines.filter { r in
+            r.model.hasPrefix("glm") || r.pipelineStepDefs.contains(where: { $0.model.hasPrefix("glm") })
+        }.count
+    }
+    private var glmStepCount: Int {
+        appState.routines.reduce(0) { acc, r in
+            acc + r.pipelineStepDefs.filter { $0.model.hasPrefix("glm") }.count
+        }
+    }
+
+    private var planInfoView: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(Color(red: 0.204, green: 0.780, blue: 0.349))
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(usage.planName)
+                        .font(.callout.bold())
+                }
+            }
+
+            WeeklySegmentBar(
+                percent: 0,
+                referencePercent: weekReferencePercent,
+                barColor: .orange
+            )
+
+            statChips
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var costOnlyView: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            Text(usage.weeklyLabel)
+                .font(.system(size: 17, weight: .bold))
+                .tracking(-0.51)
+
+            WeeklySegmentBar(
+                percent: 0,
+                referencePercent: weekReferencePercent,
+                barColor: .orange
+            )
+
+            HStack(spacing: 4) {
+                Image(systemName: "chart.bar.xaxis")
+                Text(String(format: "Local tracking — $%.2f today · API unavailable",
+                            usage.todayCostUSD))
+            }
+            .font(.system(size: 10))
+            .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+
+            statChips
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var notConfiguredView: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: "key.slash")
+                .font(.title2).foregroundStyle(.tertiary)
+            Text("Not Connected")
+                .font(.callout).foregroundStyle(.tertiary)
+            Text("Add ZAI_API_KEY in Settings")
+                .font(.system(size: 10)).foregroundStyle(.quaternary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Spacing.sm)
     }
 }
 

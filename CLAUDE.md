@@ -96,8 +96,34 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager (macOS app).
 | `TELEGRAM_CHAT_ID` | Yes | — | Authorized Telegram chat ID |
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI binary |
 | `CLAUDE_WORKSPACE` | No | `vault/main/` | Working directory for Main sessions (named agents override this with their own folder) |
+| `ZAI_API_KEY` | No | — | z.AI API key — required to use any `glm-*` model. Get one at https://z.ai/manage-apikey |
+| `ZAI_BASE_URL` | No | `https://api.z.ai/api/anthropic` | z.AI's Anthropic-compatible gateway URL (rarely changed) |
 
 **Edited via:** ClaudeBotManager → Settings, or directly in the file.
+
+### Multi-provider models (Claude + z.AI GLM)
+
+The bot runs two LLM providers side-by-side, reusing the same `claude` CLI binary:
+
+- **Anthropic models** (`sonnet`, `opus`, `haiku`) — native, default. Require logged-in Claude account.
+- **z.AI GLM models** (`glm-5.1`, `glm-4.7`, `glm-4.5-air`) — routed via z.AI's **Anthropic-compatible gateway**. When the requested model starts with `glm-`, `ClaudeRunner` injects `ANTHROPIC_BASE_URL=$ZAI_BASE_URL` and `ANTHROPIC_AUTH_TOKEN=$ZAI_API_KEY` into the subprocess env. The same `claude --print --output-format stream-json` invocation works — the gateway emits Anthropic-compatible events the bot's parser already consumes.
+
+**Provider is inferred from the model name prefix** — no `provider:` field in frontmatter. A pipeline step with `model: glm-4.5-air` runs on GLM; a step with `model: sonnet` runs on Claude. Switching mid-pipeline is supported (each step spawns its own subprocess).
+
+**Limitations of the z.AI gateway + workarounds:**
+
+| Limitation | Workaround |
+|---|---|
+| WebSearch / WebFetch (native) | Pre-fetch in a Claude step and pass the content to a GLM step via `data/{step_id}.md`, or use PintchTab (local browser CLI) in a Bash step, or configure a Tavily/Brave MCP server |
+| Image input (vision) | Claude step describes the image in text → GLM step consumes the text |
+| Prompt caching | Not supported via gateway. For long + repeated prompts, use Claude models |
+| Context window | GLM-4.7 = 131K (vs Anthropic 200K). Use `glm-5.1` (200K) or route long tasks to Claude |
+| Sub-agents (Task tool) inherit parent model | Spawn explicitly with `--model sonnet` in the sub-agent prompt when mixing is required |
+| Skills, hooks, MCP, file ops, Bash | **Work unchanged** — all client-side features of Claude Code |
+
+**Design convention for mixed pipelines:** use Claude for steps that need web fetching, image input, or heavy prompt caching. Use GLM for analysis, transformation, or text generation over data already collected (usually cheaper and fast enough).
+
+**Fail-loud behavior:** If a GLM model is requested but `ZAI_API_KEY` is not set, `ClaudeRunner` aborts before spawning the subprocess and surfaces a friendly error via Telegram — no silent failure. The `/model` inline keyboard hides the GLM row entirely when the key is missing.
 
 ### `vault/.env` — API keys for vault tasks
 
@@ -117,8 +143,9 @@ Read by Claude Code when executing tasks in the vault context (routines, interac
 |---------|-------------|
 | `/start`, `/help` | Show help |
 | `/status` | Session & process info |
-| `/sonnet`, `/opus`, `/haiku` | Quick model switch |
-| `/model` | Model picker (inline keyboard) |
+| `/sonnet`, `/opus`, `/haiku` | Quick model switch (Anthropic) |
+| `/glm` | Quick switch to `glm-4.7` (z.AI) — requires `ZAI_API_KEY` |
+| `/model` | Model picker (inline keyboard; GLM row shown only when `ZAI_API_KEY` is set) |
 | `/new [name]` | Create new session |
 | `/sessions` | List all sessions |
 | `/switch <name>` | Switch session |

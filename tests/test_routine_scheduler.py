@@ -317,6 +317,40 @@ class SchedulerPipelineCycle(unittest.TestCase):
         self.assertEqual(publish_step.output_type, "telegram")
         self.assertTrue(publish_step.output_to_telegram)
 
+    def test_pipeline_step_with_glm_model_parses(self):
+        """A pipeline step with model=glm-4.7 must parse cleanly.
+
+        Multi-provider routing (v3.6): provider is inferred from the model
+        prefix at runtime, so no new frontmatter field is needed. Pipelines
+        can mix Claude and GLM steps freely.
+        """
+        self._write_pipeline("mixed",
+            "steps:\n"
+            "  - id: collect\n"
+            "    name: Collect\n"
+            "    prompt: get data\n"
+            "    model: glm-4.5-air\n"
+            "  - id: analyze\n"
+            "    name: Analyze\n"
+            "    prompt: think\n"
+            "    model: glm-4.7\n"
+            "    depends_on: [collect]\n"
+            "  - id: finalize\n"
+            "    name: Finalize\n"
+            "    prompt: wrap up\n"
+            "    model: opus\n"
+            "    depends_on: [analyze]\n"
+            "    output: telegram\n"
+        )
+        self.scheduler._check_routines()
+        self.assertEqual(len(self.enqueued_pipelines), 1)
+        task = self.enqueued_pipelines[0]
+        self.assertEqual(len(task.steps), 3)
+        by_id = {s.id: s for s in task.steps}
+        self.assertEqual(by_id["collect"].model, "glm-4.5-air")
+        self.assertEqual(by_id["analyze"].model, "glm-4.7")
+        self.assertEqual(by_id["finalize"].model, "opus")
+
     def test_pipeline_loop_fields_parsed(self):
         """Ralph loop fields propagate from frontmatter into PipelineStep."""
         self._write_pipeline("loopy",

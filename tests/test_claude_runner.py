@@ -4,6 +4,7 @@ We don't actually spawn `claude` — instead we drive `_handle_event` directly
 with the JSON shapes the CLI emits. This covers the parser without subprocess
 flakiness.
 """
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -135,6 +136,109 @@ class GetSnapshot(unittest.TestCase):
         snapshot = runner.get_snapshot()
         self.assertIsInstance(snapshot, str)
         self.assertGreater(len(snapshot), 0)
+
+
+class ProviderRouting(unittest.TestCase):
+    """Env injection for GLM vs Anthropic models.
+
+    ClaudeRunner.run() must inject ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+    into the subprocess env when the requested model is a GLM variant (routed
+    through z.AI's Anthropic-compatible gateway), and must fail loud if the
+    user requested GLM without configuring ZAI_API_KEY.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    # Env vars we touch across tests — snapshot + restore so host env
+    # (which may already have ANTHROPIC_BASE_URL, API_TIMEOUT_MS, etc. set
+    # by the Claude agent that ran this test) is preserved between cases.
+    _MUTATED_ENV_VARS = (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "API_TIMEOUT_MS",
+    )
+
+    def setUp(self):
+        self._orig_zai_key = self.bot.ZAI_API_KEY
+        self._env_snapshot = {k: os.environ.get(k) for k in self._MUTATED_ENV_VARS}
+        # Clear them so tests start from a clean slate — this isolates the
+        # bot's injection behavior from whatever the host happens to have set.
+        for k in self._MUTATED_ENV_VARS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        self.bot.ZAI_API_KEY = self._orig_zai_key
+        for k, v in self._env_snapshot.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def _make_mock_popen_proc(self):
+        """Return a MagicMock process with empty stdout/stderr so
+        _read_stream() exits immediately without blocking."""
+        proc = MagicMock()
+        proc.stdout = iter([])           # empty iterator -> for-loop exits
+        proc.stderr = MagicMock()
+        proc.stderr.read.return_value = ""
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        proc.pid = 12345
+        return proc
+
+    def test_anthropic_model_does_not_inject_zai_env(self):
+        self.bot.ZAI_API_KEY = ""
+        runner = self.bot.ClaudeRunner()
+        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+            mock_popen.return_value = self._make_mock_popen_proc()
+            runner.run(prompt="hi", model="sonnet", system_prompt=None)
+        mock_popen.assert_called_once()
+        env = mock_popen.call_args.kwargs["env"]
+        self.assertNotIn("ANTHROPIC_BASE_URL", env)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", env)
+
+    def test_glm_model_injects_zai_env(self):
+        self.bot.ZAI_API_KEY = "fake-key"
+        runner = self.bot.ClaudeRunner()
+        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+            mock_popen.return_value = self._make_mock_popen_proc()
+            runner.run(prompt="hi", model="glm-4.7", system_prompt=None)
+        mock_popen.assert_called_once()
+        env = mock_popen.call_args.kwargs["env"]
+        self.assertEqual(env.get("ANTHROPIC_BASE_URL"), "https://api.z.ai/api/anthropic")
+        self.assertEqual(env.get("ANTHROPIC_AUTH_TOKEN"), "fake-key")
+        self.assertEqual(env.get("API_TIMEOUT_MS"), "3000000")
+
+    def test_glm_model_strips_anthropic_api_key(self):
+        self.bot.ZAI_API_KEY = "fake-key"
+        os.environ["ANTHROPIC_API_KEY"] = "leaked"
+        runner = self.bot.ClaudeRunner()
+        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+            mock_popen.return_value = self._make_mock_popen_proc()
+            runner.run(prompt="hi", model="glm-4.7", system_prompt=None)
+        mock_popen.assert_called_once()
+        env = mock_popen.call_args.kwargs["env"]
+        self.assertNotIn("ANTHROPIC_API_KEY", env)
+
+    def test_glm_without_key_fails_loud(self):
+        self.bot.ZAI_API_KEY = ""
+        runner = self.bot.ClaudeRunner()
+        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+            runner.run(prompt="hi", model="glm-4.7", system_prompt=None)
+        mock_popen.assert_not_called()
+        self.assertIn("ZAI_API_KEY", runner.error_text)
+        self.assertFalse(runner.running)
+
+    def test_glm_prefix_inference(self):
+        self.assertEqual(self.bot.model_provider("glm-future-99"), "zai")
+        self.assertEqual(self.bot.model_provider("sonnet"), "anthropic")
+        self.assertEqual(self.bot.model_provider("opus"), "anthropic")
+        self.assertEqual(self.bot.model_provider("haiku"), "anthropic")
+        self.assertEqual(self.bot.model_provider("glm-4.7"), "zai")
 
 
 if __name__ == "__main__":

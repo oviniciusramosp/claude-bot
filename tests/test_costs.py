@@ -56,6 +56,59 @@ class CostTracking(unittest.TestCase):
         out = json.loads(self.bot.COSTS_FILE.read_text())
         self.assertLessEqual(len(out["weeks"]), 4)
 
+    def test_track_cost_with_anthropic_model_tags_provider(self):
+        self.bot._track_cost(0.10, model="sonnet")
+        data = json.loads(self.bot.COSTS_FILE.read_text())
+        week_key = list(data["weeks"].keys())[0]
+        providers = data["weeks"][week_key]["providers"]
+        self.assertIn("anthropic", providers)
+        self.assertAlmostEqual(providers["anthropic"]["total"], 0.10, places=4)
+        self.assertNotIn("zai", providers)
+
+    def test_track_cost_with_glm_model_tags_zai(self):
+        self.bot._track_cost(0.25, model="glm-4.7")
+        data = json.loads(self.bot.COSTS_FILE.read_text())
+        week_key = list(data["weeks"].keys())[0]
+        providers = data["weeks"][week_key]["providers"]
+        self.assertIn("zai", providers)
+        self.assertAlmostEqual(providers["zai"]["total"], 0.25, places=4)
+
+    def test_track_cost_mixed_providers_accumulate_separately(self):
+        self.bot._track_cost(0.10, model="sonnet")
+        self.bot._track_cost(0.20, model="glm-4.7")
+        self.bot._track_cost(0.05, model="opus")
+        data = json.loads(self.bot.COSTS_FILE.read_text())
+        week_key = list(data["weeks"].keys())[0]
+        week = data["weeks"][week_key]
+        # Combined totals (back-compat)
+        self.assertAlmostEqual(week["total"], 0.35, places=4)
+        # Split
+        self.assertAlmostEqual(week["providers"]["anthropic"]["total"], 0.15, places=4)
+        self.assertAlmostEqual(week["providers"]["zai"]["total"], 0.20, places=4)
+
+    def test_track_cost_without_model_defaults_to_anthropic(self):
+        self.bot._track_cost(0.05)
+        data = json.loads(self.bot.COSTS_FILE.read_text())
+        week_key = list(data["weeks"].keys())[0]
+        self.assertAlmostEqual(
+            data["weeks"][week_key]["providers"]["anthropic"]["total"], 0.05, places=4
+        )
+
+    def test_get_weekly_cost_filters_by_provider(self):
+        self.bot._track_cost(0.10, model="sonnet")
+        self.bot._track_cost(0.30, model="glm-5.1")
+        anthropic = self.bot.get_weekly_cost(provider="anthropic")
+        zai = self.bot.get_weekly_cost(provider="zai")
+        combined = self.bot.get_weekly_cost()
+        self.assertAlmostEqual(anthropic["total"], 0.10, places=4)
+        self.assertAlmostEqual(zai["total"], 0.30, places=4)
+        self.assertAlmostEqual(combined["total"], 0.40, places=4)
+
+    def test_get_weekly_cost_provider_missing_returns_zero(self):
+        self.bot._track_cost(0.10, model="sonnet")
+        zai = self.bot.get_weekly_cost(provider="zai")
+        self.assertEqual(zai["total"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

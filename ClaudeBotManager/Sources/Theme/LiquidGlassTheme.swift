@@ -176,12 +176,13 @@ struct ModelBadge: View {
         switch model {
         case "opus": return .purple
         case "haiku": return .statusGreen
+        case let m where m.hasPrefix("glm"): return .orange
         default: return .statusBlue
         }
     }
 
     var body: some View {
-        Text(model.capitalized)
+        Text(ModelCatalog.label(for: model))
             .font(.caption.bold())
             .padding(.horizontal, 8)
             .padding(.vertical, 3)

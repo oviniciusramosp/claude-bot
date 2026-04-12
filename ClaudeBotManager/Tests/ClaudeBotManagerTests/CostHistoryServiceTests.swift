@@ -262,3 +262,158 @@ final class CostHistoryServiceTests: XCTestCase {
         }
     }
 }
+
+// MARK: - Provider-aware queries
+
+final class CostHistoryProviderQueries: XCTestCase {
+
+    private var tmpDir: URL!
+
+    override func setUp() async throws {
+        tmpDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cost-history-provider-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmpDir, withIntermediateDirectories: true)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: tmpDir)
+    }
+
+    private func writeSample(_ json: String) throws {
+        let url = tmpDir.appendingPathComponent("costs.json")
+        try json.data(using: .utf8)!.write(to: url)
+    }
+
+    /// Returns today's YYYY-MM-DD in the current timezone — used so we can
+    /// assert on a provider-today query without timezone drift.
+    private var todayKey: String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.timeZone = TimeZone.current
+        return f.string(from: Date())
+    }
+
+    /// ISO week key for "now" matching the Python "%G-W%V" format.
+    private var currentWeekKey: String {
+        var cal = Calendar(identifier: .iso8601)
+        cal.firstWeekday = 2
+        cal.minimumDaysInFirstWeek = 4
+        let c = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: Date())
+        return String(format: "%04d-W%02d", c.yearForWeekOfYear ?? 2026, c.weekOfYear ?? 1)
+    }
+
+    func test_totalThisWeek_forZaiProvider_parsesProviderBucket() async throws {
+        let week = currentWeekKey
+        let today = todayKey
+        let json = """
+        {
+          "current_week": "\(week)",
+          "weeks": {
+            "\(week)": {
+              "total": 1.23,
+              "days": { "\(today)": 0.12 },
+              "providers": {
+                "anthropic": {"total": 0.80, "days": {"\(today)": 0.08}},
+                "zai":       {"total": 0.43, "days": {"\(today)": 0.04}}
+              }
+            }
+          }
+        }
+        """
+        try writeSample(json)
+
+        let service = CostHistoryService(dataDir: tmpDir.path)
+        let zaiTotal = try await service.totalThisWeek(provider: "zai")
+        XCTAssertEqual(zaiTotal, 0.43, accuracy: 0.0001)
+
+        let anthropicTotal = try await service.totalThisWeek(provider: "anthropic")
+        XCTAssertEqual(anthropicTotal, 0.80, accuracy: 0.0001)
+    }
+
+    func test_totalThisWeek_backCompat_oldEntriesCountAsAnthropic() async throws {
+        // NO providers key — represents a costs.json written by an older bot.
+        let week = currentWeekKey
+        let today = todayKey
+        let json = """
+        {
+          "current_week": "\(week)",
+          "weeks": {
+            "\(week)": {
+              "total": 2.50,
+              "days": { "\(today)": 2.50 }
+            }
+          }
+        }
+        """
+        try writeSample(json)
+
+        let service = CostHistoryService(dataDir: tmpDir.path)
+        let anthropicTotal = try await service.totalThisWeek(provider: "anthropic")
+        XCTAssertEqual(anthropicTotal, 2.50, accuracy: 0.0001)
+
+        let zaiTotal = try await service.totalThisWeek(provider: "zai")
+        XCTAssertEqual(zaiTotal, 0, accuracy: 0.0001)
+    }
+
+    func test_weeklyReference_excludesCurrentWeek() async throws {
+        let currentWeek = currentWeekKey
+        // Three past weeks plus the current week. The current week's zai total
+        // is intentionally huge so we can prove it's ignored.
+        let json = """
+        {
+          "current_week": "\(currentWeek)",
+          "weeks": {
+            "2026-W10": {
+              "total": 1.0, "days": {},
+              "providers": { "zai": {"total": 1.0, "days": {}} }
+            },
+            "2026-W11": {
+              "total": 3.0, "days": {},
+              "providers": { "zai": {"total": 3.0, "days": {}} }
+            },
+            "2026-W12": {
+              "total": 2.0, "days": {},
+              "providers": { "zai": {"total": 2.0, "days": {}} }
+            },
+            "\(currentWeek)": {
+              "total": 99.0, "days": {},
+              "providers": { "zai": {"total": 99.0, "days": {}} }
+            }
+          }
+        }
+        """
+        try writeSample(json)
+
+        let service = CostHistoryService(dataDir: tmpDir.path)
+        let ref = try await service.weeklyReference(provider: "zai")
+        XCTAssertEqual(ref, 3.0, accuracy: 0.0001, "Reference should be max of the 3 past weeks, ignoring current")
+    }
+
+    func test_totalToday_forZaiProvider() async throws {
+        let week = currentWeekKey
+        let today = todayKey
+        let json = """
+        {
+          "current_week": "\(week)",
+          "weeks": {
+            "\(week)": {
+              "total": 1.00,
+              "days": { "\(today)": 1.00 },
+              "providers": {
+                "zai": {"total": 0.60, "days": {"\(today)": 0.15}}
+              }
+            }
+          }
+        }
+        """
+        try writeSample(json)
+
+        let service = CostHistoryService(dataDir: tmpDir.path)
+        let todayZai = try await service.totalToday(provider: "zai")
+        XCTAssertEqual(todayZai, 0.15, accuracy: 0.0001)
+
+        // Unknown provider → 0
+        let todayOther = try await service.totalToday(provider: "cohere")
+        XCTAssertEqual(todayOther, 0, accuracy: 0.0001)
+    }
+}

@@ -7,6 +7,7 @@ final class AppState: ObservableObject {
     // Bot
     @Published var botStatus: BotProcessService.BotStatus = .unknown
     @Published var claudeUsage: ClaudeUsage = .unavailable
+    @Published var zaiUsage: ZAIUsage = .empty
     @Published var activeRunners: Int = 0
 
     // This week's total cost from ~/.claude-bot/costs.json — displayed as
@@ -58,6 +59,7 @@ final class AppState: ObservableObject {
     private var logService: LogService?
     private var botProcessService: BotProcessService?
     private var claudeUsageService: ClaudeUsageService?
+    private var zaiUsageService: ZAIUsageService?
     private var contextService: ContextService?
     private let fileWatcher = FileWatcher()
 
@@ -119,6 +121,7 @@ final class AppState: ObservableObject {
         logService = LogService(dataDir: dataDir)
         botProcessService = BotProcessService()
         claudeUsageService = ClaudeUsageService()
+        zaiUsageService = ZAIUsageService(dataDir: dataDir)
         contextService = ContextService(dataDir: dataDir)
 
         // Load config from .env files
@@ -302,8 +305,26 @@ final class AppState: ObservableObject {
     }
 
     func refreshUsage() async {
-        guard let us = claudeUsageService else { return }
-        claudeUsage = await us.fetchUsage()
+        // Refresh both providers in parallel. Either may be nil if services
+        // aren't wired yet (very early in init) — we only update what we got.
+        let claudeService = claudeUsageService
+        let zaiService = zaiUsageService
+        let zaiKey = botConfig.zaiApiKey
+        let zaiBase = botConfig.zaiBaseUrl
+
+        async let claudeResult: ClaudeUsage? = {
+            guard let s = claudeService else { return nil }
+            return await s.fetchUsage()
+        }()
+        async let zaiResult: ZAIUsage? = {
+            guard let s = zaiService else { return nil }
+            return await s.fetchUsage(apiKey: zaiKey, baseUrl: zaiBase)
+        }()
+
+        let c = await claudeResult
+        let z = await zaiResult
+        if let c = c { self.claudeUsage = c }
+        if let z = z { self.zaiUsage = z }
     }
 
     func startBot() async {
@@ -546,6 +567,10 @@ final class AppState: ObservableObject {
                     config.claudeWorkspace = value
                 case "TTS_ENGINE" where config.ttsEngine == BotConfig.defaults.ttsEngine:
                     config.ttsEngine = value
+                case "ZAI_API_KEY" where config.zaiApiKey.isEmpty:
+                    config.zaiApiKey = value
+                case "ZAI_BASE_URL" where config.zaiBaseUrl == BotConfig.defaults.zaiBaseUrl:
+                    config.zaiBaseUrl = value
                 default: break
                 }
             }
@@ -561,11 +586,13 @@ final class AppState: ObservableObject {
             "TELEGRAM_CHAT_ID=\(config.telegramChatId)",
             "CLAUDE_PATH=\(config.claudePath)",
             "CLAUDE_WORKSPACE=\(config.claudeWorkspace)",
-            "TTS_ENGINE=\(config.ttsEngine)"
+            "TTS_ENGINE=\(config.ttsEngine)",
+            "ZAI_API_KEY=\(config.zaiApiKey)",
+            "ZAI_BASE_URL=\(config.zaiBaseUrl)"
         ]
         // Preserve any extra keys already in the file
         if let existing = try? String(contentsOfFile: envPath, encoding: .utf8) {
-            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE", "TTS_ENGINE"]
+            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE", "TTS_ENGINE", "ZAI_API_KEY", "ZAI_BASE_URL"]
             for line in existing.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("#") { continue }

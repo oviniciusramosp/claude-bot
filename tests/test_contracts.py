@@ -155,6 +155,44 @@ class PlistPlaceholders(unittest.TestCase):
                     Path(tmp_path).unlink(missing_ok=True)
 
 
+class ModelProvidersRegistry(unittest.TestCase):
+    """MODEL_PROVIDERS is the contract between Python and Swift sides.
+
+    The Swift ModelCatalog must stay in sync with this dict. Adding or
+    removing a model requires bumping both sides — this test guards against
+    accidental drift.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def test_model_providers_registry_complete(self):
+        expected = {
+            "sonnet": "anthropic",
+            "opus": "anthropic",
+            "haiku": "anthropic",
+            "glm-5.1": "zai",
+            "glm-4.7": "zai",
+            "glm-4.5-air": "zai",
+        }
+        self.assertEqual(
+            self.bot.MODEL_PROVIDERS, expected,
+            "MODEL_PROVIDERS drifted — update Swift ModelCatalog to match.",
+        )
+
+    def test_default_model_is_sonnet(self):
+        self.assertEqual(self.bot.DEFAULT_MODEL, "sonnet")
+
+    def test_model_provider_helper_known_and_unknown(self):
+        self.assertEqual(self.bot.model_provider("sonnet"), "anthropic")
+        self.assertEqual(self.bot.model_provider("glm-4.7"), "zai")
+        # Unknown glm-* variant falls back to zai via prefix rule
+        self.assertEqual(self.bot.model_provider("glm-future-99"), "zai")
+        # Unknown non-glm falls back to anthropic
+        self.assertEqual(self.bot.model_provider("mystery"), "anthropic")
+
+
 class BotVersionFormat(unittest.TestCase):
     """BOT_VERSION must be a valid SemVer string and match Info.plist."""
 

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.5.0"  # BREAKING: rename agent workspace dir to `.workspace/` (dot-prefixed) so Obsidian hides pipeline runtime data automatically
+BOT_VERSION = "3.6.0"  # feat: add z.AI GLM as second LLM provider via Anthropic-compatible gateway
 
 import hmac
 import hashlib
@@ -67,6 +67,10 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("HEAR_LOCALE", _v)
             elif _k == "TTS_ENGINE":
                 os.environ.setdefault("TTS_ENGINE", _v)
+            elif _k == "ZAI_API_KEY":
+                os.environ.setdefault("ZAI_API_KEY", _v)
+            elif _k == "ZAI_BASE_URL":
+                os.environ.setdefault("ZAI_BASE_URL", _v)
 def _detect_claude_path() -> str:
     """Locate the claude CLI binary. Checks env var, then common install paths."""
     env_path = os.environ.get("CLAUDE_PATH")
@@ -263,6 +267,13 @@ FFMPEG_PATH = os.environ.get("FFMPEG_PATH", "/opt/homebrew/bin/ffmpeg")
 HEAR_PATH = os.environ.get("HEAR_PATH", "")
 HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 
+# z.AI (GLM) credentials — second LLM provider via Anthropic-compatible gateway.
+# When the requested model is a GLM variant, ClaudeRunner injects these into
+# the claude CLI subprocess env so the same binary talks to z.AI instead of
+# Anthropic. Empty ZAI_API_KEY => GLM models refuse to start (fail-loud).
+ZAI_API_KEY = os.environ.get("ZAI_API_KEY", "")
+ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/anthropic")
+
 # TTS (Text-to-Speech) voice response
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge-tts")  # "edge-tts" or "say"
 TTS_VOICE = os.environ.get("TTS_VOICE", "")  # empty = auto-select by locale
@@ -282,6 +293,28 @@ TTS_LOCALE_NAMES = {
     "fr-FR": "French", "it-IT": "Italian", "de-DE": "German",
     "ja-JP": "Japanese", "zh-CN": "Chinese", "en-GB": "British English",
 }
+
+# Model → provider mapping. Provider determines which API the claude CLI talks to.
+# "anthropic" = native Anthropic API. "zai" = z.AI gateway (Anthropic-compatible).
+MODEL_PROVIDERS = {
+    "sonnet": "anthropic",
+    "opus": "anthropic",
+    "haiku": "anthropic",
+    "glm-5.1": "zai",
+    "glm-4.7": "zai",
+    "glm-4.5-air": "zai",
+}
+DEFAULT_MODEL = "sonnet"
+
+def model_provider(model: str) -> str:
+    """Returns 'zai' for GLM models, 'anthropic' otherwise. Prefix fallback
+    so new glm-* variants work without code changes."""
+    if model in MODEL_PROVIDERS:
+        return MODEL_PROVIDERS[model]
+    if model.startswith("glm-") or model.startswith("glm"):
+        return "zai"
+    return "anthropic"
+
 
 def _tts_prompt_suffix() -> str:
     lang = TTS_LOCALE_NAMES.get(HEAR_LOCALE, "the user's language")
@@ -472,6 +505,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/sonnet` — Usar Sonnet
 • `/opus` — Usar Opus
 • `/haiku` — Usar Haiku
+• `/glm` — Usar GLM 4.7 (z.AI, requer `ZAI_API_KEY`)
 • `/model` — Escolher modelo (teclado)
 
 🔧 *Controle*
@@ -1806,8 +1840,27 @@ class RoutineScheduler:
 COSTS_FILE = DATA_DIR / "costs.json"
 
 
-def _track_cost(cost_usd: float) -> None:
-    """Append cost to weekly tracker in ~/.claude-bot/costs.json."""
+def _track_cost(cost_usd: float, model: Optional[str] = None) -> None:
+    """Append cost to weekly tracker in ~/.claude-bot/costs.json, tagged by provider.
+
+    Schema:
+        {
+          "current_week": "2026-W15",
+          "weeks": {
+            "2026-W15": {
+              "total": 1.23,          # all providers combined (back-compat)
+              "days":  {"2026-04-07": 0.12, ...},         # combined (back-compat)
+              "providers": {
+                "anthropic": {"total": 0.80, "days": {...}},
+                "zai":       {"total": 0.43, "days": {...}}
+              }
+            }
+          }
+        }
+
+    Old entries (without "providers") are treated as all-anthropic when read.
+    """
+    provider = model_provider(model) if model else "anthropic"
     try:
         data = {}
         if COSTS_FILE.exists():
@@ -1818,9 +1871,16 @@ def _track_cost(cost_usd: float) -> None:
         if "weeks" not in data:
             data["weeks"] = {}
         week = data["weeks"].setdefault(week_key, {"total": 0.0, "days": {}})
+        # Combined totals (back-compat)
         week["total"] = round(week["total"] + cost_usd, 6)
         day = week["days"].setdefault(today, 0.0)
         week["days"][today] = round(day + cost_usd, 6)
+        # Per-provider totals
+        providers = week.setdefault("providers", {})
+        p = providers.setdefault(provider, {"total": 0.0, "days": {}})
+        p["total"] = round(p["total"] + cost_usd, 6)
+        p_day = p["days"].setdefault(today, 0.0)
+        p["days"][today] = round(p_day + cost_usd, 6)
         data["current_week"] = week_key
         # Prune old weeks (keep last 4)
         weeks = sorted(data["weeks"].keys())
@@ -1831,8 +1891,12 @@ def _track_cost(cost_usd: float) -> None:
         pass
 
 
-def get_weekly_cost() -> dict:
-    """Read current week cost data. Returns {week: str, total: float, today: float}."""
+def get_weekly_cost(provider: Optional[str] = None) -> dict:
+    """Read current week cost data. Returns {week, total, today}.
+
+    If provider is None, returns combined totals (back-compat).
+    If provider is "anthropic" or "zai", returns that provider's slice.
+    """
     try:
         if not COSTS_FILE.exists():
             return {"week": "", "total": 0.0, "today": 0.0}
@@ -1840,10 +1904,17 @@ def get_weekly_cost() -> dict:
         week_key = time.strftime("%G-W%V")
         week = data.get("weeks", {}).get(week_key, {})
         today = time.strftime("%Y-%m-%d")
+        if provider is None:
+            return {
+                "week": week_key,
+                "total": week.get("total", 0.0),
+                "today": week.get("days", {}).get(today, 0.0),
+            }
+        p = week.get("providers", {}).get(provider, {})
         return {
             "week": week_key,
-            "total": week.get("total", 0.0),
-            "today": week.get("days", {}).get(today, 0.0),
+            "total": p.get("total", 0.0),
+            "today": p.get("days", {}).get(today, 0.0),
         }
     except Exception:
         return {"week": "", "total": 0.0, "today": 0.0}
@@ -2674,9 +2745,26 @@ class ClaudeRunner:
 
         try:
             # Strip CLAUDECODE env var to prevent "nested session" errors.
-            # Claude CLI checks this var to detect nesting — we must ensure
-            # our subprocesses never inherit it.
             clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+            # Provider routing: GLM models go through z.AI's Anthropic-compatible gateway.
+            provider = model_provider(model)
+            if provider == "zai":
+                if not ZAI_API_KEY:
+                    self.error_text = (
+                        "❌ Modelo GLM solicitado mas ZAI_API_KEY não está configurado. "
+                        "Defina em ~/claude-bot/.env (obtenha em https://z.ai/manage-apikey)."
+                    )
+                    logger.error(self.error_text)
+                    self.running = False
+                    return
+                clean_env["ANTHROPIC_BASE_URL"] = ZAI_BASE_URL
+                clean_env["ANTHROPIC_AUTH_TOKEN"] = ZAI_API_KEY
+                # Strip ANTHROPIC_API_KEY so the CLI prefers our token.
+                clean_env.pop("ANTHROPIC_API_KEY", None)
+                # GLM-5.1 is ~44 tok/s — bump timeout so long generations don't hang.
+                clean_env.setdefault("API_TIMEOUT_MS", "3000000")
+
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -4808,21 +4896,37 @@ class ClaudeTelegramBot:
         self.send_message("\n".join(lines))
 
     def cmd_model_switch(self, model: str) -> None:
+        if model not in MODEL_PROVIDERS and not model.startswith("glm"):
+            known = ", ".join(sorted(MODEL_PROVIDERS.keys()))
+            self.send_message(f"❌ Modelo desconhecido: `{model}`\nConhecidos: {known}")
+            return
+        # Guard: if GLM requested but no key, warn now instead of failing on first message.
+        if model_provider(model) == "zai" and not ZAI_API_KEY:
+            self.send_message(
+                "⚠️ `ZAI_API_KEY` não está configurado no `~/claude-bot/.env`.\n"
+                "Obtenha uma chave em https://z.ai/manage-apikey e adicione ao arquivo."
+            )
+            return
         s = self._get_session()
         s.model = model
         self.sessions.save()
         self.send_message(f"✅ Modelo alterado para `{model}`")
 
     def cmd_model_keyboard(self) -> None:
-        markup = {
-            "inline_keyboard": [
-                [
-                    {"text": "Sonnet", "callback_data": "model:sonnet"},
-                    {"text": "Opus", "callback_data": "model:opus"},
-                    {"text": "Haiku", "callback_data": "model:haiku"},
-                ]
+        rows = [
+            [
+                {"text": "Sonnet", "callback_data": "model:sonnet"},
+                {"text": "Opus", "callback_data": "model:opus"},
+                {"text": "Haiku", "callback_data": "model:haiku"},
             ]
-        }
+        ]
+        if ZAI_API_KEY:
+            rows.append([
+                {"text": "GLM 5.1", "callback_data": "model:glm-5.1"},
+                {"text": "GLM 4.7", "callback_data": "model:glm-4.7"},
+                {"text": "GLM 4.5 Air", "callback_data": "model:glm-4.5-air"},
+            ])
+        markup = {"inline_keyboard": rows}
         self.send_message("Escolha o modelo:", reply_markup=markup)
 
     def cmd_audio(self) -> None:
@@ -6798,7 +6902,7 @@ class ClaudeTelegramBot:
 
         if runner.cost_usd > 0:
             final_text += f"\n\n💰 Custo: ${runner.cost_usd:.4f} (total: ${runner.total_cost_usd:.4f})"
-            _track_cost(runner.cost_usd)
+            _track_cost(runner.cost_usd, model=session.model)
 
         # Build copy-code button if response has a single dominant code block
         copy_markup = None
@@ -7080,6 +7184,7 @@ class ClaudeTelegramBot:
                 "/sonnet": lambda: self.cmd_model_switch("sonnet"),
                 "/opus": lambda: self.cmd_model_switch("opus"),
                 "/haiku": lambda: self.cmd_model_switch("haiku"),
+                "/glm": lambda: self.cmd_model_switch("glm-4.7"),
                 "/model": lambda: self.cmd_model_keyboard(),
                 "/new": lambda: self.cmd_new(arg if arg else None),
                 "/sessions": lambda: self.cmd_sessions_list(),

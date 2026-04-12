@@ -6,6 +6,8 @@ struct BotConfig: Sendable {
     var claudePath: String
     var claudeWorkspace: String
     var ttsEngine: String           // "edge-tts" or "say"
+    var zaiApiKey: String
+    var zaiBaseUrl: String
 
     static var defaults: BotConfig {
         BotConfig(
@@ -13,7 +15,9 @@ struct BotConfig: Sendable {
             telegramChatId: "",
             claudePath: "/opt/homebrew/bin/claude",
             claudeWorkspace: FileManager.default.homeDirectoryForCurrentUser.path,
-            ttsEngine: "edge-tts"
+            ttsEngine: "edge-tts",
+            zaiApiKey: "",
+            zaiBaseUrl: "https://api.z.ai/api/anthropic"
         )
     }
 }

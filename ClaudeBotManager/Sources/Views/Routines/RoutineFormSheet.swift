@@ -282,11 +282,7 @@ struct RoutineFormSheet: View {
                 if !isPipeline {
                     VStack(alignment: .leading, spacing: 5) {
                         fieldLabel("Model")
-                        formMenuPicker(label: modelDisplayName, selection: $model, options: [
-                            ("sonnet", "Sonnet 4.6"),
-                            ("opus", "Opus 4.6"),
-                            ("haiku", "Haiku 4.5"),
-                        ])
+                        formMenuPicker(label: modelDisplayName, selection: $model, options: ModelCatalog.pickerOptions)
                         fieldLabel(modelDescription)
                     }
                     .frame(maxWidth: .infinity)
@@ -566,11 +562,7 @@ struct RoutineFormSheet: View {
     }
 
     private var modelDisplayName: String {
-        switch model {
-        case "opus": return "Opus 4.6"
-        case "haiku": return "Haiku 4.5"
-        default: return "Sonnet 4.6"
-        }
+        ModelCatalog.label(for: model)
     }
 
     private var executionTypeDescription: String {
@@ -653,9 +645,9 @@ struct PipelineStepCard: View {
                 Spacer(minLength: 8)
 
                 Picker("", selection: $step.model) {
-                    Text("Sonnet 4.6").tag("sonnet")
-                    Text("Opus 4.6").tag("opus")
-                    Text("Haiku 4.5").tag("haiku")
+                    ForEach(ModelCatalog.all, id: \.id) { option in
+                        Text(option.label).tag(option.id)
+                    }
                 }
                 .fixedSize()
             }

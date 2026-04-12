@@ -5,6 +5,7 @@ struct SettingsView: View {
     @State private var config: BotConfig = .defaults
     @State private var selectedTab = "tokens"
     @State private var showToken = false
+    @State private var showZaiKey = false
     @State private var isSaving = false
     @State private var savedMessage = ""
     @State private var validationError = ""
@@ -223,6 +224,42 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 }
             }
+        }
+
+        // z.AI (GLM Models)
+        SectionCard(title: "z.AI (GLM Models)", symbol: "sparkles") {
+            SettingRow("API Key") {
+                HStack {
+                    if showZaiKey {
+                        TextField("sk-...", text: $config.zaiApiKey)
+                            .font(.system(.callout, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                    } else {
+                        SecureField("sk-...", text: $config.zaiApiKey)
+                            .font(.system(.callout, design: .monospaced))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Button {
+                        showZaiKey.toggle()
+                    } label: {
+                        Image(systemName: showZaiKey ? "eye.slash" : "eye")
+                            .font(.callout)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            SettingRow("Base URL") {
+                TextField("https://api.z.ai/api/anthropic", text: $config.zaiBaseUrl)
+                    .font(.system(.callout, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            Text("Get a key at z.ai/manage-apikey — enables GLM 5.1 / 4.7 / 4.5 Air in routines and pipelines.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, Spacing.xs)
         }
 
         // Paths Info

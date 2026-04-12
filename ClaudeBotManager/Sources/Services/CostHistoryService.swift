@@ -116,7 +116,29 @@ actor CostHistoryService {
                 }
             }
             days.sort { $0.day < $1.day }
-            weeks.append(WeekBucket(weekKey: key, total: total, days: days))
+
+            // Optional per-provider slice — present only when the bot tagged
+            // entries with a provider key. Old files without this key are
+            // treated as 100% anthropic at query time.
+            var providers: [String: ProviderBucket] = [:]
+            if let provsRaw = w["providers"] as? [String: Any] {
+                for (providerKey, rawProv) in provsRaw {
+                    guard let pDict = rawProv as? [String: Any] else { continue }
+                    let pTotal = doubleValue(pDict["total"]) ?? 0
+                    var pDays: [DayBucket] = []
+                    if let pDaysRaw = pDict["days"] as? [String: Any] {
+                        for (dayStr, rawCost) in pDaysRaw {
+                            guard let cost = doubleValue(rawCost),
+                                  let date = dayFormatter.date(from: dayStr) else { continue }
+                            pDays.append(DayBucket(day: dayStr, date: date, cost: cost))
+                        }
+                    }
+                    pDays.sort { $0.day < $1.day }
+                    providers[providerKey] = ProviderBucket(total: pTotal, days: pDays)
+                }
+            }
+
+            weeks.append(WeekBucket(weekKey: key, total: total, days: days, providers: providers))
         }
         weeks.sort { $0.weekKey < $1.weekKey }
         return CostHistory(currentWeek: currentWeek, weeks: weeks)
@@ -175,6 +197,58 @@ actor CostHistoryService {
         return entries.first(where: { $0.day == today })?.cost ?? 0
     }
 
+    // MARK: - Provider-aware queries
+    //
+    // Back-compat rule: weeks with no `providers` dict are assumed to be 100%
+    // anthropic. This lets the Dashboard show zeros for newer providers (zai)
+    // on files written by older bot versions without breaking on upgrade.
+
+    /// Total cost for the current ISO week, filtered by provider.
+    /// Returns 0 if the requested provider has no data yet.
+    func totalThisWeek(provider: String) throws -> Double {
+        let history = try loadHistory()
+        guard let key = history.currentWeek,
+              let bucket = history.weeks.first(where: { $0.weekKey == key }) else {
+            return 0
+        }
+        if bucket.providers.isEmpty {
+            return provider == "anthropic" ? bucket.total : 0
+        }
+        return bucket.providers[provider]?.total ?? 0
+    }
+
+    /// Total cost for today, filtered by provider.
+    func totalToday(provider: String) throws -> Double {
+        let history = try loadHistory()
+        guard let key = history.currentWeek,
+              let bucket = history.weeks.first(where: { $0.weekKey == key }) else {
+            return 0
+        }
+        let todayKey = dayFormatter.string(from: Date())
+        if bucket.providers.isEmpty {
+            guard provider == "anthropic" else { return 0 }
+            return bucket.days.first(where: { $0.day == todayKey })?.cost ?? 0
+        }
+        guard let prov = bucket.providers[provider] else { return 0 }
+        return prov.days.first(where: { $0.day == todayKey })?.cost ?? 0
+    }
+
+    /// Max of past complete weeks for this provider — used as the "100%"
+    /// reference for progress bars when no HTTP quota is available. Excludes
+    /// the current week so the bar can exceed 100% when the user is burning
+    /// faster than their worst past week.
+    func weeklyReference(provider: String) throws -> Double {
+        let history = try loadHistory()
+        let pastWeeks = history.weeks.filter { $0.weekKey != history.currentWeek }
+        let maxVal = pastWeeks.map { bucket -> Double in
+            if bucket.providers.isEmpty {
+                return provider == "anthropic" ? bucket.total : 0
+            }
+            return bucket.providers[provider]?.total ?? 0
+        }.max() ?? 0
+        return maxVal
+    }
+
     /// Returns up to the last `count` weeks present in the file (newest last),
     /// useful for a weekly-total bar chart.
     func recentWeeks(_ count: Int) throws -> [WeekBucket] {
@@ -209,10 +283,17 @@ struct CostHistory: Sendable, Equatable {
 /// One ISO-week bucket as written by the bot ("2026-W15").
 struct WeekBucket: Sendable, Equatable, Identifiable {
     var weekKey: String
-    var total: Double
-    var days: [DayBucket]
+    var total: Double                                 // combined, back-compat
+    var days: [DayBucket]                             // combined, back-compat
+    var providers: [String: ProviderBucket] = [:]    // optional per-provider slice
 
     var id: String { weekKey }
+}
+
+/// One provider's slice of a week (anthropic | zai).
+struct ProviderBucket: Sendable, Equatable {
+    var total: Double
+    var days: [DayBucket]
 }
 
 /// One day of cost inside a week bucket.
