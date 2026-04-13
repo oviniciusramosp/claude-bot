@@ -136,6 +136,29 @@ class CommandDispatch(unittest.TestCase):
         self.bot._handle_text("/new myseason")
         self.assertEqual(len(self.bot.sessions.sessions), before + 1)
 
+    def test_new_command_preserves_agent_and_model(self):
+        """``/new`` must inherit agent and model from the current session."""
+        session = self.bot._get_session()
+        session.agent = "crypto-bro"
+        session.model = "glm-4.7"
+        session.workspace = "vault/crypto-bro/"
+        self.bot.sessions.save()
+        self.bot._handle_text("/new")
+        new_session = self.bot._get_session()
+        self.assertEqual(new_session.agent, "crypto-bro")
+        self.assertEqual(new_session.model, "glm-4.7")
+
+    def test_new_command_with_name_preserves_agent(self):
+        """``/new somename`` must also inherit agent and model."""
+        session = self.bot._get_session()
+        session.agent = "parmeirense"
+        session.model = "opus"
+        self.bot.sessions.save()
+        self.bot._handle_text("/new keepagent")
+        new_session = self.bot._get_session()
+        self.assertEqual(new_session.agent, "parmeirense")
+        self.assertEqual(new_session.model, "opus")
+
     def test_status_command_shows_session_info(self):
         self.bot._get_session()
         self.bot._handle_text("/status")

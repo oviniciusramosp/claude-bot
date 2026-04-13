@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.10.1"  # fix: z.AI 429 retry — exponential backoff (90s/180s), 2 attempts, detect errors in result_text for routines
+BOT_VERSION = "3.10.2"  # fix: /new preserves agent and model from current session
 
 import hmac
 import hashlib
@@ -5629,11 +5629,15 @@ class ClaudeTelegramBot:
     def cmd_new(self, name: Optional[str]) -> None:
         # Consolidate current session before creating a new one
         self._consolidate_session()
+        current = self._get_session()
+        agent = current.agent if current else None
         if not name:
-            current = self._get_session()
-            agent = current.agent if current else None
             name = _make_session_name(agent, self.sessions.sessions)
-        s = self.sessions.create(name)
+        s = self.sessions.create(name, agent=agent)
+        # Inherit model from current session (respects agent frontmatter or manual /model switch)
+        if current:
+            s.model = current.model
+            self.sessions.save()
         self.send_message(f"✅ Sessão `{s.name}` criada e ativada.")
 
     def cmd_sessions_list(self) -> None:
