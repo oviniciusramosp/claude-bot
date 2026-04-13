@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.8.0"  # feat: advisor tool — executor models (Sonnet/Haiku/GLM) can consult Opus via scripts/advisor.sh
+BOT_VERSION = "3.9.0"  # feat: restart-resilient pipelines/routines — resume interrupted tasks, clean up orphaned messages
 
 import hmac
 import hashlib
@@ -421,6 +421,7 @@ REACTION_STATS_FILE = DATA_DIR / "reaction-stats.json"
 WEBHOOK_MAX_BODY_BYTES = 1_048_576                  # 1 MB cap on webhook payloads
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
+ACTIVE_MESSAGES_FILE = DATA_DIR / "active-messages.json"
 SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
@@ -1197,41 +1198,75 @@ class RoutineStateManager:
     def __init__(self) -> None:
         ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._cleanup_stale_running()
 
-    def _cleanup_stale_running(self) -> None:
-        """On startup, mark any 'running' entries from today as failed (bot was killed mid-run)."""
-        sf = ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"
-        if not sf.exists():
-            return
-        try:
-            data = json.loads(sf.read_text(encoding="utf-8"))
-        except Exception:
-            return
-        changed = False
-        for routine_name, slots in data.items():
-            for slot, entry in slots.items():
-                if entry.get("status") == "running":
-                    entry["status"] = "failed"
-                    entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-                    entry["error"] = "Bot restarted — process killed before completion"
-                    changed = True
-                    logger.warning("Startup cleanup: marked %s@%s as failed (was running)", routine_name, slot)
-                    # Also cleanup pipeline steps
-                    if entry.get("type") == "pipeline" and isinstance(entry.get("steps"), dict):
-                        for step_id, step_entry in entry["steps"].items():
-                            if step_entry.get("status") == "running":
-                                step_entry["status"] = "failed"
-                                step_entry["error"] = "Bot restarted"
-        if changed:
-            sf.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-        # Clean up stale activity sidecar (no pipelines running after restart)
-        if PIPELINE_ACTIVITY_FILE.exists():
+    # -- Startup recovery helpers -------------------------------------------
+
+    def _collect_interrupted_tasks(self) -> tuple:
+        """Scan today's (and yesterday's) state for 'running' entries.
+
+        Returns (interrupted_pipelines, interrupted_routines) — two lists of
+        dicts with enough info to resume each task.  Does NOT mutate state;
+        the caller decides whether to resume or mark-as-failed.
+        """
+        pipelines: list = []
+        routines: list = []
+
+        today = time.strftime("%Y-%m-%d")
+        # Also check yesterday in case the bot crashed at 23:59 and restarted at 00:01
+        yesterday = time.strftime("%Y-%m-%d", time.localtime(time.time() - 86400))
+
+        for day_str in (today, yesterday):
+            sf = ROUTINES_STATE_DIR / f"{day_str}.json"
+            if not sf.exists():
+                continue
             try:
-                PIPELINE_ACTIVITY_FILE.unlink()
-                logger.info("Startup cleanup: removed stale pipeline-activity.json")
+                data = json.loads(sf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            for routine_name, slots in data.items():
+                for slot, entry in slots.items():
+                    if entry.get("status") != "running":
+                        continue
+                    info: Dict[str, Any] = {
+                        "name": routine_name,
+                        "time_slot": slot,
+                        "day": day_str,
+                        "agent": entry.get("agent"),
+                        "source_file": entry.get("source_file"),
+                        "workspace": entry.get("workspace"),
+                    }
+                    if entry.get("type") == "pipeline":
+                        info["steps"] = entry.get("steps", {})
+                        pipelines.append(info)
+                    else:
+                        routines.append(info)
+
+        return pipelines, routines
+
+    def mark_interrupted_as_failed(self, name: str, time_slot: str, is_pipeline: bool = False,
+                                    error: str = "Bot restarted — process killed before completion") -> None:
+        """Fallback: mark an interrupted task as failed (when resume is impossible)."""
+        if is_pipeline:
+            with self._lock:
+                data = self._load()
+                entry = data.get(name, {}).get(time_slot, {})
+                entry["status"] = "failed"
+                entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                entry["error"] = error
+                if isinstance(entry.get("steps"), dict):
+                    for step_entry in entry["steps"].values():
+                        if step_entry.get("status") == "running":
+                            step_entry["status"] = "failed"
+                            step_entry["error"] = "Bot restarted"
+                data.setdefault(name, {})[time_slot] = entry
+                self._save(data)
+            try:
+                _append_routine_history(name, time_slot, "failed", error, kind="pipeline")
             except Exception:
                 pass
+        else:
+            self.set_status(name, time_slot, "failed", error=error)
+        logger.warning("Marked %s@%s as failed (recovery impossible): %s", name, time_slot, error)
 
     def _state_file(self) -> Path:
         return ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"
@@ -1254,7 +1289,8 @@ class RoutineStateManager:
         entry = data.get(routine_name, {}).get(time_slot, {})
         return entry.get("status") in ("completed", "running", "failed")
 
-    def set_status(self, routine_name: str, time_slot: str, status: str, error: Optional[str] = None) -> None:
+    def set_status(self, routine_name: str, time_slot: str, status: str, error: Optional[str] = None,
+                   agent: Optional[str] = None, source_file: Optional[str] = None) -> None:
         with self._lock:
             data = self._load()
             if routine_name not in data:
@@ -1267,6 +1303,10 @@ class RoutineStateManager:
                 entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
             if error:
                 entry["error"] = error
+            if agent is not None:
+                entry["agent"] = agent
+            if source_file is not None:
+                entry["source_file"] = source_file
             data[routine_name][time_slot] = entry
             self._save(data)
         # Outside the state lock — history writes use their own lock and
@@ -1285,7 +1325,8 @@ class RoutineStateManager:
 
     def set_pipeline_status(self, name: str, time_slot: str, status: str,
                             steps_init: Optional[list] = None, error: Optional[str] = None,
-                            workspace: Optional[str] = None) -> None:
+                            workspace: Optional[str] = None,
+                            agent: Optional[str] = None, source_file: Optional[str] = None) -> None:
         """Set pipeline-level status. steps_init can be list of ids or list of dicts with id+output_type."""
         with self._lock:
             data = self._load()
@@ -1296,6 +1337,10 @@ class RoutineStateManager:
             entry["type"] = "pipeline"
             if workspace:
                 entry["workspace"] = workspace
+            if agent is not None:
+                entry["agent"] = agent
+            if source_file is not None:
+                entry["source_file"] = source_file
             if status == "running":
                 entry["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
                 entry.pop("finished_at", None)
@@ -1347,6 +1392,70 @@ class RoutineStateManager:
         """Read step-level status for a pipeline run."""
         data = self._load()
         return data.get(pipeline_name, {}).get(time_slot, {}).get("steps", {})
+
+
+class ActiveMessageRegistry:
+    """Track in-flight Telegram messages so orphans can be cleaned up after a restart.
+
+    Persists to ~/.claude-bot/active-messages.json.  Every message that shows
+    "Processando…" or pipeline/routine progress is registered here when created
+    and unregistered when finalized.  On startup, any entries still present are
+    orphans from a previous run and get cleaned up.
+    """
+
+    def __init__(self) -> None:
+        self._path = ACTIVE_MESSAGES_FILE
+        self._lock = threading.Lock()
+
+    # -- public API ----------------------------------------------------------
+
+    def register(self, msg_id: int, chat_id: str, thread_id: Optional[int],
+                 msg_type: str, source: str) -> None:
+        """Record a Telegram message as in-flight."""
+        entry = {
+            "msg_id": msg_id,
+            "chat_id": str(chat_id),
+            "thread_id": thread_id,
+            "type": msg_type,
+            "source": source,
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        }
+        with self._lock:
+            msgs = self._load()
+            msgs.append(entry)
+            self._save(msgs)
+
+    def unregister(self, msg_id: int) -> None:
+        """Remove a message from tracking (it was finalized normally)."""
+        with self._lock:
+            msgs = self._load()
+            msgs = [m for m in msgs if m.get("msg_id") != msg_id]
+            self._save(msgs)
+
+    def get_all(self) -> List[Dict]:
+        """Return all registered (orphaned) messages."""
+        with self._lock:
+            return self._load()
+
+    def clear(self) -> None:
+        """Remove all entries."""
+        with self._lock:
+            self._save([])
+
+    # -- persistence ---------------------------------------------------------
+
+    def _load(self) -> List[Dict]:
+        if self._path.exists():
+            try:
+                return json.loads(self._path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return []
+
+    def _save(self, messages: List[Dict]) -> None:
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(messages, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self._path)
 
 
 class IntervalStateManager:
@@ -1470,6 +1579,170 @@ def _iter_routine_files() -> List[Path]:
                 continue
             results.append(md_file)
     return results
+
+
+def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
+                         routine_name: str, model: str, time_slot: str) -> Optional[PipelineTask]:
+    """Parse a pipeline Markdown file into a PipelineTask.
+
+    Extracted from RoutineScheduler._enqueue_pipeline_from_file so that both
+    the scheduler and the restart-recovery path can reuse it.  Returns None
+    on parse errors (logged internally).
+    """
+    steps_raw = parse_pipeline_body(body)
+    if not steps_raw:
+        logger.error("Pipeline %s has no valid steps in ```pipeline block", routine_name)
+        return None
+
+    pipeline_dir = md_file.parent / md_file.stem
+    owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
+    fm_agent_raw = fm.get("agent")
+    if fm_agent_raw and str(fm_agent_raw).strip() and str(fm_agent_raw).strip() != owning_agent:
+        logger.warning(
+            "Pipeline %s: frontmatter agent=%r disagrees with folder owner %r — using folder",
+            md_file.name, fm_agent_raw, owning_agent,
+        )
+    default_agent = owning_agent
+
+    steps: list = []
+    for s in steps_raw:
+        step_id = str(s.get("id", ""))
+        if not step_id:
+            continue
+        prompt_text = ""
+        pf = s.get("prompt_file")
+        if pf:
+            prompt_path = pipeline_dir / str(pf)
+            if prompt_path.exists():
+                prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+                if prompt_text:
+                    _lines = prompt_text.split("\n")
+                    while _lines:
+                        _last = _lines[-1].strip()
+                        if not _last:
+                            _lines.pop()
+                            continue
+                        if re.match(r'^(?:\(.*\[\[.+\]\].*\)|(?:[\w-]+\s*:\s*)?\[\[.+\]\])$', _last):
+                            _lines.pop()
+                            continue
+                        break
+                    prompt_text = "\n".join(_lines).rstrip()
+            else:
+                logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)
+        if not prompt_text:
+            prompt_text = str(s.get("prompt", ""))
+        if not prompt_text:
+            logger.error("Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt)",
+                         routine_name, step_id)
+            continue
+
+        depends = s.get("depends_on", [])
+        if isinstance(depends, str):
+            depends = [depends]
+
+        raw_output = str(s.get("output", "")).strip().lower()
+        if raw_output == "telegram":
+            out_type = "telegram"
+        elif raw_output == "none":
+            out_type = "none"
+        elif raw_output:
+            out_type = s.get("output", "").strip()
+        else:
+            out_type = "file"
+
+        _step_effort = str(s.get("effort", "")).lower().strip()
+        loop_until_raw = s.get("loop_until")
+        loop_until = str(loop_until_raw) if loop_until_raw not in (None, "") else None
+        try:
+            loop_max = int(s.get("loop_max_iterations", 5))
+        except (TypeError, ValueError):
+            loop_max = 5
+        if loop_max < 1:
+            loop_max = 1
+        if loop_max > MAX_LOOP_ITERATIONS:
+            logger.warning("Pipeline %s step %s: loop_max_iterations=%d exceeds hard cap %d — clamping",
+                           routine_name, step_id, loop_max, MAX_LOOP_ITERATIONS)
+            loop_max = MAX_LOOP_ITERATIONS
+        _np_raw = str(s.get("loop_on_no_progress", "abort")).lower().strip()
+        loop_np = _np_raw if _np_raw in ("abort", "continue") else "abort"
+        steps.append(PipelineStep(
+            id=step_id,
+            name=str(s.get("name", step_id)),
+            model=str(s.get("model", model)),
+            prompt=prompt_text,
+            depends_on=depends,
+            agent=s.get("agent") or default_agent,
+            timeout=int(s.get("timeout", 1200)),
+            inactivity_timeout=int(s.get("inactivity_timeout", 300)),
+            retry=int(s.get("retry", 1)),
+            output_to_telegram=(raw_output == "telegram"),
+            output_type=out_type,
+            output_file=s.get("output_file") or None,
+            engine=str(s.get("engine", "claude")),
+            effort=_step_effort if _step_effort in ("low", "medium", "high") else None,
+            loop_until=loop_until,
+            loop_max_iterations=loop_max,
+            loop_on_no_progress=loop_np,
+        ))
+
+    if not steps:
+        logger.error("Pipeline %s: no valid steps after parsing", routine_name)
+        return None
+
+    # DAG cycle detection via DFS
+    step_ids_set = {s.id for s in steps}
+    adj: Dict[str, list] = {s.id: [d for d in s.depends_on if d in step_ids_set] for s in steps}
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: Dict[str, int] = {sid: WHITE for sid in step_ids_set}
+
+    def _dfs_cycle(node: str, path: list) -> Optional[list]:
+        color[node] = GRAY
+        path.append(node)
+        for dep in adj[node]:
+            if color[dep] == GRAY:
+                cycle_start = path.index(dep)
+                return path[cycle_start:]
+            if color[dep] == WHITE:
+                result = _dfs_cycle(dep, path)
+                if result is not None:
+                    return result
+        path.pop()
+        color[node] = BLACK
+        return None
+
+    for sid in step_ids_set:
+        if color[sid] == WHITE:
+            cycle = _dfs_cycle(sid, [])
+            if cycle is not None:
+                cycle_str = " -> ".join(cycle + [cycle[0]])
+                logger.error("Pipeline %s has dependency cycle: %s", routine_name, cycle_str)
+                return None
+
+    _effort_raw = str(fm.get("effort", "")).lower().strip()
+    return PipelineTask(
+        name=routine_name,
+        title=str(fm.get("title", routine_name)),
+        steps=steps,
+        model=model,
+        time_slot=time_slot,
+        agent=default_agent,
+        notify=str(fm.get("notify", "final")),
+        minimal_context=bool(fm.get("context") == "minimal"),
+        voice=bool(fm.get("voice", False)),
+        effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+    )
+
+
+def _find_routine_file(routine_name: str, source_file_hint: Optional[str] = None) -> Optional[Path]:
+    """Locate the vault Markdown file for a routine by name."""
+    if source_file_hint:
+        candidate = VAULT_DIR / source_file_hint
+        if candidate.exists():
+            return candidate
+    for md_file in _iter_routine_files():
+        if md_file.stem == routine_name:
+            return md_file
+    return None
 
 
 class RoutineScheduler:
@@ -1607,10 +1880,12 @@ class RoutineScheduler:
                     t_str = now_time
                     logger.info("Interval routine matched: %s (every %s, type=%s)", routine_name, interval_str, routine_type)
                     self.interval_state.record_run(routine_name)
+                    _src = str(md_file.relative_to(VAULT_DIR)) if VAULT_DIR in md_file.parents else md_file.name
                     if routine_type == "pipeline" and self._enqueue_pipeline:
                         self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
                     else:
-                        self.state.set_status(routine_name, t_str, "running")
+                        self.state.set_status(routine_name, t_str, "running",
+                                              agent=owning_agent, source_file=_src)
                         _effort_raw = str(fm.get("effort", "")).lower().strip()
                         task = RoutineTask(
                             name=routine_name,
@@ -1645,6 +1920,7 @@ class RoutineScheduler:
                         if not any(int(d) == now_monthday for d in monthdays if str(d).isdigit()):
                             continue
                     # Check time
+                    _src = str(md_file.relative_to(VAULT_DIR)) if VAULT_DIR in md_file.parents else md_file.name
                     for t in schedule["times"]:
                         t_str = str(t).strip()
                         if t_str == now_time and not self.state.is_executed(routine_name, t_str):
@@ -1652,7 +1928,8 @@ class RoutineScheduler:
                             if routine_type == "pipeline" and self._enqueue_pipeline:
                                 self._enqueue_pipeline_from_file(md_file, fm, body, routine_name, model, t_str)
                             else:
-                                self.state.set_status(routine_name, t_str, "running")
+                                self.state.set_status(routine_name, t_str, "running",
+                                                      agent=owning_agent, source_file=_src)
                                 _effort_raw = str(fm.get("effort", "")).lower().strip()
                                 task = RoutineTask(
                                     name=routine_name,
@@ -1671,157 +1948,13 @@ class RoutineScheduler:
     def _enqueue_pipeline_from_file(self, md_file: Path, fm: Dict, body: str,
                                      routine_name: str, model: str, t_str: str) -> None:
         """Parse pipeline steps and enqueue as PipelineTask."""
-        steps_raw = parse_pipeline_body(body)
-        if not steps_raw:
-            logger.error("Pipeline %s has no valid steps in ```pipeline block", routine_name)
+        task = _parse_pipeline_task(md_file, fm, body, routine_name, model, t_str)
+        if task is None:
             return
-        # Resolve step prompts
-        pipeline_dir = md_file.parent / md_file.stem
-        # Folder is the source of truth: Agents/<id>/Routines/foo.md → agent=id.
-        owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
-        fm_agent_raw = fm.get("agent")
-        if fm_agent_raw and str(fm_agent_raw).strip() and str(fm_agent_raw).strip() != owning_agent:
-            logger.warning(
-                "Pipeline %s: frontmatter agent=%r disagrees with folder owner %r — using folder",
-                md_file.name, fm_agent_raw, owning_agent,
-            )
-        default_agent = owning_agent
-        steps = []
-        for s in steps_raw:
-            step_id = str(s.get("id", ""))
-            if not step_id:
-                continue
-            # Load prompt from file or inline
-            prompt_text = ""
-            pf = s.get("prompt_file")
-            if pf:
-                prompt_path = pipeline_dir / str(pf)
-                if prompt_path.exists():
-                    prompt_text = prompt_path.read_text(encoding="utf-8").strip()
-                    # Safety net: strip any trailing wikilink lines (legacy Obsidian
-                    # graph metadata). New step files MUST NOT contain wikilinks at
-                    # all — the parent pipeline owns the relationship via its
-                    # `## Steps` section. See vault/CLAUDE.md "Pipeline graph".
-                    if prompt_text:
-                        _lines = prompt_text.split("\n")
-                        while _lines:
-                            _last = _lines[-1].strip()
-                            if not _last:
-                                _lines.pop()
-                                continue
-                            if re.match(r'^(?:\(.*\[\[.+\]\].*\)|(?:[\w-]+\s*:\s*)?\[\[.+\]\])$', _last):
-                                _lines.pop()
-                                continue
-                            break
-                        prompt_text = "\n".join(_lines).rstrip()
-                else:
-                    logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)
-            if not prompt_text:
-                prompt_text = str(s.get("prompt", ""))
-            if not prompt_text:
-                logger.error("Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt)",
-                             routine_name, step_id)
-                continue
-
-            depends = s.get("depends_on", [])
-            if isinstance(depends, str):
-                depends = [depends]
-
-            raw_output = str(s.get("output", "")).strip().lower()
-            if raw_output == "telegram":
-                out_type = "telegram"
-            elif raw_output == "none":
-                out_type = "none"
-            elif raw_output:
-                out_type = s.get("output", "").strip()  # preserve original case for paths
-            else:
-                out_type = "file"
-
-            _step_effort = str(s.get("effort", "")).lower().strip()
-            # Ralph loop config — flat keys (the pipeline parser is line-based).
-            # loop_until: substring that marks "done"; empty/None disables loops.
-            loop_until_raw = s.get("loop_until")
-            loop_until = str(loop_until_raw) if loop_until_raw not in (None, "") else None
-            try:
-                loop_max = int(s.get("loop_max_iterations", 5))
-            except (TypeError, ValueError):
-                loop_max = 5
-            if loop_max < 1:
-                loop_max = 1
-            if loop_max > MAX_LOOP_ITERATIONS:
-                logger.warning("Pipeline %s step %s: loop_max_iterations=%d exceeds hard cap %d — clamping",
-                               routine_name, step_id, loop_max, MAX_LOOP_ITERATIONS)
-                loop_max = MAX_LOOP_ITERATIONS
-            _np_raw = str(s.get("loop_on_no_progress", "abort")).lower().strip()
-            loop_np = _np_raw if _np_raw in ("abort", "continue") else "abort"
-            steps.append(PipelineStep(
-                id=step_id,
-                name=str(s.get("name", step_id)),
-                model=str(s.get("model", model)),
-                prompt=prompt_text,
-                depends_on=depends,
-                agent=s.get("agent") or default_agent,
-                timeout=int(s.get("timeout", 1200)),
-                inactivity_timeout=int(s.get("inactivity_timeout", 300)),
-                retry=int(s.get("retry", 1)),
-                output_to_telegram=(raw_output == "telegram"),
-                output_type=out_type,
-                output_file=s.get("output_file") or None,
-                engine=str(s.get("engine", "claude")),
-                effort=_step_effort if _step_effort in ("low", "medium", "high") else None,
-                loop_until=loop_until,
-                loop_max_iterations=loop_max,
-                loop_on_no_progress=loop_np,
-            ))
-
-        if not steps:
-            logger.error("Pipeline %s: no valid steps after parsing", routine_name)
-            return
-
-        # P2-04: DAG cycle detection via DFS
-        step_ids_set = {s.id for s in steps}
-        adj: Dict[str, list] = {s.id: [d for d in s.depends_on if d in step_ids_set] for s in steps}
-        WHITE, GRAY, BLACK = 0, 1, 2
-        color: Dict[str, int] = {sid: WHITE for sid in step_ids_set}
-
-        def _dfs_cycle(node: str, path: list) -> Optional[list]:
-            color[node] = GRAY
-            path.append(node)
-            for dep in adj[node]:
-                if color[dep] == GRAY:
-                    cycle_start = path.index(dep)
-                    return path[cycle_start:]
-                if color[dep] == WHITE:
-                    result = _dfs_cycle(dep, path)
-                    if result is not None:
-                        return result
-            path.pop()
-            color[node] = BLACK
-            return None
-
-        for sid in step_ids_set:
-            if color[sid] == WHITE:
-                cycle = _dfs_cycle(sid, [])
-                if cycle is not None:
-                    cycle_str = " -> ".join(cycle + [cycle[0]])
-                    logger.error("Pipeline %s has dependency cycle: %s", routine_name, cycle_str)
-                    return
-
-        _effort_raw = str(fm.get("effort", "")).lower().strip()
-        task = PipelineTask(
-            name=routine_name,
-            title=str(fm.get("title", routine_name)),
-            steps=steps,
-            model=model,
-            time_slot=t_str,
-            agent=default_agent,
-            notify=str(fm.get("notify", "final")),
-            minimal_context=bool(fm.get("context") == "minimal"),
-            voice=bool(fm.get("voice", False)),
-            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
-        )
-        steps_info = [{"id": s.id, "output_type": s.output_type} for s in steps]
-        self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=steps_info)
+        steps_info = [{"id": s.id, "output_type": s.output_type} for s in task.steps]
+        _src = str(md_file.relative_to(VAULT_DIR)) if VAULT_DIR in md_file.parents else md_file.name
+        self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=steps_info,
+                                       agent=task.agent, source_file=_src)
         self._enqueue_pipeline(task)
 
     def list_today_routines(self) -> List[Dict]:
@@ -3247,11 +3380,13 @@ class PipelineExecutor:
     """Executes a pipeline of steps as a DAG with shared workspace and parallel waves."""
 
     def __init__(self, task: PipelineTask, bot: "ClaudeTelegramBot",
-                 ctx: "ThreadContext", state_mgr: RoutineStateManager) -> None:
+                 ctx: "ThreadContext", state_mgr: RoutineStateManager,
+                 resume_state: Optional[Dict] = None) -> None:
         self.task = task
         self.bot = bot
         self.ctx = ctx
         self.state = state_mgr
+        self._resumed = resume_state is not None
         # Every pipeline runs inside its owning agent's permanent workspace.
         # If the agent folder is missing (edge case — orphan task) fall back
         # to a temp dir so execution doesn't explode, but this is a bug path.
@@ -3264,10 +3399,18 @@ class PipelineExecutor:
                 task.name, owning,
             )
             self.workspace = Path(f"/tmp/claude-pipeline-{task.name}-{secrets.token_hex(6)}")
-        self._step_status: Dict[str, str] = {s.id: "pending" for s in task.steps}
-        self._step_outputs: Dict[str, str] = {}
-        self._step_errors: Dict[str, str] = {}
-        self._step_attempts: Dict[str, int] = {s.id: 0 for s in task.steps}
+        if resume_state:
+            # Pre-seed from recovery data: completed stays completed,
+            # running→pending (interrupted mid-execution), pending stays pending.
+            self._step_status = dict(resume_state.get("step_status", {}))
+            self._step_outputs = dict(resume_state.get("step_outputs", {}))
+            self._step_errors: Dict[str, str] = {}
+            self._step_attempts = dict(resume_state.get("step_attempts", {}))
+        else:
+            self._step_status: Dict[str, str] = {s.id: "pending" for s in task.steps}
+            self._step_outputs: Dict[str, str] = {}
+            self._step_errors: Dict[str, str] = {}
+            self._step_attempts: Dict[str, int] = {s.id: 0 for s in task.steps}
         self._active_runners: Dict[str, ClaudeRunner] = {}
         self._lock = threading.Lock()
         self._activity_lock = threading.Lock()
@@ -3298,16 +3441,24 @@ class PipelineExecutor:
             data_dir = self.workspace / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        # Initialize pipeline state with all step ids + output types + workspace path
-        steps_info = [{"id": s.id, "output_type": s.output_type} for s in self.task.steps]
-        self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
-                                        steps_init=steps_info, workspace=str(self.workspace))
+        if self._resumed:
+            # Resuming: steps already exist in state — just flip pipeline back to running
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
+                                            workspace=str(self.workspace))
+            completed = sum(1 for s in self._step_status.values() if s == "completed")
+            logger.info("Pipeline %s resuming (%d/%d steps already completed)",
+                        self.task.name, completed, len(self.task.steps))
+        else:
+            # Fresh run: initialize pipeline state with all step ids + output types
+            steps_info = [{"id": s.id, "output_type": s.output_type} for s in self.task.steps]
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
+                                            steps_init=steps_info, workspace=str(self.workspace))
 
         # Send live progress message to Telegram (skip if notify=none)
         if self.task.notify != "none":
             self._send_progress_message()
 
-        # Checkpoint vault state before pipeline execution
+        # Checkpoint vault state before pipeline execution (fresh checkpoint even on resume)
         checkpoint_ref = vault_checkpoint_create(f"pipeline-{self.task.name}")
 
         start_time = time.time()
@@ -3956,6 +4107,10 @@ class PipelineExecutor:
             text = self._build_progress_text()
             msg_id = self.bot.send_message(text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
             self._progress_msg_id = msg_id
+            if msg_id:
+                self.bot._active_msgs.register(
+                    msg_id, self.ctx.chat_id, self.ctx.thread_id,
+                    "progress", f"pipeline:{self.task.name}")
         except Exception as exc:
             logger.debug("Failed to send pipeline progress: %s", exc)
 
@@ -3974,6 +4129,8 @@ class PipelineExecutor:
         """Finalize the progress message: delete on success, update with error/cancelled on failure."""
         if not self._progress_msg_id:
             return
+        # Unregister from active message tracking
+        self.bot._active_msgs.unregister(self._progress_msg_id)
         try:
             if success:
                 self.bot.delete_message(self._progress_msg_id, chat_id=self.ctx.chat_id)
@@ -4136,6 +4293,9 @@ class ClaudeTelegramBot:
         # the _ctx property below.
         self._ctx_local = threading.local()
 
+        # Active message registry (must be created before recovery)
+        self._active_msgs = ActiveMessageRegistry()
+
         # Routine scheduler
         self.routine_state = RoutineStateManager()
         _cleanup_stale_pipeline_workspaces()
@@ -4143,21 +4303,30 @@ class ClaudeTelegramBot:
             self.routine_state, self._enqueue_routine, self._enqueue_pipeline,
             notify_fn=self.send_message,
         )
-        self.scheduler.start()
-
-        # Sync the per-agent Obsidian graph-view color groups. Fail-open —
-        # the bot works fine without it; the user may just not have Obsidian
-        # installed or pointed at this vault.
-        try:
-            sync_obsidian_graph_color_groups()
-        except Exception as exc:
-            logger.warning("Initial Obsidian color-group sync skipped: %s", exc)
 
         # Tracks active routine/pipeline contexts for HTTP stop requests
         self._routine_contexts: Dict[str, "ThreadContext"] = {}
         self._routine_contexts_lock = threading.Lock()
         self._active_pipelines: Dict[str, PipelineExecutor] = {}
         self._active_pipelines_lock = threading.Lock()
+
+        # Recover interrupted tasks BEFORE starting the scheduler (no race)
+        try:
+            self._recover_on_startup()
+        except Exception as exc:
+            logger.error("Startup recovery failed: %s", exc)
+
+        # Sync the per-agent Obsidian graph-view color groups. Fail-open.
+        try:
+            sync_obsidian_graph_color_groups()
+        except Exception as exc:
+            logger.warning("Initial Obsidian color-group sync skipped: %s", exc)
+
+        # Now start the scheduler (after recovery is done)
+        self.scheduler.start()
+
+        # Stuck-message watchdog: edits orphaned "Processando…" messages
+        self._start_stuck_message_watchdog()
 
         self._start_time = time.time()
         self._start_control_server()
@@ -4430,7 +4599,7 @@ class ClaudeTelegramBot:
 
         threading.Thread(target=_run_routine, daemon=True, name=f"routine-{task.name}").start()
 
-    def _enqueue_pipeline(self, task: PipelineTask) -> None:
+    def _enqueue_pipeline(self, task: PipelineTask, resume_state: Optional[Dict] = None) -> None:
         """Called by the scheduler thread to enqueue a pipeline for execution."""
         # Guard: prevent duplicate pipeline executions
         with self._active_pipelines_lock:
@@ -4445,7 +4614,8 @@ class ClaudeTelegramBot:
         ctx = self._make_dedicated_context(base_ctx)
 
         def _run_pipeline() -> None:
-            executor = PipelineExecutor(task, self, ctx, self.routine_state)
+            executor = PipelineExecutor(task, self, ctx, self.routine_state,
+                                        resume_state=resume_state)
             executor._bot = self
             with self._active_pipelines_lock:
                 self._active_pipelines[task.name] = executor
@@ -4464,6 +4634,272 @@ class ClaudeTelegramBot:
                     self._active_pipelines.pop(task.name, None)
 
         threading.Thread(target=_run_pipeline, daemon=True, name=f"pipeline-{task.name}").start()
+
+    # -- Startup recovery --------------------------------------------------
+
+    def _recover_on_startup(self) -> None:
+        """Resume interrupted pipelines/routines and clean up orphaned messages."""
+        # Phase 1: Clean up orphaned Telegram messages
+        self._cleanup_orphaned_messages()
+
+        # Phase 2: Collect interrupted tasks from state files
+        pipelines, routines = self.routine_state._collect_interrupted_tasks()
+
+        if not pipelines and not routines:
+            if PIPELINE_ACTIVITY_FILE.exists():
+                try:
+                    PIPELINE_ACTIVITY_FILE.unlink()
+                except Exception:
+                    pass
+            return
+
+        logger.info("Recovery: found %d interrupted pipeline(s), %d interrupted routine(s)",
+                    len(pipelines), len(routines))
+
+        # Phase 3: Resume pipelines
+        for pinfo in pipelines:
+            try:
+                self._resume_pipeline(pinfo)
+            except Exception as exc:
+                logger.error("Failed to resume pipeline %s: %s", pinfo["name"], exc)
+                self.routine_state.mark_interrupted_as_failed(
+                    pinfo["name"], pinfo["time_slot"], is_pipeline=True,
+                    error=f"Recovery failed: {exc}"[:200])
+
+        # Phase 4: Resume routines
+        for rinfo in routines:
+            try:
+                self._resume_routine(rinfo)
+            except Exception as exc:
+                logger.error("Failed to resume routine %s: %s", rinfo["name"], exc)
+                self.routine_state.mark_interrupted_as_failed(
+                    rinfo["name"], rinfo["time_slot"], is_pipeline=False,
+                    error=f"Recovery failed: {exc}"[:200])
+
+        # Clean stale activity sidecar
+        if PIPELINE_ACTIVITY_FILE.exists():
+            try:
+                PIPELINE_ACTIVITY_FILE.unlink()
+            except Exception:
+                pass
+
+    def _resume_pipeline(self, pinfo: Dict) -> None:
+        """Re-parse a pipeline source file and resume from last checkpoint."""
+        name = pinfo["name"]
+        md_file = _find_routine_file(name, pinfo.get("source_file"))
+        if not md_file:
+            raise FileNotFoundError(f"Source file not found for pipeline {name}")
+
+        fm, body = get_frontmatter_and_body(md_file)
+        if not fm or not body:
+            raise ValueError(f"Cannot parse frontmatter/body from {md_file}")
+
+        model = str(fm.get("model", "sonnet"))
+        task = _parse_pipeline_task(md_file, fm, body, name, model, pinfo["time_slot"])
+        if task is None:
+            raise ValueError(f"Failed to parse pipeline task from {md_file}")
+
+        # Build resume_state by cross-referencing persisted step states with
+        # output files on disk.
+        persisted_steps = pinfo.get("steps", {})
+        step_status: Dict[str, str] = {}
+        step_outputs: Dict[str, str] = {}
+        step_attempts: Dict[str, int] = {}
+
+        # Determine data_dir the same way PipelineExecutor does
+        owning = task.agent or MAIN_AGENT_ID
+        if (VAULT_DIR / owning).is_dir():
+            ws = _get_agent_workspace(owning)
+            data_dir = ws / "data" / name
+        else:
+            data_dir = Path(pinfo.get("workspace", f"/tmp/claude-pipeline-{name}")) / "data"
+
+        for step in task.steps:
+            ps = persisted_steps.get(step.id, {})
+            old_status = ps.get("status", "pending")
+            attempt = ps.get("attempt", 0)
+
+            if old_status == "completed":
+                # Verify output file actually exists on disk
+                out_file = data_dir / step.resolved_filename
+                if out_file.exists():
+                    step_status[step.id] = "completed"
+                    try:
+                        step_outputs[step.id] = out_file.read_text(encoding="utf-8")
+                    except Exception:
+                        step_outputs[step.id] = ""
+                else:
+                    # Output missing — need to re-run
+                    step_status[step.id] = "pending"
+                    logger.warning("Pipeline %s step %s: marked completed but output missing — re-running",
+                                   name, step.id)
+            elif old_status == "running":
+                # Was interrupted mid-execution — re-run
+                step_status[step.id] = "pending"
+            elif old_status == "failed":
+                # Check if retry budget remains
+                if attempt < step.retry:
+                    step_status[step.id] = "pending"
+                else:
+                    step_status[step.id] = "failed"
+            elif old_status == "skipped":
+                step_status[step.id] = "skipped"
+            else:
+                step_status[step.id] = "pending"
+
+            step_attempts[step.id] = attempt
+
+        completed = sum(1 for s in step_status.values() if s == "completed")
+        total = len(task.steps)
+
+        # Notify on Telegram
+        self._send_to_all(f"🔄 Retomando pipeline *{name}* \\({completed}/{total} steps completos\\)")
+        logger.info("Resuming pipeline %s: %d/%d steps completed", name, completed, total)
+
+        resume = {
+            "step_status": step_status,
+            "step_outputs": step_outputs,
+            "step_attempts": step_attempts,
+        }
+        self._enqueue_pipeline(task, resume_state=resume)
+
+    def _resume_routine(self, rinfo: Dict) -> None:
+        """Re-parse a routine source file and re-run it."""
+        name = rinfo["name"]
+        md_file = _find_routine_file(name, rinfo.get("source_file"))
+        if not md_file:
+            raise FileNotFoundError(f"Source file not found for routine {name}")
+
+        fm, body = get_frontmatter_and_body(md_file)
+        if not fm or not body:
+            raise ValueError(f"Cannot parse frontmatter/body from {md_file}")
+
+        if not fm.get("enabled", True):
+            logger.info("Routine %s is now disabled — skipping resume", name)
+            self.routine_state.mark_interrupted_as_failed(
+                name, rinfo["time_slot"], is_pipeline=False,
+                error="Routine disabled — skipped resume")
+            return
+
+        owning_agent = rinfo.get("agent") or md_file.parent.parent.name
+        model = str(fm.get("model", "sonnet"))
+        _effort_raw = str(fm.get("effort", "")).lower().strip()
+
+        # Reset state to running (fresh started_at)
+        _src = rinfo.get("source_file") or md_file.name
+        self.routine_state.set_status(name, rinfo["time_slot"], "running",
+                                      agent=owning_agent, source_file=_src)
+
+        task = RoutineTask(
+            name=name,
+            prompt=body,
+            model=model,
+            time_slot=rinfo["time_slot"],
+            agent=owning_agent,
+            minimal_context=bool(fm.get("context") == "minimal"),
+            voice=bool(fm.get("voice", False)),
+            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+        )
+
+        self._send_to_all(f"🔄 Retomando rotina *{name}*\\.\\.\\.")
+        logger.info("Resuming routine %s", name)
+        self._enqueue_routine(task)
+
+    def _cleanup_orphaned_messages(self) -> None:
+        """Edit orphaned Telegram messages from a previous run."""
+        orphans = self._active_msgs.get_all()
+        if not orphans:
+            return
+        logger.info("Cleaning up %d orphaned Telegram message(s)", len(orphans))
+        for entry in orphans:
+            msg_id = entry.get("msg_id")
+            chat_id = entry.get("chat_id")
+            source = entry.get("source", "unknown")
+            if not msg_id or not chat_id:
+                continue
+            try:
+                if source.startswith("pipeline:"):
+                    pname = source.split(":", 1)[1]
+                    self.edit_message(msg_id,
+                                      f"⚠️ Pipeline *{pname}* interrompido — verificando retomada\\.\\.\\.",
+                                      chat_id=chat_id)
+                elif source.startswith("routine:"):
+                    rname = source.split(":", 1)[1]
+                    self.edit_message(msg_id,
+                                      f"⚠️ Rotina *{rname}* interrompida — verificando retomada\\.\\.\\.",
+                                      chat_id=chat_id)
+                else:
+                    self.edit_message(msg_id, "⚠️ _Interrompido por reinício do bot_",
+                                      chat_id=chat_id)
+            except Exception as exc:
+                logger.warning("Failed to clean up orphaned message %s: %s", msg_id, exc)
+        self._active_msgs.clear()
+
+    def _send_to_all(self, text: str) -> None:
+        """Send a MarkdownV2 message to all authorized chats (for startup notifications)."""
+        for cid in self.authorized_ids:
+            try:
+                self.tg_request("sendMessage", {"chat_id": cid, "text": text, "parse_mode": "MarkdownV2"})
+            except Exception:
+                pass
+
+    def _check_stuck_messages(self) -> None:
+        """Safety net: detect messages stuck in processing state with no active runner."""
+        orphans = self._active_msgs.get_all()
+        if not orphans:
+            return
+        now = time.time()
+        for entry in orphans:
+            created = entry.get("created_at", "")
+            try:
+                created_ts = time.mktime(time.strptime(created, "%Y-%m-%dT%H:%M:%S"))
+            except (ValueError, OverflowError):
+                continue
+            age_minutes = (now - created_ts) / 60
+            source = entry.get("source", "")
+            threshold = 90 if source.startswith("pipeline:") else 30
+            if age_minutes < threshold:
+                continue
+            # Check if there's actually an active runner for this source
+            is_alive = False
+            if source == "interactive":
+                with self._contexts_lock:
+                    for ctx in self._contexts.values():
+                        if ctx.stream_msg_id == entry.get("msg_id") and ctx.runner and ctx.runner.running:
+                            is_alive = True
+                            break
+            elif source.startswith("pipeline:"):
+                pname = source.split(":", 1)[1]
+                with self._active_pipelines_lock:
+                    is_alive = pname in self._active_pipelines
+            elif source.startswith("routine:"):
+                rname = source.split(":", 1)[1]
+                with self._routine_contexts_lock:
+                    is_alive = rname in self._routine_contexts
+            if not is_alive:
+                msg_id = entry.get("msg_id")
+                chat_id = entry.get("chat_id")
+                logger.warning("Stuck message detected: msg_id=%s age=%.0fmin source=%s",
+                              msg_id, age_minutes, source)
+                try:
+                    self.edit_message(msg_id, "⚠️ _Processamento interrompido \\(timeout\\)_",
+                                      chat_id=chat_id)
+                except Exception:
+                    pass
+                self._active_msgs.unregister(msg_id)
+
+    def _start_stuck_message_watchdog(self) -> None:
+        """Start a background thread that checks for stuck messages every 5 minutes."""
+        def _loop() -> None:
+            while not self._stop_event.is_set():
+                self._stop_event.wait(300)
+                if self._stop_event.is_set():
+                    break
+                try:
+                    self._check_stuck_messages()
+                except Exception as exc:
+                    logger.error("Stuck message watchdog error: %s", exc)
+        threading.Thread(target=_loop, daemon=True, name="stuck-msg-watchdog").start()
 
     # -- Telegram helpers --
 
@@ -4664,7 +5100,8 @@ class ClaudeTelegramBot:
                         last_msg_id = resp["result"]["message_id"]
         return last_msg_id
 
-    def edit_message(self, message_id: int, text: str, parse_mode: str = "MarkdownV2") -> bool:
+    def edit_message(self, message_id: int, text: str, parse_mode: str = "MarkdownV2",
+                     chat_id: Optional[str] = None) -> bool:
         if not text.strip():
             return False
         if parse_mode == "MarkdownV2":
@@ -4672,7 +5109,7 @@ class ClaudeTelegramBot:
         elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
         text = text[:MAX_MESSAGE_LENGTH]
-        chat_id = self._chat_id
+        chat_id = chat_id or self._chat_id
         data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
             data["parse_mode"] = parse_mode
@@ -6826,6 +7263,9 @@ class ClaudeTelegramBot:
             if ctx:
                 ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
                                                        reply_to_message_id=ctx.user_msg_id)
+                if ctx.stream_msg_id:
+                    self._active_msgs.register(ctx.stream_msg_id, ctx.chat_id,
+                                               ctx.thread_id, "stream", "interactive")
 
         # Start watchdog thread
         watchdog_thread = threading.Thread(
@@ -7046,6 +7486,7 @@ class ClaudeTelegramBot:
             stream_msg = ctx.stream_msg_id if ctx else None
             if stream_msg:
                 self.edit_message(stream_msg, "⚠️ _Sessão expirada. Iniciando nova sessão..._")
+                self._active_msgs.unregister(stream_msg)
             self._run_claude_prompt(prompt, _retry=True)
             return
 
@@ -7112,6 +7553,10 @@ class ClaudeTelegramBot:
                     self._send_as_document(final_text, filename="response.md", caption=caption)
                 else:
                     self.send_message(final_text, reply_markup=copy_markup)
+
+        # Unregister the stream message from active tracking (it's finalized now)
+        if stream_msg:
+            self._active_msgs.unregister(stream_msg)
 
         # TTS: send voice message if enabled or forced (background, non-blocking)
         if force_tts and ctx:
@@ -7218,6 +7663,9 @@ class ClaudeTelegramBot:
         # Send progress message so it can be updated on failure/cancellation
         progress_msg_id = self.send_message(f"🔁 _Executando rotina *{task.name}*..._",
                                                    disable_notification=True)
+        if progress_msg_id and ctx:
+            self._active_msgs.register(progress_msg_id, ctx.chat_id,
+                                       ctx.thread_id, "progress", f"routine:{task.name}")
 
         # Checkpoint vault state before execution — allows rollback on failure
         checkpoint_ref = vault_checkpoint_create(f"routine-{task.name}")
@@ -7300,6 +7748,8 @@ class ClaudeTelegramBot:
                     logger.error("Routine lesson-draft notify failed: %s", notify_exc)
         finally:
             self.effort = saved_effort
+            if progress_msg_id:
+                self._active_msgs.unregister(progress_msg_id)
 
         # Restore original model, agent, workspace, and session_id
         session.model = original_model

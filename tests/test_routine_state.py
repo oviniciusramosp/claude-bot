@@ -63,33 +63,58 @@ class RoutineStateManagerBasic(unittest.TestCase):
         self.assertEqual(steps["a"]["status"], "completed")
         self.assertEqual(steps["b"]["status"], "pending")
 
-    def test_cleanup_stale_running_on_init(self):
-        # Pre-write a state file with a "running" entry
+    def test_collect_interrupted_tasks(self):
+        """_collect_interrupted_tasks returns running entries without mutating state."""
         state_file = self.bot.ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"
         self.bot.ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
         state_file.write_text(json.dumps({
-            "foo": {"08:00": {"status": "running", "started_at": "2026-04-10T08:00:00"}},
+            "foo": {"08:00": {"status": "running", "started_at": "2026-04-10T08:00:00",
+                              "agent": "main", "source_file": "main/Routines/foo.md"}},
             "bar": {
                 "10:00": {
                     "type": "pipeline",
                     "status": "running",
+                    "agent": "crypto-bro",
+                    "source_file": "crypto-bro/Routines/bar.md",
                     "steps": {
-                        "s1": {"status": "running"},
-                        "s2": {"status": "pending"},
+                        "s1": {"status": "completed"},
+                        "s2": {"status": "running"},
+                        "s3": {"status": "pending"},
                     }
                 }
-            }
+            },
+            "done": {"09:00": {"status": "completed"}},
         }))
-        # Constructing RoutineStateManager should mark stale "running" as "failed"
-        self.bot.RoutineStateManager()
+        sm = self.bot.RoutineStateManager()
+        pipelines, routines = sm._collect_interrupted_tasks()
+        # State file should NOT be mutated
         data = json.loads(state_file.read_text())
-        self.assertEqual(data["foo"]["08:00"]["status"], "failed")
-        self.assertIn("Bot restarted", data["foo"]["08:00"]["error"])
-        # Pipeline-level + nested step
-        self.assertEqual(data["bar"]["10:00"]["status"], "failed")
-        self.assertEqual(data["bar"]["10:00"]["steps"]["s1"]["status"], "failed")
-        # Pending step untouched
-        self.assertEqual(data["bar"]["10:00"]["steps"]["s2"]["status"], "pending")
+        self.assertEqual(data["foo"]["08:00"]["status"], "running")
+        self.assertEqual(data["bar"]["10:00"]["status"], "running")
+        # Should find 1 pipeline and 1 routine
+        self.assertEqual(len(pipelines), 1)
+        self.assertEqual(len(routines), 1)
+        self.assertEqual(pipelines[0]["name"], "bar")
+        self.assertEqual(pipelines[0]["agent"], "crypto-bro")
+        self.assertEqual(pipelines[0]["steps"]["s1"]["status"], "completed")
+        self.assertEqual(routines[0]["name"], "foo")
+        self.assertEqual(routines[0]["agent"], "main")
+
+    def test_mark_interrupted_as_failed(self):
+        """mark_interrupted_as_failed marks running entries as failed."""
+        sm = self.bot.RoutineStateManager()
+        sm.set_status("r1", "08:00", "running")
+        sm.mark_interrupted_as_failed("r1", "08:00", is_pipeline=False)
+        data = sm.get_today_state()
+        self.assertEqual(data["r1"]["08:00"]["status"], "failed")
+        self.assertIn("Bot restarted", data["r1"]["08:00"]["error"])
+
+    def test_set_status_persists_agent_and_source_file(self):
+        sm = self.bot.RoutineStateManager()
+        sm.set_status("r1", "08:00", "running", agent="main", source_file="main/Routines/r1.md")
+        data = sm.get_today_state()
+        self.assertEqual(data["r1"]["08:00"]["agent"], "main")
+        self.assertEqual(data["r1"]["08:00"]["source_file"], "main/Routines/r1.md")
 
     def test_concurrent_writes_dont_lose_data(self):
         # Even though we're not really threading, exercise the lock path
