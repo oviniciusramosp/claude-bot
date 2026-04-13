@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.10.3"  # feat: /save alias for /important
+BOT_VERSION = "3.11.0"  # feat: manual pipeline steps with web review editor
 
 import hmac
 import hashlib
@@ -431,6 +431,111 @@ STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
 APPROVAL_EXPIRY_SECONDS = 300  # 5 minutes
+
+# ---------------------------------------------------------------------------
+# Manual pipeline review — web editor
+# ---------------------------------------------------------------------------
+
+REVIEW_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Revisão: {{STEP_NAME}}</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #1e1e2e; color: #cdd6f4; min-height: 100vh; }
+  .header { background: #313244; padding: 16px 24px; border-bottom: 1px solid #45475a; display: flex; justify-content: space-between; align-items: center; }
+  .header h1 { font-size: 18px; font-weight: 600; }
+  .header .pipeline { font-size: 13px; color: #a6adc8; }
+  .container { display: flex; height: calc(100vh - 120px); }
+  .preview, .editor { flex: 1; padding: 24px; overflow-y: auto; }
+  .preview { border-right: 1px solid #45475a; }
+  .preview h2, .editor h2 { font-size: 14px; color: #a6adc8; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  #preview-content { line-height: 1.7; }
+  #preview-content h1,#preview-content h2,#preview-content h3 { color: #cba6f7; margin: 16px 0 8px; }
+  #preview-content p { margin: 8px 0; }
+  #preview-content code { background: #313244; padding: 2px 6px; border-radius: 4px; font-size: 14px; }
+  #preview-content pre { background: #313244; padding: 16px; border-radius: 8px; overflow-x: auto; margin: 12px 0; }
+  #preview-content blockquote { border-left: 3px solid #cba6f7; padding-left: 12px; color: #a6adc8; }
+  textarea { width: 100%; height: calc(100% - 40px); background: #11111b; color: #cdd6f4; border: 1px solid #45475a; border-radius: 8px; padding: 16px; font-family: 'SF Mono', monospace; font-size: 14px; line-height: 1.6; resize: none; }
+  textarea:focus { outline: none; border-color: #cba6f7; }
+  .actions { background: #313244; padding: 12px 24px; display: flex; gap: 12px; justify-content: flex-end; border-top: 1px solid #45475a; }
+  .btn { padding: 10px 24px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+  .btn:hover { opacity: .85; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-approve { background: #a6e3a1; color: #1e1e2e; }
+  .btn-save { background: #89b4fa; color: #1e1e2e; }
+  .btn-cancel { background: #f38ba8; color: #1e1e2e; }
+  .status { font-size: 13px; color: #a6adc8; align-self: center; margin-right: auto; }
+  @media (max-width: 768px) { .container { flex-direction: column; } .preview { border-right: none; border-bottom: 1px solid #45475a; max-height: 40vh; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <div><h1>🔍 {{STEP_NAME}}</h1><div class="pipeline">Pipeline: {{PIPELINE_NAME}}</div></div>
+</div>
+<div class="container">
+  <div class="preview"><h2>Preview</h2><div id="preview-content"></div></div>
+  <div class="editor"><h2>Editor</h2><textarea id="editor">{{CONTENT}}</textarea></div>
+</div>
+<div class="actions">
+  <span class="status" id="status"></span>
+  <button class="btn btn-save" onclick="doSave()">💾 Salvar</button>
+  <button class="btn btn-approve" onclick="doApprove()">✅ Aprovar</button>
+  <button class="btn btn-cancel" onclick="doCancel()">❌ Cancelar</button>
+</div>
+<script>
+const reviewId = "{{REVIEW_ID}}";
+const editor = document.getElementById("editor");
+const preview = document.getElementById("preview-content");
+const status = document.getElementById("status");
+
+function render() { preview.innerHTML = marked.parse(editor.value); }
+editor.addEventListener("input", render);
+render();
+
+async function api(action, body) {
+  status.textContent = "...";
+  try {
+    const r = await fetch("/review/" + reviewId + "/" + action, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body||{})});
+    const d = await r.json();
+    status.textContent = d.message || "OK";
+    return d;
+  } catch(e) { status.textContent = "Erro: " + e.message; }
+}
+async function doSave() { await api("save", {content: editor.value}); }
+async function doApprove() {
+  await api("save", {content: editor.value});
+  const d = await api("approve");
+  if (d && d.ok) { document.body.innerHTML = "<div style='display:flex;align-items:center;justify-content:center;height:100vh;font-size:24px;color:#a6e3a1'>✅ Aprovado — pipeline continuando</div>"; }
+}
+async function doCancel() {
+  const d = await api("cancel");
+  if (d && d.ok) { document.body.innerHTML = "<div style='display:flex;align-items:center;justify-content:center;height:100vh;font-size:24px;color:#f38ba8'>❌ Cancelado</div>"; }
+}
+</script>
+</body>
+</html>"""
+
+_REVIEW_PUBLIC_URL: Optional[str] = None  # populated lazily on first manual step
+
+
+def _get_review_public_url() -> Optional[str]:
+    """Detect the Tailscale Funnel public URL for the webhook/review server. Returns None if unavailable."""
+    try:
+        out = subprocess.check_output(
+            ["tailscale", "funnel", "status"], timeout=5, text=True, stderr=subprocess.DEVNULL
+        )
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("https://") and "(Funnel on)" in line:
+                return line.split()[0].rstrip("/")
+    except Exception:
+        pass
+    return None
+
 
 # Tool name → semantic activity type (for granular status indicators)
 _TOOL_ACTIVITY_MAP = {
@@ -879,6 +984,9 @@ class PipelineStep:
     loop_until: Optional[str] = None
     loop_max_iterations: int = 5
     loop_on_no_progress: str = "abort"  # "abort" or "continue"
+    # Manual review gate — pauses pipeline, sends output to Telegram + web editor, waits for user
+    manual: bool = False
+    manual_timeout: int = 86400  # seconds to wait for human response (default 24h)
 
     @property
     def resolved_filename(self) -> str:
@@ -1631,7 +1739,8 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
                 logger.warning("Pipeline %s step %s: prompt_file not found: %s", routine_name, step_id, pf)
         if not prompt_text:
             prompt_text = str(s.get("prompt", ""))
-        if not prompt_text:
+        is_manual = bool(s.get("manual", False))
+        if not prompt_text and not is_manual:
             logger.error("Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt)",
                          routine_name, step_id)
             continue
@@ -1665,6 +1774,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             loop_max = MAX_LOOP_ITERATIONS
         _np_raw = str(s.get("loop_on_no_progress", "abort")).lower().strip()
         loop_np = _np_raw if _np_raw in ("abort", "continue") else "abort"
+        _raw_timeout = int(s.get("timeout", 1200))
         steps.append(PipelineStep(
             id=step_id,
             name=str(s.get("name", step_id)),
@@ -1672,7 +1782,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             prompt=prompt_text,
             depends_on=depends,
             agent=s.get("agent") or default_agent,
-            timeout=int(s.get("timeout", 1200)),
+            timeout=_raw_timeout,
             inactivity_timeout=int(s.get("inactivity_timeout", 300)),
             retry=int(s.get("retry", 1)),
             output_to_telegram=(raw_output == "telegram"),
@@ -1683,6 +1793,8 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             loop_until=loop_until,
             loop_max_iterations=loop_max,
             loop_on_no_progress=loop_np,
+            manual=is_manual,
+            manual_timeout=int(s.get("manual_timeout", _raw_timeout)) if is_manual else 0,
         ))
 
     if not steps:
@@ -3556,6 +3668,12 @@ class PipelineExecutor:
             for runner in self._active_runners.values():
                 if runner.running:
                     runner.cancel()
+        # Wake up any pending manual review gates so they see the cancellation
+        if self._bot is not None:
+            for review_id, entry in list(self._bot._pending_manual_reviews.items()):
+                if entry.get("pipeline_name") == self.task.name:
+                    entry["result"] = "cancelled"
+                    entry["event"].set()
 
     # -- Activity sidecar (pipeline-activity.json) --------------------------------
 
@@ -3659,9 +3777,9 @@ class PipelineExecutor:
                         ready.append(step)
 
             if not ready:
-                # Check if anything is still running
+                # Check if anything is still running or waiting for approval
                 with self._lock:
-                    running = any(st == "running" for st in self._step_status.values())
+                    running = any(st in ("running", "waiting_for_approval") for st in self._step_status.values())
                 if running:
                     time.sleep(1)
                     continue
@@ -3719,6 +3837,10 @@ class PipelineExecutor:
 
     def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute a single pipeline step using ClaudeRunner."""
+        # Manual review gate — pause and wait for human approval
+        if step.manual:
+            self._execute_manual_step(step, data_dir)
+            return
         # Ralph loop dispatcher — when the step has loop config, use the
         # dedicated loop executor. Otherwise fall through to the normal path.
         if step.has_loop:
@@ -4126,7 +4248,8 @@ class PipelineExecutor:
 
     def _build_progress_text(self, elapsed: int = 0) -> str:
         """Build the progress status text for the live Telegram message."""
-        icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏳"}
+        icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏳",
+                 "waiting_for_approval": "🔍"}
         lines = [f"🔗 *Pipeline: {self.task.title}*", ""]
         for step in self.task.steps:
             st = self._step_status.get(step.id, "pending")
@@ -4135,10 +4258,13 @@ class PipelineExecutor:
         total = len(self.task.steps)
         done = sum(1 for st in self._step_status.values() if st == "completed")
         running = sum(1 for st in self._step_status.values() if st == "running")
+        waiting = sum(1 for st in self._step_status.values() if st == "waiting_for_approval")
         elapsed_str = f" — {elapsed // 60}m{elapsed % 60:02d}s" if elapsed else ""
         status = f"\n_{done}/{total} concluídos"
         if running:
             status += f", {running} rodando"
+        if waiting:
+            status += f", {waiting} aguardando aprovação"
         status += f"{elapsed_str}_"
         lines.append(status)
         return "\n".join(lines)
@@ -4202,6 +4328,256 @@ class PipelineExecutor:
     def _notify_progress(self) -> None:
         """Legacy progress notification (for notify=all mode)."""
         self._update_progress()
+
+    def _execute_manual_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute a manual review gate — pause pipeline, show output in Telegram + web editor,
+        then block until the user approves, cancels, or requests edits."""
+        global _REVIEW_PUBLIC_URL
+
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+        self.state.set_step_status(self.task.name, self.task.time_slot, step.id,
+                                   "waiting_for_approval", attempt=attempt)
+        with self._lock:
+            self._step_status[step.id] = "waiting_for_approval"
+
+        # Determine which dependency output to review
+        if not step.depends_on:
+            with self._lock:
+                self._step_status[step.id] = "failed"
+                self._step_errors[step.id] = "Manual step has no depends_on — nothing to review"
+            self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                       error="Manual step has no depends_on")
+            return
+        dep_step_id = step.depends_on[0]
+        dep_step = self._steps_by_id.get(dep_step_id)
+        if not dep_step:
+            with self._lock:
+                self._step_status[step.id] = "failed"
+                self._step_errors[step.id] = f"Manual step dependency {dep_step_id} not found"
+            self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                       error=f"Dependency {dep_step_id} not found")
+            return
+
+        content_path = data_dir / dep_step.resolved_filename
+        if not content_path.exists():
+            with self._lock:
+                self._step_status[step.id] = "failed"
+                self._step_errors[step.id] = f"Dependency output missing: {content_path}"
+            self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                       error=f"Dependency output missing: {content_path}")
+            return
+
+        # Detect Tailscale Funnel URL once (lazy, cached globally)
+        if _REVIEW_PUBLIC_URL is None:
+            _REVIEW_PUBLIC_URL = _get_review_public_url() or ""
+
+        logger.info("Pipeline %s: manual step %s waiting for approval (dep=%s, file=%s)",
+                    self.task.name, step.id, dep_step_id, content_path)
+
+        while True:
+            if self._cancelled.is_set():
+                with self._lock:
+                    self._step_status[step.id] = "failed"
+                    self._step_errors[step.id] = "Pipeline cancelled"
+                self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                           error="Pipeline cancelled")
+                return
+
+            # Read current content (may have been updated by web editor)
+            try:
+                content = content_path.read_text(encoding="utf-8")
+            except Exception as exc:
+                content = f"(erro ao ler arquivo: {exc})"
+
+            review_id = secrets.token_hex(8)
+            event = threading.Event()
+            review_entry: Dict[str, Any] = {
+                "pipeline_name": self.task.name,
+                "step_id": step.id,
+                "step_name": step.name,
+                "time_slot": self.task.time_slot,
+                "event": event,
+                "result": None,
+                "feedback": None,
+                "content_path": str(content_path),
+                "message_id": None,
+                "dep_step_id": dep_step_id,
+                "chat_id": self.ctx.chat_id,
+                "thread_id": self.ctx.thread_id,
+                "awaiting_feedback": False,
+                "ts": time.time(),
+            }
+            self.bot._pending_manual_reviews[review_id] = review_entry
+
+            # Build Telegram notification message
+            escaped_step = self.bot._sanitize_markdown_v2(step.name)
+            escaped_title = self.bot._sanitize_markdown_v2(self.task.title)
+            lines = [
+                f"🔍 *Revisão Manual — {escaped_step}*",
+                f"Pipeline: _{escaped_title}_",
+                "",
+                f"📄 Arquivo: `{content_path}`",
+            ]
+            if _REVIEW_PUBLIC_URL:
+                lines.append(f"🌐 [Abrir editor web]({_REVIEW_PUBLIC_URL}/review/{review_id})")
+            lines.append("")
+            lines.append("Escolha uma ação:")
+
+            markup = {"inline_keyboard": [[
+                {"text": "✅ Aprovar", "callback_data": f"manual_approve:{review_id}"},
+                {"text": "✏️ Editar", "callback_data": f"manual_edit:{review_id}"},
+                {"text": "❌ Cancelar", "callback_data": f"manual_cancel:{review_id}"},
+            ]]}
+
+            try:
+                msg_id = self.bot.send_message(
+                    "\n".join(lines),
+                    chat_id=self.ctx.chat_id,
+                    thread_id=self.ctx.thread_id,
+                    reply_markup=markup,
+                )
+                review_entry["message_id"] = msg_id
+            except Exception as exc:
+                logger.error("Manual step %s: failed to send approval message: %s", step.id, exc)
+
+            # Send content preview (truncated to fit Telegram message limit)
+            preview = content[:3500]
+            if len(content) > 3500:
+                preview += "\n\n_\\.\\.\\. \\(truncado — abra o arquivo ou editor web para ver completo\\)_"
+            try:
+                self.bot.send_message(
+                    f"```\n{preview}\n```",
+                    chat_id=self.ctx.chat_id,
+                    thread_id=self.ctx.thread_id,
+                )
+            except Exception:
+                pass  # preview is best-effort
+
+            self._update_progress()
+
+            # Block the pipeline thread until the user responds or timeout
+            timed_out = not event.wait(timeout=step.manual_timeout if step.manual_timeout > 0 else 86400)
+
+            # Clean up registry
+            self.bot._pending_manual_reviews.pop(review_id, None)
+
+            if timed_out:
+                if review_entry.get("message_id"):
+                    try:
+                        hours = (step.manual_timeout or 86400) // 3600
+                        self.bot.edit_message(
+                            review_entry["message_id"],
+                            f"⏰ *Revisão Manual — {escaped_step}*\n\n"
+                            f"_Timeout: sem resposta em {hours}h_",
+                        )
+                    except Exception:
+                        pass
+                with self._lock:
+                    self._step_status[step.id] = "failed"
+                    self._step_errors[step.id] = f"Manual review timeout ({step.manual_timeout}s)"
+                self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                           error=f"Manual review timeout ({step.manual_timeout}s)")
+                return
+
+            result = review_entry.get("result")
+
+            if result == "approved":
+                # Re-read file in case web editor saved changes
+                try:
+                    final_content = content_path.read_text(encoding="utf-8")
+                except Exception:
+                    final_content = content
+                out_path = data_dir / step.resolved_filename
+                out_path.write_text(final_content, encoding="utf-8")
+                with self._lock:
+                    self._step_status[step.id] = "completed"
+                    self._step_outputs[step.id] = final_content
+                self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "completed")
+                if review_entry.get("message_id"):
+                    try:
+                        self.bot.edit_message(
+                            review_entry["message_id"],
+                            f"✅ *Revisão Manual — {escaped_step}*\n\n_Aprovado_",
+                        )
+                    except Exception:
+                        pass
+                logger.info("Pipeline %s: manual step %s approved", self.task.name, step.id)
+                return
+
+            elif result == "cancelled":
+                with self._lock:
+                    self._step_status[step.id] = "failed"
+                    self._step_errors[step.id] = "Cancelled by user"
+                self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                           error="Cancelled by user via manual review")
+                if review_entry.get("message_id"):
+                    try:
+                        self.bot.edit_message(
+                            review_entry["message_id"],
+                            f"❌ *Revisão Manual — {escaped_step}*\n\n_Cancelado pelo usuário_",
+                        )
+                    except Exception:
+                        pass
+                logger.info("Pipeline %s: manual step %s cancelled by user", self.task.name, step.id)
+                return
+
+            elif result == "edit":
+                feedback = review_entry.get("feedback", "")
+                if review_entry.get("message_id"):
+                    try:
+                        self.bot.edit_message(
+                            review_entry["message_id"],
+                            f"✏️ *Revisão Manual — {escaped_step}*\n\n_Re\\-executando com feedback\\.\\.\\._",
+                        )
+                    except Exception:
+                        pass
+
+                augmented_prompt = (
+                    dep_step.prompt
+                    + "\n\n---\n\n"
+                    "[REVISÃO MANUAL] O revisor solicitou as seguintes alterações:\n"
+                    + feedback
+                    + "\n\nRevise o output anterior em data/"
+                    + dep_step.resolved_filename
+                    + " e aplique as mudanças solicitadas."
+                )
+                try:
+                    ws = str(self.workspace)
+                    agent_id_for_ws = dep_step.agent or self.task.agent or MAIN_AGENT_ID
+                    isolated = workspace_dir(agent_id_for_ws)
+                    if isolated.is_dir():
+                        ws = str(isolated)
+                    new_output = self._run_step_invocation(dep_step, augmented_prompt, ws)
+                    content_path.write_text(new_output, encoding="utf-8")
+                    with self._lock:
+                        self._step_outputs[dep_step_id] = new_output
+                    escaped_dep = self.bot._sanitize_markdown_v2(dep_step.name)
+                    self.bot.send_message(
+                        f"📝 Step _{escaped_dep}_ re\\-executado com feedback\\. Revise novamente:",
+                        chat_id=self.ctx.chat_id,
+                        thread_id=self.ctx.thread_id,
+                    )
+                except Exception as exc:
+                    logger.error("Manual step %s: re-run of dep %s failed: %s", step.id, dep_step_id, exc)
+                    self.bot.send_message(
+                        f"⚠️ Erro ao re\\-executar com feedback: `{self.bot._sanitize_markdown_v2(str(exc))}`\n\n"
+                        "Você pode editar o arquivo diretamente e aprovar\\.",
+                        chat_id=self.ctx.chat_id,
+                        thread_id=self.ctx.thread_id,
+                    )
+                # Loop back — re-read content and re-send approval keyboard
+                continue
+
+            else:
+                # Unknown result or cancelled via pipeline cancel()
+                with self._lock:
+                    self._step_status[step.id] = "failed"
+                    self._step_errors[step.id] = f"Manual review ended with unknown result: {result}"
+                self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
+                                           error="Manual review ended unexpectedly")
+                return
 
     def _notify_success(self, elapsed: int) -> None:
         """Send final success notification based on notify mode."""
@@ -4379,6 +4755,11 @@ class ClaudeTelegramBot:
 
         # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
         self._pending_approvals: Dict[str, dict] = {}
+        # Pending manual pipeline review gates: {review_id: {pipeline_name, step_id, step_name,
+        #     time_slot, event: threading.Event, result: Optional[str], feedback: Optional[str],
+        #     content_path: str, message_id: Optional[int], dep_step_id: str,
+        #     chat_id, thread_id, awaiting_feedback: bool, ts: float}}
+        self._pending_manual_reviews: Dict[str, dict] = {}
         self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
         self._reasoning_toggles: Dict[int, bool] = {}  # stream_msg_id → show reasoning
         # Tracks mtime of today's journal at session start, per session name.
@@ -4779,6 +5160,11 @@ class ClaudeTelegramBot:
             elif old_status == "running":
                 # Was interrupted mid-execution — re-run
                 step_status[step.id] = "pending"
+            elif old_status == "waiting_for_approval":
+                # Was waiting for human review — deps are completed, re-trigger (will re-send keyboard)
+                step_status[step.id] = "pending"
+                logger.info("Pipeline %s step %s: was waiting_for_approval — will re-send approval request",
+                            name, step.id)
             elif old_status == "failed":
                 # Check if retry budget remains
                 if attempt < step.retry:
@@ -7910,6 +8296,20 @@ class ClaudeTelegramBot:
         if not text:
             return
 
+        # Check for pending manual review feedback (edit mode) — intercept before command handling
+        for _rev_id, _rev_entry in list(self._pending_manual_reviews.items()):
+            if (
+                _rev_entry.get("awaiting_feedback")
+                and str(_rev_entry.get("chat_id")) == str(self._ctx.chat_id)
+                and str(_rev_entry.get("thread_id") or "") == str(self._ctx.thread_id or "")
+            ):
+                _rev_entry["awaiting_feedback"] = False
+                _rev_entry["feedback"] = text
+                _rev_entry["result"] = "edit"
+                _rev_entry["event"].set()
+                self.send_message("📝 Feedback recebido\\. Re\\-executando etapa anterior\\.\\.\\.")
+                return
+
         # Commands
         if text.startswith("/"):
             parts = text.split(None, 1)
@@ -8152,6 +8552,47 @@ class ClaudeTelegramBot:
             self._pending_approvals.pop(approval_id, None)
             self.answer_callback(cb_id, "Cancelado")
             self.send_message("🚫 Comando cancelado.")
+
+        elif data.startswith("manual_approve:"):
+            review_id = data.split(":", 1)[1]
+            entry = self._pending_manual_reviews.get(review_id)
+            if entry:
+                self._remove_keyboard(callback)
+                entry["result"] = "approved"
+                entry["event"].set()
+                self.answer_callback(cb_id, "✅ Aprovado")
+            else:
+                self.answer_callback(cb_id, "Expirado")
+
+        elif data.startswith("manual_cancel:"):
+            review_id = data.split(":", 1)[1]
+            entry = self._pending_manual_reviews.get(review_id)
+            if entry:
+                self._remove_keyboard(callback)
+                entry["result"] = "cancelled"
+                entry["event"].set()
+                self.answer_callback(cb_id, "❌ Cancelado")
+            else:
+                self.answer_callback(cb_id, "Expirado")
+
+        elif data.startswith("manual_edit:"):
+            review_id = data.split(":", 1)[1]
+            entry = self._pending_manual_reviews.get(review_id)
+            if entry:
+                entry["awaiting_feedback"] = True
+                self.answer_callback(cb_id, "Envie seu feedback")
+                try:
+                    escaped_step = self._sanitize_markdown_v2(entry.get("step_name", "Revisão"))
+                    self.edit_message(
+                        entry["message_id"],
+                        f"✏️ *Revisão Manual — {escaped_step}*\n\n"
+                        f"_Envie sua mensagem com o feedback/edições desejadas\\._",
+                    )
+                except Exception:
+                    pass
+            else:
+                self.answer_callback(cb_id, "Expirado")
+
         else:
             self.answer_callback(cb_id)
 
@@ -8497,13 +8938,92 @@ class ClaudeTelegramBot:
             def do_GET(self):
                 if self.path == "/health":
                     self._respond(200, {"status": "ok", "service": "webhook"})
+                elif self.path.startswith("/review/"):
+                    self._serve_review_page()
                 else:
                     self._respond(404, {"error": "not found"})
 
             def do_POST(self):
-                if not self.path.startswith("/webhook/"):
-                    return self._respond(404, {"error": "not found"})
-                self._handle_webhook()
+                if self.path.startswith("/review/"):
+                    self._handle_review_action()
+                elif self.path.startswith("/webhook/"):
+                    self._handle_webhook()
+                else:
+                    self._respond(404, {"error": "not found"})
+
+            def _serve_review_page(self):
+                """GET /review/{review_id} — serve the HTML review editor."""
+                review_id = self.path[len("/review/"):].split("?")[0].strip("/")
+                entry = bot._pending_manual_reviews.get(review_id)
+                if not entry:
+                    body = b"<h1 style='font-family:sans-serif;padding:40px'>Review not found or expired</h1>"
+                    self.send_response(404)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                try:
+                    content = Path(entry["content_path"]).read_text(encoding="utf-8")
+                except Exception:
+                    content = "(erro ao ler arquivo)"
+                # Escape content for safe embedding in the JS textarea
+                escaped = (content
+                           .replace("&", "&amp;")
+                           .replace("<", "&lt;")
+                           .replace(">", "&gt;"))
+                html = REVIEW_HTML_TEMPLATE
+                html = html.replace("{{REVIEW_ID}}", review_id)
+                html = html.replace("{{CONTENT}}", escaped)
+                html = html.replace("{{STEP_NAME}}", entry.get("step_name", "Revisão"))
+                html = html.replace("{{PIPELINE_NAME}}", entry.get("pipeline_name", ""))
+                body_bytes = html.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.end_headers()
+                self.wfile.write(body_bytes)
+
+            def _handle_review_action(self):
+                """POST /review/{review_id}/{action} — save/approve/cancel."""
+                parts = self.path[len("/review/"):].strip("/").split("/")
+                if len(parts) != 2:
+                    return self._respond(400, {"error": "invalid path"})
+                review_id, action = parts[0], parts[1]
+                entry = bot._pending_manual_reviews.get(review_id)
+                if not entry:
+                    return self._respond(404, {"error": "not found", "message": "Review expirado"})
+
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                except ValueError:
+                    length = 0
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    data = {}
+
+                if action == "save":
+                    new_content = data.get("content", "")
+                    if new_content:
+                        try:
+                            Path(entry["content_path"]).write_text(new_content, encoding="utf-8")
+                            self._respond(200, {"ok": True, "message": "Salvo"})
+                        except Exception as exc:
+                            self._respond(500, {"error": str(exc), "message": f"Erro: {exc}"})
+                    else:
+                        self._respond(400, {"error": "empty content", "message": "Conteúdo vazio"})
+                elif action == "approve":
+                    entry["result"] = "approved"
+                    entry["event"].set()
+                    self._respond(200, {"ok": True, "message": "Aprovado"})
+                elif action == "cancel":
+                    entry["result"] = "cancelled"
+                    entry["event"].set()
+                    self._respond(200, {"ok": True, "message": "Cancelado"})
+                else:
+                    self._respond(400, {"error": "unknown action"})
 
             def _handle_webhook(self):
                 reaction_id = self.path[len("/webhook/"):].split("?", 1)[0].strip("/")
