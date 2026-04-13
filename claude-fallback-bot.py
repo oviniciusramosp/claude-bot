@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.6.2"  # fix: SIGTERM consolidation in thread — avoids FileNotFoundError from signal handler
+BOT_VERSION = "3.7.1"  # fix: normalize thread_id to int in routine context routing (prevents duplicate contexts)
 
 import hmac
 import hashlib
@@ -4275,7 +4275,12 @@ class ClaudeTelegramBot:
             data = json.loads(CONTEXTS_FILE.read_text(encoding="utf-8"))
             for entry in data.get("contexts", []):
                 cid = entry.get("chat_id", "")
-                tid = entry.get("thread_id")
+                # Normalize thread_id to int — old entries may have been saved as strings.
+                raw_tid = entry.get("thread_id")
+                try:
+                    tid = int(raw_tid) if raw_tid is not None else None
+                except (ValueError, TypeError):
+                    tid = raw_tid
                 sname = entry.get("session_name")
                 if cid and sname:
                     ctx = ThreadContext(chat_id=cid, thread_id=tid)
@@ -4359,7 +4364,10 @@ class ClaudeTelegramBot:
                 agent_chat_id = agent_def.get("chat_id") or agent_def.get("telegram_chat_id")
                 agent_thread_id = agent_def.get("thread_id") or agent_def.get("telegram_thread_id")
                 if agent_chat_id:
-                    return self._get_context(str(agent_chat_id), str(agent_thread_id) if agent_thread_id else None)
+                    # Normalize thread_id to int to match how Telegram delivers it in messages,
+                    # preventing duplicate context entries (str vs int key mismatch in _contexts).
+                    tid = int(agent_thread_id) if agent_thread_id is not None else None
+                    return self._get_context(str(agent_chat_id), tid)
 
             # Priority 2: find active session bound to this agent
             with self._contexts_lock:
@@ -6152,7 +6160,19 @@ class ClaudeTelegramBot:
             )
         if extra:
             prompt += f"\n\nO usuario disse: {extra}"
+        # Snapshot agent IDs before creation so we can detect the new one
+        before = set(iter_agent_ids())
         self._run_claude_prompt(prompt)
+        # Auto-switch to newly created agent (if exactly one was added)
+        after = set(iter_agent_ids())
+        new_agents = after - before
+        if len(new_agents) == 1:
+            new_id = new_agents.pop()
+            self.cmd_agent_switch(new_id)
+            # Reset session_id so next message starts fresh with new agent's context
+            session = self._get_session()
+            session.session_id = None
+            self.sessions.save()
 
     def cmd_agent_switch(self, agent_id: str) -> None:
         # Refresh agent chat map on every switch (catches new/updated agents)
