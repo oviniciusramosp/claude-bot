@@ -11,6 +11,7 @@ schedule:
 model: haiku
 enabled: true
 context: minimal
+effort: low
 ---
 
 Run the vault index regenerator and report only when files actually changed.

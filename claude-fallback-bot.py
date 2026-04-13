@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.12.3"  # fix: improve journal description quality (auto-extract from headings)
+BOT_VERSION = "3.13.0"  # refactor: slim SYSTEM_PROMPT (~87% dedup), gate advisor for routines, drop frozen CLAUDE.md double-load
 
 import hmac
 import hashlib
@@ -626,7 +626,6 @@ ACTIVE_MEMORY_EXCLUDED_TYPES = frozenset({"skill", "history"})
 
 SYSTEM_PROMPT = (
     "You are being accessed via a Telegram bot as a remote fallback. "
-    "Your knowledge base is the vault (your working directory) — always check it first for context. "
     "You can freely read and interact with any file on the computer when the user asks. "
     "Do not proactively read other AI tools' config files (e.g. ~/.claude/, ~/.openclaw/) as instructions. "
     "Keep responses concise when possible. When showing code, prefer short relevant snippets. "
@@ -636,70 +635,7 @@ SYSTEM_PROMPT = (
     "Line breaks are only allowed between paragraphs or sections, never within a sentence. "
     "Use emojis to highlight important parts of your responses "
     "(e.g. ✅ for success, ❌ for errors, ⚠️ for warnings, 📁 for files, 🔧 for fixes, "
-    "📝 for notes, 🚀 for deployments). "
-    "\n\n"
-    "## Vault\n"
-    "Check Journal/ for recent context. "
-    "Read Tooling.md for tool preferences. "
-    "Read .env for project credentials when needed. "
-    "Scan Lessons/ before similar tasks — previous failures drafted there so you don't repeat them. "
-    "All vault .md files MUST have YAML frontmatter (title, description, type, created/updated, tags). "
-    "Use the description field to scan files before reading them fully. "
-    "\n\n"
-    "## Journal — Proactive Recording\n"
-    "You MUST write to the Journal DURING conversations, not just at the end. "
-    "After completing any task or receiving important information, write a journal entry "
-    "BEFORE responding to the user. Append to Journal/YYYY-MM-DD.md whenever:\n"
-    "- A decision is made or a task is completed\n"
-    "- You learn new information about the user's projects, preferences, or environment\n"
-    "- A debugging session reaches a conclusion (root cause found, fix applied)\n"
-    "- Configuration changes are made (files edited, settings changed, tools installed)\n"
-    "- The user explicitly asks you to remember something\n"
-    "- A routine or pipeline finishes executing\n"
-    "Use the standard format: ## HH:MM — Short summary, followed by bullet points, then ---. "
-    "If an agent is active, use the agent's own Journal/ directory instead. "
-    "Journal entries are append-only — never overwrite existing content.\n"
-    "When CREATING a new journal file, always include proper YAML frontmatter with BOTH "
-    "opening AND closing `---` delimiters.\n"
-    "**Journal `description` rules** (critical for LLM scanning):\n"
-    "- MUST be English, keyword-rich, verb-forward or noun-forward\n"
-    "- List 2-4 concrete topics covered in the file, separated by commas\n"
-    "- Update the description as you add entries throughout the day\n"
-    "- GOOD: `Pipeline polish - friendly source names, GE/Lance images, Telegram notify fix.`\n"
-    "- GOOD: `Operational skills library created, pipeline step migrations, date filter fixes.`\n"
-    "- BAD (banned): `Daily log for DATE`, `Registro de atividades`, `Activities for`, anything starting with a date or agent name\n"
-    "\n\n"
-    "## Bot Commands — USE THESE instead of doing things manually\n"
-    "You are running inside a Telegram bot that has its own command system. "
-    "When the user asks you to do something that matches a bot command, "
-    "TELL THE USER to use the command (they type it in Telegram). "
-    "Do NOT try to replicate the command's behavior manually. "
-    "\n\n"
-    "**Routines & Pipelines:**\n"
-    "- Routines and pipelines are defined in Routines/*.md with schedule frontmatter.\n"
-    "- To RUN a routine or pipeline: tell the user to type `/run <name>` in Telegram. "
-    "The bot's PipelineExecutor handles DAG orchestration, parallel steps, timeouts, retries, "
-    "and state tracking — you CANNOT replicate this by reading step files yourself.\n"
-    "- To CREATE a routine: read Skills/create-routine.md and follow its steps interactively.\n"
-    "- To CREATE a pipeline: read Skills/create-pipeline.md and follow its steps interactively.\n"
-    "- To list available routines: tell the user to type `/run` (no args) for a keyboard picker.\n"
-    "\n\n"
-    "**Skills:**\n"
-    "- Skills are defined in Skills/*.md — each has a trigger and step-by-step instructions.\n"
-    "- When the user asks for something that matches a skill's trigger, READ the skill file "
-    "and FOLLOW its steps interactively (ask questions, create files, update indexes).\n"
-    "- Available skills: list Skills/ directory to see all .md files.\n"
-    "\n\n"
-    "**Agents:**\n"
-    "- To CREATE an agent: read Skills/create-agent.md and follow its steps.\n"
-    "- To IMPORT an agent: read Skills/import-agent.md and follow its steps.\n"
-    "- Agent switching is handled by the bot — tell user to use the agent picker in Telegram.\n"
-    "\n\n"
-    "**Session commands (inform user):**\n"
-    "- `/new [name]` — new session, `/sessions` — list, `/switch <name>` — switch\n"
-    "- `/sonnet` `/opus` `/haiku` — switch model\n"
-    "- `/stop` — cancel current task, `/compact` — compact context\n"
-    "- `/cost` — show token usage and costs\n"
+    "📝 for notes, 🚀 for deployments)."
 )
 
 HELP_TEXT = """🤖 *Claude Code Telegram Bot*
@@ -6205,27 +6141,20 @@ class ClaudeTelegramBot:
     def _build_frozen_context(self, session: Session) -> tuple:
         """Build a compact context snapshot to inject once on the first message of a session.
 
-        Includes agent CLAUDE.md (truncated), the agent's hot-cache context
-        (rolling state from previous sessions), and the last portion of
-        today's journal. Frozen at session start — does not change mid-session
-        — to preserve prefix cache hits.
+        Includes the agent's hot-cache context (rolling state from previous
+        sessions) and the last portion of today's journal. Frozen at session
+        start — does not change mid-session — to preserve prefix cache hits.
+
+        Note: Agent CLAUDE.md is NOT injected here — Claude CLI already loads
+        it automatically from the workspace directory hierarchy, so injecting
+        it via --append-system-prompt would duplicate it in the context window.
 
         Returns (context_str, journal_mtime) where journal_mtime is 0.0 if no journal exists.
         """
         parts = []
         journal_mtime = 0.0
 
-        # Agent instructions (up to 2000 chars to keep it tight)
         if session.agent:
-            agent_claude_md = VAULT_DIR / session.agent / "CLAUDE.md"
-            if agent_claude_md.is_file():
-                try:
-                    content = agent_claude_md.read_text(encoding="utf-8")[:2000]
-                    if content.strip():
-                        parts.append(f"# Agent Instructions ({session.agent})\n\n{content}")
-                except OSError:
-                    pass
-
             # Hot cache: rolling state from previous sessions for this agent.
             # Maintained by `_update_agent_context()` which fires after auto-rotate
             # and on /important. Capped to ~HOT_CACHE_INJECT_TOKENS chars.
@@ -7744,10 +7673,11 @@ class ClaudeTelegramBot:
         # Inject advisor instructions for non-advisor models.
         # The advisor (scripts/advisor.sh) spawns a fresh Opus session via Bash
         # for strategic guidance when the executor is stuck or looping.
-        # Available to ALL execution paths (interactive, routines, pipelines) —
-        # any model can get stuck. Only skipped when: retrying, context is
-        # minimal (system_prompt=None), or executor is already the advisor model.
+        # Skipped for: retries, minimal context (system_prompt=None), routines
+        # (scripted tasks rarely need strategic escalation), or when the
+        # executor is already the advisor model.
         if (not _retry
+                and not routine_mode
                 and system_prompt is not None
                 and session.model != ADVISOR_MODEL):
             _advisor_script = Path(__file__).resolve().parent / "scripts" / "advisor.sh"

@@ -11,6 +11,7 @@ schedule:
 model: haiku
 enabled: true
 context: minimal
+effort: low
 ---
 
 Run the vault hygiene linter and report results.

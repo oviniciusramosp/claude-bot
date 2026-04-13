@@ -11,6 +11,7 @@ schedule:
 model: haiku
 enabled: true
 context: minimal
+effort: low
 ---
 
 Regenerate the vault knowledge graph by running the Python script below. This script extracts relationships from YAML frontmatter and wikilinks — no LLM, zero cost.

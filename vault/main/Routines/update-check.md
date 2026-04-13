@@ -10,6 +10,7 @@ schedule:
   times: ["10:00"]
 model: haiku
 context: minimal
+effort: low
 enabled: true
 ---
 

@@ -219,7 +219,10 @@ class FrozenContextInjectionTest(unittest.TestCase):
         ctx, _mtime = self.bot.ClaudeTelegramBot._build_frozen_context(bot_like, sess)
         self.assertIn("Continuity (alpha)", ctx)
         self.assertIn("the test scenario", ctx)
-        self.assertIn("Agent Instructions (alpha)", ctx)
+        # Agent CLAUDE.md is no longer injected via frozen context — Claude CLI
+        # loads it automatically from the workspace directory hierarchy, so
+        # injecting it here would double-load it in the context window.
+        self.assertNotIn("Agent Instructions", ctx)
 
 
 if __name__ == "__main__":
