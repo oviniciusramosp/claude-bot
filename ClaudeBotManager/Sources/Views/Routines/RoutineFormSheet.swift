@@ -574,11 +574,7 @@ struct RoutineFormSheet: View {
     }
 
     private var modelDescription: String {
-        switch model {
-        case "opus": return "Most capable for ambitious work"
-        case "haiku": return "Fast and lightweight"
-        default: return "Best balance of speed and quality"
-        }
+        ModelCatalog.description(for: model)
     }
 
     private func toggleDay(_ day: String) {

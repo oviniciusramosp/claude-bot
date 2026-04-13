@@ -25,7 +25,7 @@ struct Agent: Identifiable, Hashable, Sendable {
     var chatId: String = ""
     var threadId: String = ""
 
-    static let modelOptions = ["sonnet", "opus", "haiku"]
+    static var modelOptions: [String] { ModelCatalog.all.map(\.id) }
     static let colorOptions = ["grey", "red", "orange", "yellow", "green", "teal", "blue", "purple"]
 
     // MARK: - CLAUDE.md parsing

@@ -66,11 +66,10 @@ struct AgentFormSheet: View {
                                     .font(.caption).foregroundStyle(.secondary)
                                 Spacer()
                                 Picker("", selection: $model) {
-                                    ForEach(Agent.modelOptions, id: \.self) { m in
-                                        Text(m.capitalized).tag(m)
+                                    ForEach(ModelCatalog.all, id: \.id) { option in
+                                        Text(option.label).tag(option.id)
                                     }
                                 }
-                                .pickerStyle(.segmented)
                                 .frame(width: 200)
                             }
                         }

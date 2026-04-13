@@ -139,19 +139,11 @@ struct AgentDetailView: View {
     // MARK: - Config Section (Model + Telegram)
 
     private func modelDisplayName(_ id: String) -> String {
-        switch id {
-        case "opus":  return "Opus 4.6"
-        case "haiku": return "Claude Haiku"
-        default:      return "Claude Sonnet"
-        }
+        ModelCatalog.label(for: id)
     }
 
     private func modelDescription(_ id: String) -> String {
-        switch id {
-        case "opus":  return "Most capable for ambitious work"
-        case "haiku": return "Fastest and most compact"
-        default:      return "Balanced performance and speed"
-        }
+        ModelCatalog.description(for: id)
     }
 
     private var configSection: some View {
@@ -161,11 +153,7 @@ struct AgentDetailView: View {
                     // Model
                     VStack(alignment: .leading, spacing: 5) {
                         Text("Model").font(.system(size: 10)).foregroundStyle(Color(white: 0.45))
-                        menuPicker(label: modelDisplayName(agent.model), selection: $agent.model, options: [
-                            ("sonnet", modelDisplayName("sonnet")),
-                            ("opus", modelDisplayName("opus")),
-                            ("haiku", modelDisplayName("haiku")),
-                        ])
+                        menuPicker(label: modelDisplayName(agent.model), selection: $agent.model, options: ModelCatalog.pickerOptions)
                         Text(modelDescription(agent.model))
                             .font(.system(size: 10))
                             .foregroundStyle(Color(white: 0.45))
