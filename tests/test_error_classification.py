@@ -19,6 +19,11 @@ class ClassifyError(unittest.TestCase):
         self.assertEqual(self._kind("rate limit exceeded"), self.bot.ErrorKind.RATE_LIMIT)
         self.assertEqual(self._kind("HTTP 429 too many"), self.bot.ErrorKind.RATE_LIMIT)
 
+    def test_rate_limit_zai_format(self):
+        """z.AI puts API errors in result_text — classify_error must still match."""
+        zai_err = 'API Error: 429 {"error":{"code":"1302","message":"Rate limit reached for requests"}}'
+        self.assertEqual(self._kind(zai_err), self.bot.ErrorKind.RATE_LIMIT)
+
     def test_context_too_long(self):
         self.assertEqual(self._kind("maximum context length"), self.bot.ErrorKind.CONTEXT_TOO_LONG)
         self.assertEqual(self._kind("too many tokens"), self.bot.ErrorKind.CONTEXT_TOO_LONG)

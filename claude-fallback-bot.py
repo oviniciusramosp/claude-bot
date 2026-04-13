@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.9.1"  # fix: _notify_invalid_routine now routes to agent's thread instead of #general
+BOT_VERSION = "3.9.2"  # fix: z.AI 429 errors now trigger auto-retry (error was landing in result_text, bypassing retry logic)
 
 import hmac
 import hashlib
@@ -7296,7 +7296,11 @@ class ClaudeTelegramBot:
 
         # Auto-recovery: classify error and retry if possible (first attempt only)
         if not _retry and runner.exit_code not in (0, 130, 2) and prompt is not None:
-            raw_error = runner.stderr_text or (runner.error_text if not runner.result_text else "")
+            raw_error = runner.stderr_text or runner.error_text or ""
+            # When exit_code signals failure but error/stderr are empty,
+            # check result_text — some providers (e.g. z.AI) put API errors in stdout
+            if not raw_error and runner.result_text:
+                raw_error = runner.result_text
             if raw_error:
                 kind = classify_error(raw_error)
                 action, backoff, _ = get_recovery_plan(kind)
