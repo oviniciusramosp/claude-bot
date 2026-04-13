@@ -114,6 +114,69 @@ class HandleEvent(unittest.TestCase):
         self.assertEqual(len(self.runner.tool_log), 1)
 
 
+class AccumulatedThinking(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def setUp(self):
+        self.runner = self.bot.ClaudeRunner()
+        self.runner.running = True
+
+    def test_thinking_block_accumulates_content(self):
+        self.runner._handle_event({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": "Let me analyze this"}]},
+        })
+        self.assertEqual(self.runner.accumulated_thinking, "Let me analyze this")
+        self.assertEqual(self.runner.activity_type, "thinking")
+
+    def test_multiple_thinking_blocks_concatenated(self):
+        self.runner._handle_event({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": "First thought"}]},
+        })
+        self.runner._handle_event({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": "Second thought"}]},
+        })
+        self.assertEqual(self.runner.accumulated_thinking, "First thought\nSecond thought")
+
+    def test_thinking_snapshot_truncation(self):
+        long_text = "x" * 5000
+        self.runner.accumulated_thinking = long_text
+        snapshot = self.runner.get_thinking_snapshot(max_chars=1500)
+        self.assertTrue(snapshot.startswith("...\n"))
+        # Content after "...\n" should be last 1500 chars
+        self.assertEqual(snapshot[4:], long_text[-1500:])
+
+    def test_thinking_snapshot_short_text_not_truncated(self):
+        self.runner.accumulated_thinking = "short"
+        snapshot = self.runner.get_thinking_snapshot(max_chars=1500)
+        self.assertEqual(snapshot, "short")
+
+    def test_thinking_snapshot_empty(self):
+        snapshot = self.runner.get_thinking_snapshot()
+        self.assertEqual(snapshot, "")
+
+    def test_thinking_reset_on_init(self):
+        self.assertEqual(self.runner.accumulated_thinking, "")
+
+    def test_empty_thinking_block_ignored(self):
+        self.runner._handle_event({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking", "thinking": ""}]},
+        })
+        self.assertEqual(self.runner.accumulated_thinking, "")
+
+    def test_thinking_block_without_thinking_field(self):
+        self.runner._handle_event({
+            "type": "assistant",
+            "message": {"content": [{"type": "thinking"}]},
+        })
+        self.assertEqual(self.runner.accumulated_thinking, "")
+
+
 class GetSnapshot(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

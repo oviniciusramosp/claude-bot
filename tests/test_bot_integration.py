@@ -404,6 +404,36 @@ class CallbackHandling(unittest.TestCase):
             self.assertEqual(len(self.bot._pending_approvals), 0)
 
 
+    def test_reasoning_toggle_callback(self):
+        """Reasoning toggle flips state and re-renders button without removing keyboard."""
+        stream_msg_id = 42
+        self.bot._reasoning_toggles[stream_msg_id] = False
+        callback = {
+            "id": "cb-reason",
+            "data": "reasoning:toggle",
+            "message": {"message_id": stream_msg_id, "text": "⏳ Processando..."},
+        }
+        self.bot._handle_callback(callback)
+        # Toggle should flip to True
+        self.assertTrue(self.bot._reasoning_toggles[stream_msg_id])
+
+        # Toggle again → back to False
+        self.bot._handle_callback(callback)
+        self.assertFalse(self.bot._reasoning_toggles[stream_msg_id])
+
+    def test_reasoning_toggle_expired(self):
+        """Reasoning toggle on unknown msg_id answers 'Expirado'."""
+        callback = {
+            "id": "cb-reason",
+            "data": "reasoning:toggle",
+            "message": {"message_id": 999, "text": "old message"},
+        }
+        self.bot._handle_callback(callback)
+        # Should not crash; 999 not in toggles → answers "Expirado"
+        answered = [c for c in self.fixture.tg_calls if c[0] == "answerCallbackQuery"]
+        self.assertTrue(any("Expirado" in str(c) for c in answered))
+
+
 class TextProcessingEdgeCases(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
