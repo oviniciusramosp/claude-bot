@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.10.2"  # fix: /new preserves agent and model from current session
+BOT_VERSION = "3.10.3"  # feat: /save alias for /important
 
 import hmac
 import hashlib
@@ -607,7 +607,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/btw <msg>` — Injetar mensagem ao Claude em execução (nativo)
 
 📓 *Journal & Memory*
-• `/important` — Registrar pontos importantes da sessão no diário
+• `/important`, `/save` — Registrar pontos importantes da sessão no diário
 • `/lesson <texto>` — Registrar lição manual no agente atual (`<agente>/Lessons/`)
 • `/active-memory [on|off|status]` — Injeção proativa de contexto do vault (padrão: on)
 
@@ -7945,6 +7945,7 @@ class ClaudeTelegramBot:
                 "/delegate": lambda: self.cmd_delegate(arg) if arg else self.send_message("❌ Use: `/delegate <prompt>`"),
                 "/clear": lambda: self.cmd_clear(),
                 "/important": lambda: self.cmd_important(),
+                "/save": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
                 "/run": lambda: self.cmd_run(arg),
                 "/agent": lambda: self.cmd_agent(arg),
@@ -8283,6 +8284,7 @@ class ClaudeTelegramBot:
             {"command": "routine", "description": "Criar ou listar rotinas"},
             {"command": "run", "description": "Executar rotina/pipeline manualmente"},
             {"command": "important", "description": "Registrar pontos importantes no diario"},
+            {"command": "save", "description": "Salvar pontos importantes no diario"},
             {"command": "compact", "description": "Compactar contexto"},
             {"command": "stop", "description": "Cancelar execucao"},
             {"command": "timeout", "description": "Alterar timeout"},

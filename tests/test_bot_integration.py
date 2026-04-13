@@ -213,6 +213,12 @@ class CommandDispatch(unittest.TestCase):
         last = self._last_send()
         self.assertIn("Comandos", last["text"])
 
+    def test_save_is_alias_for_important(self):
+        called = []
+        self.bot.cmd_important = lambda: called.append(True)
+        self.bot._handle_text("/save")
+        self.assertTrue(called, "/save should dispatch to cmd_important")
+
     def _seed_vault_skill(self, name: str, description: str, tags=None):
         skills_dir = self.fixture.vault / "Skills"
         skills_dir.mkdir(parents=True, exist_ok=True)
