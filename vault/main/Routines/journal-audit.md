@@ -3,11 +3,11 @@ title: Journal Audit
 description: Nightly audit that checks all agents' journals for completeness, fixes frontmatter issues, and fills gaps from the activity log.
 type: routine
 created: 2026-04-10
-updated: 2026-04-10
+updated: 2026-04-13
 tags: [routine, journal, maintenance, daily]
 schedule:
   days: ["*"]
-  times: ["23:59"]
+  times: [23:59]
 model: sonnet
 enabled: true
 context: minimal
