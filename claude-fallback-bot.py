@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.12.1"  # fix: /run filters routines by current agent
+BOT_VERSION = "3.12.2"  # fix: vault checkpoint uses filesystem snapshot instead of git stash
 
 import hmac
 import hashlib
@@ -19,6 +19,7 @@ import secrets
 import signal
 import shutil
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -1630,64 +1631,83 @@ def _cleanup_stale_pipeline_workspaces() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Vault Checkpoints (git stash of vault/ changes before routine execution)
+# Vault Checkpoints (filesystem snapshot before routine execution)
 # ---------------------------------------------------------------------------
 
-def vault_checkpoint_create(label: str) -> Optional[str]:
-    """Stash uncommitted vault/ changes before a routine runs.
+_CHECKPOINT_IGNORE = {".obsidian", ".graphs", "Images", ".DS_Store"}
 
-    Runs git from the repo root targeting vault/ only, so changes to
-    bot code are never stashed. Returns the stash ref ("stash@{0}") or
-    None when there are no changes to stash / git not available.
+
+def vault_checkpoint_create(label: str) -> Optional[str]:
+    """Snapshot vault/ to a temp directory before a routine runs.
+
+    Returns the backup directory path, or None on failure (fail-open).
+
+    Previous implementation used ``git stash push -u -- vault/`` which
+    inadvertently restored git-tracked files that the user had deleted
+    (and could lose untracked new files on ``stash drop``).  A plain
+    filesystem copy avoids all git side-effects.
     """
-    repo_root = Path(__file__).resolve().parent
-    if not (repo_root / ".git").is_dir():
+    if not VAULT_DIR.is_dir():
         return None
-    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
-    msg = f"[checkpoint] {label} @ {ts}"
     try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "stash", "push", "-u", "-m", msg, "--", "vault/"],
-            capture_output=True, text=True, timeout=15,
+        backup = tempfile.mkdtemp(prefix="vault-checkpoint-")
+        shutil.copytree(
+            VAULT_DIR,
+            Path(backup) / "vault",
+            ignore=shutil.ignore_patterns(*_CHECKPOINT_IGNORE),
         )
-        if result.returncode != 0:
-            logger.warning("Checkpoint create failed: %s", result.stderr.strip())
-            return None
-        if "No local changes" in result.stdout or "nothing to save" in result.stdout:
-            return None  # clean working tree — nothing to checkpoint
-        logger.info("Checkpoint created for '%s': %s", label, msg)
-        return "stash@{0}"
+        logger.info("Checkpoint created for '%s': %s", label, backup)
+        return backup
     except Exception as exc:
         logger.warning("Checkpoint create error: %s", exc)
         return None
 
 
-def vault_checkpoint_restore(stash_ref: str) -> bool:
-    """Pop a vault checkpoint to roll back failed routine changes."""
-    repo_root = Path(__file__).resolve().parent
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_root), "stash", "pop", stash_ref],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0:
-            logger.info("Checkpoint restored: %s", stash_ref)
-            return True
-        logger.error("Checkpoint restore failed: %s", result.stderr.strip())
+def vault_checkpoint_restore(backup_path: str) -> bool:
+    """Restore vault/ from a filesystem snapshot (rollback on failure)."""
+    snapshot = Path(backup_path) / "vault"
+    if not snapshot.is_dir():
+        logger.error("Checkpoint restore failed: snapshot not found at %s", backup_path)
         return False
+    try:
+        # Walk current vault and restore each file from the snapshot.
+        # 1) Restore files that existed before the routine (overwrite changes).
+        for src_file in snapshot.rglob("*"):
+            if src_file.is_dir():
+                continue
+            rel = src_file.relative_to(snapshot)
+            dst = VAULT_DIR / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_file, dst)
+
+        # 2) Remove files created during the routine (not in snapshot).
+        for dst_file in VAULT_DIR.rglob("*"):
+            if dst_file.is_dir():
+                continue
+            if dst_file.name in _CHECKPOINT_IGNORE:
+                continue
+            # Skip ignored top-level directories
+            try:
+                top = dst_file.relative_to(VAULT_DIR).parts[0]
+            except (IndexError, ValueError):
+                continue
+            if top in _CHECKPOINT_IGNORE:
+                continue
+            if not (snapshot / dst_file.relative_to(VAULT_DIR)).exists():
+                dst_file.unlink(missing_ok=True)
+
+        logger.info("Checkpoint restored from %s", backup_path)
+        shutil.rmtree(backup_path, ignore_errors=True)
+        return True
     except Exception as exc:
         logger.error("Checkpoint restore error: %s", exc)
         return False
 
 
-def vault_checkpoint_drop(stash_ref: str) -> None:
-    """Drop a checkpoint after a successful routine (keeps stash list clean)."""
-    repo_root = Path(__file__).resolve().parent
+def vault_checkpoint_drop(backup_path: str) -> None:
+    """Discard a checkpoint after a successful routine."""
     try:
-        subprocess.run(
-            ["git", "-C", str(repo_root), "stash", "drop", stash_ref],
-            capture_output=True, timeout=10,
-        )
+        shutil.rmtree(backup_path, ignore_errors=True)
     except Exception:
         pass
 
