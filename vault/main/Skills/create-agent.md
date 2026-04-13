@@ -250,13 +250,11 @@ This regenerates all vault marker blocks AND syncs `.obsidian/graph.json` so the
 
 Append to today's `main/Journal/YYYY-MM-DD.md` — mention in plain text (no wikilink to the agent).
 
-### Step 12 — Tell the user to switch agents
+### Step 12 — Auto-switch confirmation
 
-Claude Code cannot invoke bot commands directly — agent switching must be triggered by the user on Telegram. Always include this instruction in the confirmation message:
+The bot automatically switches to the newly created agent after this skill finishes. The session is also reset so the next message runs with the new agent's context, model, and workspace.
 
-> "Para ativar o agente, digite no Telegram: `/agent {id}`"
-
-Do not skip this step. The user will remain on the Main agent until they manually switch.
+You do NOT need to tell the user to manually switch. Just confirm that the agent was created successfully and mention the model that was configured.
 
 ### Step 13 — Suggest next steps
 
