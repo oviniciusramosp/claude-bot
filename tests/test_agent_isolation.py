@@ -10,6 +10,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests._botload import ensure_agent_layout, load_bot_module
 
@@ -250,6 +251,101 @@ class ReactionDispatchOwnership(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["owner_agent"], "crypto-bro")
         self.assertEqual(result["action"]["agent"], "crypto-bro")
+
+
+class RunListKeyboardIsolation(unittest.TestCase):
+    """`_run_list_keyboard()` must only show routines for the current agent."""
+
+    def setUp(self) -> None:
+        self.tmp_root = Path(tempfile.mkdtemp(prefix="cb-iso-run-"))
+        self.home = self.tmp_root / "home"
+        self.vault = self.tmp_root / "vault"
+        self.home.mkdir()
+        self.bot_module = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        ensure_agent_layout(self.vault, "main")
+        ensure_agent_layout(self.vault, "crypto-bro")
+
+        patches = [
+            patch.object(self.bot_module.ClaudeTelegramBot, "_start_control_server", lambda self: None),
+            patch.object(self.bot_module.ClaudeTelegramBot, "_start_webhook_server", lambda self: None),
+            patch.object(
+                self.bot_module.ClaudeTelegramBot,
+                "_check_voice_tools",
+                lambda self: {"can_transcribe": False, "ffmpeg": "", "hear": ""},
+            ),
+            patch.object(
+                self.bot_module.ClaudeTelegramBot,
+                "_check_tts_tools",
+                lambda self: {"can_synthesize": False, "edge_tts": "", "say": "", "ffmpeg": ""},
+            ),
+            patch.object(self.bot_module.RoutineScheduler, "start", lambda self: None),
+            patch.object(self.bot_module.RoutineScheduler, "stop", lambda self: None),
+        ]
+        for p in patches:
+            p.start()
+        self._patches = patches
+        self.bot = self.bot_module.ClaudeTelegramBot()
+        self.sent: list[str] = []
+        self.markups: list[dict] = []
+
+        def fake_tg_request(method, data=None, timeout=15):
+            if method == "sendMessage" and data:
+                self.sent.append(data.get("text", ""))
+                if "reply_markup" in data:
+                    self.markups.append(data["reply_markup"])
+            return {"ok": True, "result": {"message_id": len(self.sent)}}
+
+        self.bot.tg_request = fake_tg_request
+
+    def tearDown(self) -> None:
+        for p in self._patches:
+            p.stop()
+
+    def _write_routine(self, agent: str, name: str) -> Path:
+        p = self.vault / agent / "Routines" / f"{name}.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            "---\n"
+            f"title: {name}\n"
+            "description: test\n"
+            "type: routine\n"
+            "created: 2026-04-13\n"
+            "updated: 2026-04-13\n"
+            "tags: [routine]\n"
+            "schedule:\n"
+            "  times: [\"08:00\"]\n"
+            "  days: [\"*\"]\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        return p
+
+    def _button_names(self) -> set[str]:
+        if not self.markups:
+            return set()
+        return {row[0]["text"] for row in self.markups[-1]["inline_keyboard"]}
+
+    def test_main_agent_only_sees_main_routines(self) -> None:
+        self._write_routine("main", "daily-summary")
+        self._write_routine("crypto-bro", "trade-check")
+        session = self.bot._get_session()
+        session.agent = "main"
+        self.bot._run_list_keyboard()
+        names = self._button_names()
+        self.assertTrue(any("daily-summary" in n for n in names), names)
+        self.assertFalse(any("trade-check" in n for n in names), names)
+
+    def test_named_agent_only_sees_own_routines(self) -> None:
+        self._write_routine("main", "daily-summary")
+        self._write_routine("crypto-bro", "trade-check")
+        session = self.bot._get_session()
+        session.agent = "crypto-bro"
+        self.bot._run_list_keyboard()
+        names = self._button_names()
+        self.assertTrue(any("trade-check" in n for n in names), names)
+        self.assertFalse(any("daily-summary" in n for n in names), names)
 
 
 if __name__ == "__main__":

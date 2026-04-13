@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.11.0"  # feat: manual pipeline steps with web review editor
+BOT_VERSION = "3.12.1"  # fix: /run filters routines by current agent
 
 import hmac
 import hashlib
@@ -72,6 +72,14 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("ZAI_API_KEY", _v)
             elif _k == "ZAI_BASE_URL":
                 os.environ.setdefault("ZAI_BASE_URL", _v)
+            elif _k == "MODEL_FALLBACK_CHAIN":
+                os.environ.setdefault("MODEL_FALLBACK_CHAIN", _v)
+# Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
+MODEL_FALLBACK_CHAIN = [
+    m.strip() for m in
+    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,glm-5.1,sonnet,glm-4.7,haiku").split(",")
+    if m.strip()
+]
 def _detect_claude_path() -> str:
     """Locate the claude CLI binary. Checks env var, then common install paths."""
     env_path = os.environ.get("CLAUDE_PATH")
@@ -307,6 +315,15 @@ MODEL_PROVIDERS = {
     "glm-4.5-air": "zai",
 }
 DEFAULT_MODEL = "sonnet"
+
+# Model fallback chain — when a model fails after retries, try the next model.
+# Configurable via MODEL_FALLBACK_CHAIN env var (comma-separated model IDs).
+DEFAULT_FALLBACK_CHAIN = ["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"]
+MODEL_FALLBACK_CHAIN: List[str] = [
+    m.strip() for m in
+    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,glm-5.1,sonnet,glm-4.7,haiku").split(",")
+    if m.strip()
+]
 
 def model_provider(model: str) -> str:
     """Returns 'zai' for GLM models, 'anthropic' otherwise. Prefix fallback
@@ -3025,6 +3042,27 @@ def classify_error(raw: str) -> ErrorKind:
 def get_recovery_plan(kind: ErrorKind) -> tuple:
     """Return (action, backoff_seconds, max_attempts) for an ErrorKind."""
     return _RECOVERY_MAP.get(kind, (RecoveryAction.ABORT, 0, 0))
+
+
+def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str]:
+    """Return the next model in MODEL_FALLBACK_CHAIN after failed_model, or None.
+
+    Skips GLM models when ZAI_API_KEY is not set.
+    Skips same-provider models for AUTH/CREDIT errors (provider-wide failure).
+    """
+    if failed_model not in MODEL_FALLBACK_CHAIN:
+        return None
+    idx = MODEL_FALLBACK_CHAIN.index(failed_model)
+    failed_provider = model_provider(failed_model)
+    skip_provider = failed_provider if error_kind in (ErrorKind.AUTH, ErrorKind.CREDIT) else None
+
+    for candidate in MODEL_FALLBACK_CHAIN[idx + 1:]:
+        if model_provider(candidate) == "zai" and not ZAI_API_KEY:
+            continue
+        if skip_provider and model_provider(candidate) == skip_provider:
+            continue
+        return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -6830,7 +6868,10 @@ class ClaudeTelegramBot:
             return
 
         name = arg.replace(".md", "").strip()
-        md_file = _find_routine_file(name)
+        session = self._get_session()
+        current_agent = (session.agent if session else None) or MAIN_AGENT_ID
+        _agent_candidate = routines_dir(current_agent) / f"{name}.md"
+        md_file = _agent_candidate if _agent_candidate.is_file() else _find_routine_file(name)
 
         if md_file is None:
             self.send_message(f"❌ Rotina `{name}` não encontrada.")
@@ -6878,10 +6919,19 @@ class ClaudeTelegramBot:
             self.send_message(f"🚀 Rotina `{name}` disparada manualmente.")
 
     def _run_list_keyboard(self) -> None:
-        """Show inline keyboard with all available routines/pipelines."""
-        routine_files = _iter_routine_files()
+        """Show inline keyboard with routines/pipelines for the current agent."""
+        session = self._get_session()
+        current_agent = (session.agent if session else None) or MAIN_AGENT_ID
+        rdir = routines_dir(current_agent)
+        if not rdir.is_dir():
+            self.send_message(f"❌ Nenhuma rotina disponível para `{current_agent}`.")
+            return
+        routine_files = sorted(
+            f for f in rdir.glob("*.md")
+            if f.name not in SUB_INDEX_FILENAMES_SET
+        )
         if not routine_files:
-            self.send_message("❌ Nenhuma rotina disponível.")
+            self.send_message(f"❌ Nenhuma rotina disponível para `{current_agent}`.")
             return
 
         buttons = []
@@ -6902,11 +6952,11 @@ class ClaudeTelegramBot:
             }])
 
         if not buttons:
-            self.send_message("❌ Nenhuma rotina disponível.")
+            self.send_message(f"❌ Nenhuma rotina disponível para `{current_agent}`.")
             return
 
         markup = {"inline_keyboard": buttons}
-        self.send_message("🚀 *Executar rotina/pipeline manualmente:*", reply_markup=markup)
+        self.send_message(f"🚀 *Executar rotina/pipeline manualmente ({current_agent}):*", reply_markup=markup)
 
     # -- Skill commands --
 
@@ -7555,6 +7605,7 @@ class ClaudeTelegramBot:
             session.workspace = new_ws
 
     def _run_claude_prompt(self, prompt: str, _retry: int = 0, *,
+                          _fallback_model: Optional[str] = None,
                           no_output_timeout: int = 90,
                           max_total_timeout: int = 3600,
                           inactivity_timeout: Optional[int] = None,
@@ -7694,7 +7745,7 @@ class ClaudeTelegramBot:
 
         # All paths use the same session/model/effort
         effective_session_id = session.session_id
-        effective_model = session.model
+        effective_model = _fallback_model or session.model
         effective_effort = self.effort
 
         # Start runner thread FIRST — before any blocking network I/O
@@ -7738,7 +7789,9 @@ class ClaudeTelegramBot:
         # Stream updates while runner is active
         self._stream_updates(runner_thread, runner, routine_mode=routine_mode)
 
-        # Auto-recovery: classify error and retry up to max_attempts
+        # Auto-recovery — two phases:
+        # Phase 1: retry same model with backoff (existing behavior)
+        # Phase 2: fall back to next model in MODEL_FALLBACK_CHAIN
         if runner.exit_code not in (0, 130, 2) and prompt is not None:
             raw_error = runner.stderr_text or runner.error_text or ""
             # When exit_code signals failure but error/stderr are empty,
@@ -7748,6 +7801,8 @@ class ClaudeTelegramBot:
             if raw_error:
                 kind = classify_error(raw_error)
                 action, backoff, max_attempts = get_recovery_plan(kind)
+
+                # Phase 1: retry same model
                 if action != RecoveryAction.ABORT and _retry < max_attempts:
                     scaled_backoff = backoff * (_retry + 1)
                     logger.info(
@@ -7763,6 +7818,7 @@ class ClaudeTelegramBot:
                     self._run_claude_prompt(
                         prompt,
                         _retry=_retry + 1,
+                        _fallback_model=_fallback_model,
                         no_output_timeout=no_output_timeout,
                         max_total_timeout=max_total_timeout,
                         inactivity_timeout=inactivity_timeout,
@@ -7772,6 +7828,33 @@ class ClaudeTelegramBot:
                         suppress_text=suppress_text,
                     )
                     return
+
+                # Phase 2: model fallback — CONTEXT_TOO_LONG is a context issue, not a model issue
+                if kind != ErrorKind.CONTEXT_TOO_LONG:
+                    current_model = _fallback_model or session.model
+                    next_model = get_fallback_model(current_model, kind)
+                    if next_model:
+                        logger.info(
+                            "Model fallback: %s failed (%s), trying %s",
+                            current_model, kind.value, next_model,
+                        )
+                        self.send_message(
+                            f"⚠️ *Fallback:* `{current_model}` falhou ({kind.value}). "
+                            f"Tentando `{next_model}`..."
+                        )
+                        self._run_claude_prompt(
+                            prompt,
+                            _retry=0,
+                            _fallback_model=next_model,
+                            no_output_timeout=no_output_timeout,
+                            max_total_timeout=max_total_timeout,
+                            inactivity_timeout=inactivity_timeout,
+                            routine_mode=routine_mode,
+                            system_prompt=system_prompt,
+                            force_tts=force_tts,
+                            suppress_text=suppress_text,
+                        )
+                        return
 
         # Finalize
         self._finalize_response(session, runner, prompt=prompt if not _retry else None,
@@ -7985,7 +8068,7 @@ class ClaudeTelegramBot:
             if stream_msg:
                 self.edit_message(stream_msg, "⚠️ _Sessão expirada. Iniciando nova sessão..._")
                 self._active_msgs.unregister(stream_msg)
-            self._run_claude_prompt(prompt, _retry=1)
+            self._run_claude_prompt(prompt, _retry=1, _fallback_model=None)
             return
 
         # Build final response
