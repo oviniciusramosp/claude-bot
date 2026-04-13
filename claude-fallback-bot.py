@@ -2927,6 +2927,7 @@ class ClaudeRunner:
         self.last_activity: float = 0.0
         self.start_time: float = 0.0
         self.accumulated_text: str = ""
+        self.accumulated_thinking: str = ""
         self.result_text: str = ""
         self.tool_log: List[str] = []  # running log of tool calls
         self.cost_usd: float = 0.0
@@ -2975,6 +2976,7 @@ class ClaudeRunner:
         self.start_time = time.time()
         self.last_activity = time.time()
         self.accumulated_text = ""
+        self.accumulated_thinking = ""
         self.result_text = ""
         self.tool_log = []
         self.cost_usd = 0.0
@@ -3107,6 +3109,11 @@ class ClaudeRunner:
                         self.activity_type = "text"
                 elif btype == "thinking":
                     with self._lock:
+                        thinking_text = block.get("thinking", "")
+                        if thinking_text:
+                            if self.accumulated_thinking:
+                                self.accumulated_thinking += "\n"
+                            self.accumulated_thinking += thinking_text
                         self.activity_type = "thinking"
                         self.last_activity = time.time()
                 elif btype == "tool_use":
@@ -3193,6 +3200,15 @@ class ClaudeRunner:
                 # No text yet — show tool activity
                 return "\n".join(self.tool_log[-10:])
             return ""
+
+    def get_thinking_snapshot(self, max_chars: int = 1500) -> str:
+        with self._lock:
+            t = self.accumulated_thinking
+            if not t:
+                return ""
+            if len(t) > max_chars:
+                return "...\n" + t[-max_chars:]
+            return t
 
 
 # ---------------------------------------------------------------------------
@@ -3386,6 +3402,7 @@ class ThreadContext:
     last_edit_time: float = 0.0
     last_typing_time: float = 0.0
     last_snapshot_len: int = 0
+    _last_thinking_len: int = 0
     tts_enabled: bool = False
     _auto_agent: Optional[str] = None  # agent ID set by auto-routing (None = manual or unset)
     _manual_override: bool = False  # True when user explicitly switched agent in this context
@@ -4363,6 +4380,7 @@ class ClaudeTelegramBot:
         # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
         self._pending_approvals: Dict[str, dict] = {}
         self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
+        self._reasoning_toggles: Dict[int, bool] = {}  # stream_msg_id → show reasoning
         # Tracks mtime of today's journal at session start, per session name.
         # Used to detect journal updates mid-session and nudge Claude without breaking prefix cache.
         self._journal_mtimes: Dict[str, float] = {}
@@ -5126,7 +5144,8 @@ class ClaudeTelegramBot:
         return last_msg_id
 
     def edit_message(self, message_id: int, text: str, parse_mode: str = "MarkdownV2",
-                     chat_id: Optional[str] = None) -> bool:
+                     chat_id: Optional[str] = None,
+                     reply_markup: Optional[Dict] = None) -> bool:
         if not text.strip():
             return False
         if parse_mode == "MarkdownV2":
@@ -5138,6 +5157,8 @@ class ClaudeTelegramBot:
         data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
             data["parse_mode"] = parse_mode
+        if reply_markup:
+            data["reply_markup"] = reply_markup
         resp = self._tg_edit(data)
         if resp:
             return True
@@ -7286,11 +7307,16 @@ class ClaudeTelegramBot:
             self.sessions.save()
         if not _retry and not routine_mode:
             if ctx:
+                reasoning_markup = {"inline_keyboard": [[
+                    {"text": "🧠 Reasoning", "callback_data": "reasoning:toggle"}
+                ]]}
                 ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
-                                                       reply_to_message_id=ctx.user_msg_id)
+                                                       reply_to_message_id=ctx.user_msg_id,
+                                                       reply_markup=reasoning_markup)
                 if ctx.stream_msg_id:
                     self._active_msgs.register(ctx.stream_msg_id, ctx.chat_id,
                                                ctx.thread_id, "stream", "interactive")
+                    self._reasoning_toggles[ctx.stream_msg_id] = False
 
         # Start watchdog thread
         watchdog_thread = threading.Thread(
@@ -7411,6 +7437,38 @@ class ClaudeTelegramBot:
                 self.send_message(f"⏰ Timeout — Claude rodou por {int(elapsed_total//60)}min e está inativo. Cancelando...")
                 runner.cancel()
                 break
+
+    def _reasoning_button_markup(self, stream_msg_id: int) -> Dict:
+        is_on = self._reasoning_toggles.get(stream_msg_id, False)
+        label = "🧠 Reasoning ✓" if is_on else "🧠 Reasoning"
+        return {"inline_keyboard": [[
+            {"text": label, "callback_data": "reasoning:toggle"}
+        ]]}
+
+    def _build_stream_display(self, snapshot: str, runner: "ClaudeRunner",
+                              stream_msg_id: int, elapsed: int,
+                              show_reasoning: bool) -> str:
+        parts: List[str] = []
+        reasoning_chars = 0
+        if show_reasoning:
+            thinking = runner.get_thinking_snapshot(max_chars=1500)
+            if thinking:
+                quoted = "\n".join(f"> {line}" for line in thinking.split("\n"))
+                reasoning_block = f"> 🧠 *Reasoning:*\n{quoted}"
+                parts.append(reasoning_block)
+                reasoning_chars = len(reasoning_block) + 4  # +4 for separator
+        if snapshot:
+            available = MAX_MESSAGE_LENGTH - 200 - reasoning_chars
+            if available < 500:
+                available = 500  # minimum output space
+            if len(snapshot) > available:
+                snapshot = "...\n" + snapshot[-available:]
+            parts.append(snapshot)
+        parts.append(f"⏳ _Processando... ({elapsed}s)_")
+        display = "\n\n".join(parts)
+        if len(display) > MAX_MESSAGE_LENGTH:
+            display = display[-(MAX_MESSAGE_LENGTH):]
+        return display
 
     def _update_reaction(self, runner: ClaudeRunner) -> None:
         ctx = self._ctx
