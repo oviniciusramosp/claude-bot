@@ -106,6 +106,7 @@ class FrontmatterRepair(unittest.TestCase):
         self.assertIn("title:", text)
         self.assertIn("type: journal", text)
         self.assertIn("created: 2026-04-10", text)
+        self.assertIn("pending:", text)
 
     def test_create_journal_file_has_no_wikilinks(self):
         # Daily journal entries are excluded from the knowledge graph (see
@@ -158,6 +159,24 @@ class FrontmatterRepair(unittest.TestCase):
             self.tmpdir / "myagent" / "Journal" / "2026-04-10.md",
         )
 
+    def test_fix_replaces_generic_description_with_heading_based(self):
+        p = self.tmpdir / "j.md"
+        p.write_text(
+            "---\n"
+            "title: x\n"
+            "type: journal\n"
+            "## 08:00 — Setup vault\n"
+            "- did stuff\n"
+            "## 14:00 — Fix pipeline\n"
+            "- more stuff\n"
+        )
+        self.ja.fix_frontmatter(p, "main", "2026-04-10")
+        text = p.read_text()
+        self.assertNotIn("Daily log", text)
+        # description should be in frontmatter block (before second ---)
+        fm_block = text.split("---")[1]
+        self.assertIn("Setup vault", fm_block)
+
 
 class TimeMatching(unittest.TestCase):
     @classmethod
@@ -183,6 +202,61 @@ class TimeMatching(unittest.TestCase):
         journal_times = ["08:00", "14:00"]
         self.assertTrue(self.ja.is_covered("08:15", journal_times))
         self.assertFalse(self.ja.is_covered("23:00", journal_times))
+
+
+class DescriptionExtraction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ja = _load_script()
+
+    def test_extract_heading_summaries(self):
+        content = "## 08:00 — Setup vault\n- stuff\n## 14:30 — Fix pipeline\nbody"
+        summaries = self.ja.extract_heading_summaries(content)
+        self.assertEqual(summaries, ["Setup vault", "Fix pipeline"])
+
+    def test_extract_heading_summaries_empty(self):
+        self.assertEqual(self.ja.extract_heading_summaries("no headings here"), [])
+
+    def test_is_generic_description_true(self):
+        for desc in [
+            "Daily log for 2026-04-09.",
+            '"Daily log for 2026-04-09."',
+            "Registro de atividades do main em 2026-04-09.",
+            "Registro do dia 2026-04-09.",
+            "Activities for main on 2026-04-09.",
+            "pending: no entries yet",
+            "2026-04-09 session log",
+            "",
+        ]:
+            with self.subTest(desc=desc):
+                self.assertTrue(self.ja.is_generic_description(desc), f"Expected generic: {desc!r}")
+
+    def test_is_generic_description_false(self):
+        for desc in [
+            "Pipeline polish - friendly source names, Telegram notify fix.",
+            "Operational skills library created, pipeline step migrations.",
+            "Threads eval injection validated — 15 posts via HTTP API.",
+        ]:
+            with self.subTest(desc=desc):
+                self.assertFalse(self.ja.is_generic_description(desc), f"Expected NOT generic: {desc!r}")
+
+    def test_build_description_from_headings(self):
+        summaries = ["Setup vault", "Fix pipeline", "Test deploy"]
+        desc = self.ja.build_description_from_headings(summaries)
+        self.assertEqual(desc, "Setup vault, Fix pipeline, Test deploy")
+
+    def test_build_description_deduplicates(self):
+        summaries = ["Setup vault", "setup vault", "Fix pipeline"]
+        desc = self.ja.build_description_from_headings(summaries)
+        self.assertEqual(desc, "Setup vault, Fix pipeline")
+
+    def test_build_description_truncates(self):
+        summaries = [f"Topic number {i} with a long description text" for i in range(20)]
+        desc = self.ja.build_description_from_headings(summaries)
+        self.assertLessEqual(len(desc), 200)
+
+    def test_build_description_empty(self):
+        self.assertEqual(self.ja.build_description_from_headings([]), "")
 
 
 class FullAuditReport(unittest.TestCase):

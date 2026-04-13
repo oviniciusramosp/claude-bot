@@ -283,7 +283,7 @@ def vault_append_journal(text: str, agent_id: Optional[str] = None) -> Dict[str,
         header = (
             f"---\n"
             f'title: "Journal {today}"\n'
-            f'description: "Daily log for {today}."\n'
+            f'description: "pending: no entries yet"\n'
             f"type: journal\n"
             f"created: {today}\n"
             f"updated: {today}\n"

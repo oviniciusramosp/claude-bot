@@ -115,6 +115,14 @@ tags: [topic1, topic2]
 
 The `description` field is required and functions as a semantic index. It must contain enough context to decide whether the file needs to be read in full or not.
 
+**Journal descriptions** require special care — they are the primary signal for LLMs scanning which days are relevant:
+- MUST be English, keyword-rich, verb-forward or noun-forward
+- List 2-4 concrete topics, separated by commas
+- Update the description as entries are added throughout the day
+- GOOD: `Pipeline polish - friendly source names, GE/Lance images, Telegram notify fix.`
+- GOOD: `Threads eval injection validated — 15 posts via HTTP API, fetch_threads.py rewritten.`
+- BAD (banned): `Daily log for DATE`, `Registro de atividades`, `Activities for`, anything starting with a date or agent name
+
 **Exempt from frontmatter** (by design):
 - `Agents/<id>/agent.md` — metadata is the frontmatter; body is empty
 - `Agents/<id>/CLAUDE.md` — instructions for Claude Code, no frontmatter

@@ -36,7 +36,15 @@ Write to `Journal/YYYY-MM-DD.md` DURING the conversation, not at the end. Append
 
 **Journal entries carry NO wikilinks.** They are excluded from the knowledge graph (see the ephemeral-files rule in `../CLAUDE.md`). Mention files in plain text: `see fetch-web.md for details` — don't link them.
 
-When CREATING a new journal file, always include proper YAML frontmatter with BOTH opening AND closing `---` delimiters. The `description` field must summarize the actual content — never use a generic placeholder like "Daily log for DATE".
+When CREATING a new journal file, always include proper YAML frontmatter with BOTH opening AND closing `---` delimiters.
+
+**Journal `description` rules** (critical for LLM scanning):
+- MUST be English, keyword-rich, verb-forward or noun-forward
+- List 2-4 concrete topics covered in the file, separated by commas
+- Update the description as you add entries throughout the day
+- GOOD: `Pipeline polish - friendly source names, GE/Lance images, Telegram notify fix.`
+- GOOD: `Operational skills library created, pipeline step migrations, date filter fixes.`
+- BAD (banned): `Daily log for DATE`, `Registro de atividades`, `Activities for`, anything starting with a date or agent name
 
 ### Skills
 Skills live under `Skills/` in this folder. Each `.md` has:

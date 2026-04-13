@@ -117,7 +117,7 @@ def get_journal_path(vault: Path, agent: str, target_date: str) -> Path:
 JOURNAL_TEMPLATE = """\
 ---
 title: "Journal {date}"
-description: Daily log for {date}.
+description: "pending: no entries yet"
 type: journal
 created: {date}
 updated: {date}
@@ -215,7 +215,14 @@ def fix_frontmatter(path: Path, agent: str, target_date: str) -> str:
 
     tags = "journal" if agent == "main" else f"journal, {agent}"
     fm_dict.setdefault("title", f'"Journal {target_date}"')
-    fm_dict.setdefault("description", f"Daily log for {target_date}.")
+    current_desc = fm_dict.get("description", "")
+    if not current_desc or is_generic_description(current_desc):
+        summaries = extract_heading_summaries("\n".join(body_lines))
+        auto_desc = build_description_from_headings(summaries)
+        if auto_desc:
+            fm_dict["description"] = auto_desc
+        elif not current_desc:
+            fm_dict["description"] = '"pending: no entries yet"'
     fm_dict.setdefault("type", "journal")
     fm_dict.setdefault("created", target_date)
     fm_dict.setdefault("updated", target_date)
@@ -254,6 +261,48 @@ def fix_frontmatter(path: Path, agent: str, target_date: str) -> str:
 def extract_entry_times(content: str) -> list[str]:
     """Extract HH:MM timestamps from journal entry headers (## HH:MM — ...)."""
     return re.findall(r"^##\s+(\d{2}:\d{2})\s+—", content, re.MULTILINE)
+
+
+GENERIC_DESC_PATTERNS = [
+    re.compile(r"^Daily (log|journal)\b", re.IGNORECASE),
+    re.compile(r"^Registro d[eo]\b", re.IGNORECASE),
+    re.compile(r"^Activities for\b", re.IGNORECASE),
+    re.compile(r"^Journal (belonging to|entries for)\b", re.IGNORECASE),
+    re.compile(r"^pending:", re.IGNORECASE),
+    re.compile(r"^\d{4}-\d{2}-\d{2}"),
+]
+
+
+def is_generic_description(desc: str) -> bool:
+    """Return True if the description is a known generic placeholder."""
+    if not desc:
+        return True
+    desc = desc.strip().strip('"').strip("'")
+    if not desc:
+        return True
+    return any(p.search(desc) for p in GENERIC_DESC_PATTERNS)
+
+
+def extract_heading_summaries(content: str) -> list[str]:
+    """Extract summary text from journal entry headers (## HH:MM — Summary)."""
+    return re.findall(r"^##\s+\d{2}:\d{2}\s+—\s+(.+)", content, re.MULTILINE)
+
+
+def build_description_from_headings(summaries: list[str]) -> str:
+    """Build a description string from extracted heading summaries."""
+    if not summaries:
+        return ""
+    seen: set[str] = set()
+    unique: list[str] = []
+    for s in summaries:
+        key = s.strip().lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(s.strip())
+    desc = ", ".join(unique)
+    if len(desc) > 200:
+        desc = desc[:200].rsplit(",", 1)[0]
+    return desc
 
 
 def time_close(t1: str, t2: str, tolerance_min: int = 30) -> bool:
@@ -460,6 +509,24 @@ def fix_all(vault: Path, target_date: str, entries: list[dict]) -> list[str]:
                     f"FIXED {journal_path.relative_to(vault)}: {result} "
                     f"(was: {'; '.join(fm_issues)})"
                 )
+            else:
+                # Fix generic descriptions on otherwise-valid files
+                desc_match = re.search(r"^description:\s*(.+)$", content, re.MULTILINE)
+                if desc_match and is_generic_description(desc_match.group(1)):
+                    summaries = extract_heading_summaries(content)
+                    auto_desc = build_description_from_headings(summaries)
+                    if auto_desc:
+                        new_content = re.sub(
+                            r"^description:\s*.+$",
+                            f"description: {auto_desc}",
+                            content,
+                            count=1,
+                            flags=re.MULTILINE,
+                        )
+                        journal_path.write_text(new_content, encoding="utf-8")
+                        actions.append(
+                            f"UPDATED description {journal_path.relative_to(vault)}"
+                        )
 
     return actions
 

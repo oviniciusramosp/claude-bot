@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.12.2"  # fix: vault checkpoint uses filesystem snapshot instead of git stash
+BOT_VERSION = "3.12.3"  # fix: improve journal description quality (auto-extract from headings)
 
 import hmac
 import hashlib
@@ -660,8 +660,14 @@ SYSTEM_PROMPT = (
     "If an agent is active, use the agent's own Journal/ directory instead. "
     "Journal entries are append-only — never overwrite existing content.\n"
     "When CREATING a new journal file, always include proper YAML frontmatter with BOTH "
-    "opening AND closing `---` delimiters. The `description` field must summarize the actual "
-    "content — never use a generic placeholder like 'Daily log for DATE'. "
+    "opening AND closing `---` delimiters.\n"
+    "**Journal `description` rules** (critical for LLM scanning):\n"
+    "- MUST be English, keyword-rich, verb-forward or noun-forward\n"
+    "- List 2-4 concrete topics covered in the file, separated by commas\n"
+    "- Update the description as you add entries throughout the day\n"
+    "- GOOD: `Pipeline polish - friendly source names, GE/Lance images, Telegram notify fix.`\n"
+    "- GOOD: `Operational skills library created, pipeline step migrations, date filter fixes.`\n"
+    "- BAD (banned): `Daily log for DATE`, `Registro de atividades`, `Activities for`, anything starting with a date or agent name\n"
     "\n\n"
     "## Bot Commands — USE THESE instead of doing things manually\n"
     "You are running inside a Telegram bot that has its own command system. "
