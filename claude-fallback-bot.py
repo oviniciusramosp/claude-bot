@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.10.0"  # feat: reasoning toggle — show Claude's thinking via inline button during processing
+BOT_VERSION = "3.10.1"  # fix: z.AI 429 retry — exponential backoff (90s/180s), 2 attempts, detect errors in result_text for routines
 
 import hmac
 import hashlib
@@ -2871,7 +2871,7 @@ class RecoveryAction(Enum):
 # (action, backoff_seconds, max_attempts)
 _RECOVERY_MAP: Dict[ErrorKind, tuple] = {
     ErrorKind.OVERLOADED:        (RecoveryAction.BACKOFF_RETRY,       30, 1),
-    ErrorKind.RATE_LIMIT:        (RecoveryAction.BACKOFF_RETRY,       90, 1),
+    ErrorKind.RATE_LIMIT:        (RecoveryAction.BACKOFF_RETRY,       90, 2),
     ErrorKind.CONTEXT_TOO_LONG:  (RecoveryAction.RETRY_AFTER_COMPACT,  0, 1),
     ErrorKind.TIMEOUT:           (RecoveryAction.RETRY,                5, 1),
     ErrorKind.CONNECTION:        (RecoveryAction.RETRY,                5, 1),
@@ -7161,7 +7161,7 @@ class ClaudeTelegramBot:
                         session.name, session.workspace, new_ws)
             session.workspace = new_ws
 
-    def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
+    def _run_claude_prompt(self, prompt: str, _retry: int = 0, *,
                           no_output_timeout: int = 90,
                           max_total_timeout: int = 3600,
                           inactivity_timeout: Optional[int] = None,
@@ -7345,8 +7345,8 @@ class ClaudeTelegramBot:
         # Stream updates while runner is active
         self._stream_updates(runner_thread, runner, routine_mode=routine_mode)
 
-        # Auto-recovery: classify error and retry if possible (first attempt only)
-        if not _retry and runner.exit_code not in (0, 130, 2) and prompt is not None:
+        # Auto-recovery: classify error and retry up to max_attempts
+        if runner.exit_code not in (0, 130, 2) and prompt is not None:
             raw_error = runner.stderr_text or runner.error_text or ""
             # When exit_code signals failure but error/stderr are empty,
             # check result_text — some providers (e.g. z.AI) put API errors in stdout
@@ -7354,21 +7354,22 @@ class ClaudeTelegramBot:
                 raw_error = runner.result_text
             if raw_error:
                 kind = classify_error(raw_error)
-                action, backoff, _ = get_recovery_plan(kind)
-                if action != RecoveryAction.ABORT:
+                action, backoff, max_attempts = get_recovery_plan(kind)
+                if action != RecoveryAction.ABORT and _retry < max_attempts:
+                    scaled_backoff = backoff * (_retry + 1)
                     logger.info(
-                        "Auto-recovery: kind=%s action=%s backoff=%ds",
-                        kind.value, action.value, backoff,
+                        "Auto-recovery: kind=%s action=%s backoff=%ds attempt=%d/%d",
+                        kind.value, action.value, scaled_backoff, _retry + 1, max_attempts,
                     )
-                    self.send_message(f"🔄 _{kind.value} — tentando recuperar automaticamente..._")
+                    self.send_message(f"🔄 _{kind.value} — tentando recuperar automaticamente ({_retry + 1}/{max_attempts})..._")
                     if action == RecoveryAction.RETRY_AFTER_COMPACT:
                         self._auto_compact(session)
                         time.sleep(3)
-                    if backoff > 0:
-                        time.sleep(backoff)
+                    if scaled_backoff > 0:
+                        time.sleep(scaled_backoff)
                     self._run_claude_prompt(
                         prompt,
-                        _retry=True,
+                        _retry=_retry + 1,
                         no_output_timeout=no_output_timeout,
                         max_total_timeout=max_total_timeout,
                         inactivity_timeout=inactivity_timeout,
@@ -7591,7 +7592,7 @@ class ClaudeTelegramBot:
             if stream_msg:
                 self.edit_message(stream_msg, "⚠️ _Sessão expirada. Iniciando nova sessão..._")
                 self._active_msgs.unregister(stream_msg)
-            self._run_claude_prompt(prompt, _retry=True)
+            self._run_claude_prompt(prompt, _retry=1)
             return
 
         # Build final response
@@ -7788,6 +7789,15 @@ class ClaudeTelegramBot:
                                     force_tts=task.voice or inline_tts)
             # Check if there was an error or cancellation
             runner = self.runner
+            # z.AI puts API errors in result_text (stdout), not error_text.
+            # Mirror the fallback from _run_claude_prompt auto-recovery.
+            effective_error = runner.error_text
+            if (not effective_error
+                    and runner.exit_code not in (None, 0, 130)
+                    and runner.result_text):
+                kind = classify_error(runner.result_text)
+                if kind != ErrorKind.UNKNOWN:
+                    effective_error = runner.result_text
             if runner.exit_code == 130:
                 # Manually cancelled — restore checkpoint
                 if checkpoint_ref:
@@ -7795,16 +7805,16 @@ class ClaudeTelegramBot:
                 self.routine_state.set_status(task.name, task.time_slot, "cancelled")
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"🛑 Rotina *{task.name}* cancelada.")
-            elif runner.error_text:
+            elif effective_error:
                 # Error — restore checkpoint
                 if checkpoint_ref:
                     vault_checkpoint_restore(checkpoint_ref)
-                self.routine_state.set_status(task.name, task.time_slot, "failed", runner.error_text[:200])
+                self.routine_state.set_status(task.name, task.time_slot, "failed", effective_error[:200])
                 if progress_msg_id:
-                    self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {runner.error_text[:200]}")
+                    self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {effective_error[:200]}")
                 # Compound engineering: draft a lesson from this failure
                 lesson_path = record_lesson_draft(
-                    task.name, runner.error_text, kind="routine",
+                    task.name, effective_error, kind="routine",
                     agent_id=task.agent or MAIN_AGENT_ID,
                 )
                 if lesson_path:

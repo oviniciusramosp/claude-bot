@@ -76,6 +76,13 @@ class RecoveryPlan(unittest.TestCase):
         _, backoff_rate, _ = self.bot.get_recovery_plan(self.bot.ErrorKind.RATE_LIMIT)
         self.assertGreater(backoff_rate, backoff_overloaded)
 
+    def test_rate_limit_allows_two_retries(self):
+        """z.AI rate limits need 2 retry attempts with escalating backoff."""
+        action, backoff, max_attempts = self.bot.get_recovery_plan(self.bot.ErrorKind.RATE_LIMIT)
+        self.assertEqual(action, self.bot.RecoveryAction.BACKOFF_RETRY)
+        self.assertEqual(backoff, 90)
+        self.assertEqual(max_attempts, 2)
+
     def test_context_too_long_triggers_compact(self):
         action, _, _ = self.bot.get_recovery_plan(self.bot.ErrorKind.CONTEXT_TOO_LONG)
         self.assertEqual(action, self.bot.RecoveryAction.RETRY_AFTER_COMPACT)
