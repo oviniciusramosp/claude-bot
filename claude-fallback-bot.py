@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.9.2"  # fix: z.AI 429 errors now trigger auto-retry (error was landing in result_text, bypassing retry logic)
+BOT_VERSION = "3.9.3"  # fix: disambiguate CLI/workspace FileNotFoundError + fix undefined ctx in routine executor
 
 import hmac
 import hashlib
@@ -2949,6 +2949,9 @@ class ClaudeRunner:
         system_prompt: Optional[str] = SYSTEM_PROMPT,
         lightweight: bool = False,  # unused, kept for API compat
     ) -> None:
+        global CLAUDE_PATH
+        if not os.path.isfile(CLAUDE_PATH):
+            CLAUDE_PATH = _detect_claude_path()
         cmd = [
             CLAUDE_PATH,
             "--print",
@@ -3034,7 +3037,12 @@ class ClaudeRunner:
                 self.process.stdin.close()
             self._read_stream()
         except FileNotFoundError:
-            self.error_text = f"❌ Claude CLI não encontrado em {CLAUDE_PATH}"
+            if not os.path.isfile(cmd[0]):
+                self.error_text = f"❌ Claude CLI não encontrado em {cmd[0]}"
+            elif not os.path.isdir(workspace):
+                self.error_text = f"❌ Workspace não encontrado: {workspace}"
+            else:
+                self.error_text = f"❌ Claude CLI não encontrado em {cmd[0]}"
             logger.error(self.error_text)
         except Exception as exc:
             self.error_text = f"❌ Erro ao executar Claude: {exc}"
@@ -7642,6 +7650,7 @@ class ClaudeTelegramBot:
 
     def _execute_routine_task(self, task: RoutineTask) -> None:
         """Execute a scheduled routine with model/agent/workspace override."""
+        ctx = self._ctx
         logger.info("Executing routine: %s (%s, model=%s, agent=%s)", task.name, task.time_slot, task.model, task.agent)
         session = self._get_session()
         original_model = session.model
