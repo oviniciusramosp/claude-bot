@@ -5638,7 +5638,10 @@ class ClaudeTelegramBot:
         if current:
             s.model = current.model
             self.sessions.save()
-        self.send_message(f"✅ Sessão `{s.name}` criada e ativada.")
+        agent_label = s.agent if s.agent != "main" else ""
+        model_label = f" · modelo: `{s.model}`" if s.model else ""
+        agent_suffix = f" · agente: *{agent_label}*" if agent_label else ""
+        self.send_message(f"✅ Sessão `{s.name}` criada e ativada.{agent_suffix}{model_label}")
 
     def cmd_sessions_list(self) -> None:
         items = self.sessions.list()

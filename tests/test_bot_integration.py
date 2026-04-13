@@ -147,6 +147,9 @@ class CommandDispatch(unittest.TestCase):
         new_session = self.bot._get_session()
         self.assertEqual(new_session.agent, "crypto-bro")
         self.assertEqual(new_session.model, "glm-4.7")
+        msg = self._last_send()["text"]
+        self.assertIn("crypto-bro", msg)
+        self.assertIn("glm-4.7", msg)
 
     def test_new_command_with_name_preserves_agent(self):
         """``/new somename`` must also inherit agent and model."""
@@ -158,6 +161,20 @@ class CommandDispatch(unittest.TestCase):
         new_session = self.bot._get_session()
         self.assertEqual(new_session.agent, "parmeirense")
         self.assertEqual(new_session.model, "opus")
+        msg = self._last_send()["text"]
+        self.assertIn("parmeirense", msg)
+        self.assertIn("opus", msg)
+
+    def test_new_command_main_agent_hides_agent_label(self):
+        """``/new`` on main agent should not show agent label."""
+        session = self.bot._get_session()
+        session.agent = "main"
+        session.model = "sonnet"
+        self.bot.sessions.save()
+        self.bot._handle_text("/new")
+        msg = self._last_send()["text"]
+        self.assertNotIn("agente:", msg)
+        self.assertIn("sonnet", msg)
 
     def test_status_command_shows_session_info(self):
         self.bot._get_session()
