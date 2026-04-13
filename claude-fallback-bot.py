@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.9.3"  # fix: disambiguate CLI/workspace FileNotFoundError + fix undefined ctx in routine executor
+BOT_VERSION = "3.10.0"  # feat: reasoning toggle — show Claude's thinking via inline button during processing
 
 import hmac
 import hashlib
@@ -7132,7 +7132,9 @@ class ClaudeTelegramBot:
         ctx = self._ctx
         if ctx and ctx.session_name:
             if ctx.session_name in self.sessions.sessions:
-                return self.sessions.sessions[ctx.session_name]
+                s = self.sessions.sessions[ctx.session_name]
+                self._heal_workspace(s)
+                return s
             # Create session for this context
             s = self.sessions.create(ctx.session_name)
             return s
@@ -7140,9 +7142,24 @@ class ClaudeTelegramBot:
         self.sessions.ensure_active()
         active = self.sessions.active_session
         if active and active in self.sessions.sessions:
-            return self.sessions.sessions[active]
+            s = self.sessions.sessions[active]
+            self._heal_workspace(s)
+            return s
         # Last resort: create a default session
         return self.sessions.create()
+
+    @staticmethod
+    def _heal_workspace(session: "Session") -> None:
+        """Fix stale workspace paths (e.g. pre-v3.1 vault/Agents/<id>/ layout)."""
+        if session.workspace and os.path.isdir(session.workspace):
+            return
+        aid = session.agent or MAIN_AGENT_ID
+        isolated = workspace_dir(aid)
+        new_ws = str(isolated) if isolated.is_dir() else str(agent_base(aid))
+        if new_ws != session.workspace:
+            logger.info("Healed stale workspace for session %s: %s -> %s",
+                        session.name, session.workspace, new_ws)
+            session.workspace = new_ws
 
     def _run_claude_prompt(self, prompt: str, _retry: bool = False, *,
                           no_output_timeout: int = 90,
@@ -7507,32 +7524,32 @@ class ClaudeTelegramBot:
                 elapsed = int(now - runner.start_time)
                 last_edit = ctx.last_edit_time if ctx else 0.0
 
+                reasoning_on = self._reasoning_toggles.get(stream_msg, False)
+                markup = self._reasoning_button_markup(stream_msg)
+                thinking_len = len(runner.accumulated_thinking) if reasoning_on else 0
+                thinking_changed = reasoning_on and thinking_len > (ctx._last_thinking_len if ctx else 0)
+
                 if has_new and not _first_output_notified:
                     _first_output_notified = True
                     logger.info("First output received from Claude")
 
-                if has_new and now - last_edit >= STREAM_EDIT_INTERVAL:
-                    display = snapshot
-                    if len(display) > MAX_MESSAGE_LENGTH - 200:
-                        display = "...\n" + display[-(MAX_MESSAGE_LENGTH - 200):]
-                    display += f"\n\n⏳ _Processando... ({elapsed}s)_"
-                    if len(snapshot) >= len(_last_sent_text):
-                        self.edit_message(stream_msg, display)
+                if (has_new or thinking_changed) and now - last_edit >= STREAM_EDIT_INTERVAL:
+                    display = self._build_stream_display(snapshot, runner, stream_msg, elapsed, reasoning_on)
+                    if len(snapshot) >= len(_last_sent_text) or thinking_changed:
+                        self.edit_message(stream_msg, display, reply_markup=markup)
                         if ctx:
                             ctx.last_edit_time = now
                             ctx.last_snapshot_len = len(snapshot)
+                            ctx._last_thinking_len = thinking_len
                         _last_sent_text = snapshot
 
                 elif now - _last_checkin >= _checkin_interval:
                     _last_checkin = now
                     if snapshot:
-                        display = snapshot
-                        if len(display) > MAX_MESSAGE_LENGTH - 200:
-                            display = "...\n" + display[-(MAX_MESSAGE_LENGTH - 200):]
-                        display += f"\n\n⏳ _Processando... ({elapsed}s)_"
+                        display = self._build_stream_display(snapshot, runner, stream_msg, elapsed, reasoning_on)
                     else:
                         display = f"⏳ _Aguardando resposta do Claude... {elapsed}s_"
-                    self.edit_message(stream_msg, display)
+                    self.edit_message(stream_msg, display, reply_markup=markup)
 
     def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None,
                            routine_mode: bool = False, force_tts: bool = False,
@@ -7644,6 +7661,7 @@ class ClaudeTelegramBot:
         # Unregister the stream message from active tracking (it's finalized now)
         if stream_msg:
             self._active_msgs.unregister(stream_msg)
+            self._reasoning_toggles.pop(stream_msg, None)
 
         # TTS: send voice message if enabled or forced (background, non-blocking)
         if force_tts and ctx:
@@ -7686,6 +7704,7 @@ class ClaudeTelegramBot:
 
         if ctx:
             ctx.stream_msg_id = None
+            ctx._last_thinking_len = 0
             if ctx.user_msg_id:
                 self.set_reaction(ctx.user_msg_id, "")
                 ctx.user_msg_id = None
@@ -8009,6 +8028,32 @@ class ClaudeTelegramBot:
                     self.answer_callback(cb_id)
             else:
                 self.answer_callback(cb_id)
+            return
+
+        # Reasoning toggle: flip visibility without removing keyboard
+        if data == "reasoning:toggle":
+            msg = callback.get("message", {})
+            msg_id = msg.get("message_id")
+            if msg_id and msg_id in self._reasoning_toggles:
+                new_state = not self._reasoning_toggles[msg_id]
+                self._reasoning_toggles[msg_id] = new_state
+                self.answer_callback(cb_id, "🧠 ON" if new_state else "🧠 OFF")
+                # Re-render button immediately with updated label
+                new_label = "🧠 Reasoning ✓" if new_state else "🧠 Reasoning"
+                new_markup = {"inline_keyboard": [[
+                    {"text": new_label, "callback_data": "reasoning:toggle"}
+                ]]}
+                msg_text = msg.get("text", "")
+                if msg_id and msg_text:
+                    self.tg_request("editMessageText", {
+                        "chat_id": self._chat_id,
+                        "message_id": msg_id,
+                        "text": self._sanitize_markdown_v2(msg_text),
+                        "parse_mode": "MarkdownV2",
+                        "reply_markup": new_markup,
+                    })
+            else:
+                self.answer_callback(cb_id, "Expirado")
             return
 
         self._remove_keyboard(callback)
