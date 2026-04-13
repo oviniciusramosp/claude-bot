@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.7.1"  # fix: normalize thread_id to int in routine context routing (prevents duplicate contexts)
+BOT_VERSION = "3.8.0"  # feat: advisor tool — executor models (Sonnet/Haiku/GLM) can consult Opus via scripts/advisor.sh
 
 import hmac
 import hashlib
@@ -274,6 +274,7 @@ HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 # Anthropic. Empty ZAI_API_KEY => GLM models refuse to start (fail-loud).
 ZAI_API_KEY = os.environ.get("ZAI_API_KEY", "")
 ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/anthropic")
+ADVISOR_MODEL = os.environ.get("ADVISOR_MODEL", "opus")  # model consulted by advisor.sh
 
 # TTS (Text-to-Speech) voice response
 TTS_ENGINE = os.environ.get("TTS_ENGINE", "edge-tts")  # "edge-tts" or "say"
@@ -448,6 +449,7 @@ _ACTIVITY_CHAT_ACTION = {
     "tool": "upload_document",
     "searching_files": "upload_document",
     "running_script": "upload_document",
+    "consulting_advisor": "typing",
     "transcribing": "record_voice",
     "synthesizing": "upload_voice",
 }
@@ -460,9 +462,10 @@ _REACTION_MAP = {
     "searching_web":   "👀",
     "searching_files": "👀",
     "reading":         "👀",
-    "running_script":  "👨‍💻",
-    "editing":         "✍️",
-    "transcribing":    "👀",
+    "running_script":      "👨‍💻",
+    "consulting_advisor":  "🧠",
+    "editing":             "✍️",
+    "transcribing":        "👀",
     "synthesizing":    "👀",
 }
 
@@ -2964,7 +2967,10 @@ class ClaudeRunner:
                         self.tool_log.append(entry)
                         if len(self.tool_log) > 200:
                             self.tool_log = self.tool_log[-100:]
-                        self.activity_type = _TOOL_ACTIVITY_MAP.get(tool_name, "tool")
+                        if tool_name == "Bash" and hint and "advisor.sh" in hint:
+                            self.activity_type = "consulting_advisor"
+                        else:
+                            self.activity_type = _TOOL_ACTIVITY_MAP.get(tool_name, "tool")
                         self.last_activity = time.time()
         elif etype == "result":
             self.result_text = obj.get("result", "")
@@ -6764,6 +6770,34 @@ class ClaudeTelegramBot:
                     f"See Skills/ in your workspace for details.</hint>\n\n"
                 )
                 prompt = hint_line + prompt
+
+        # Inject advisor instructions for non-advisor models.
+        # The advisor (scripts/advisor.sh) spawns a fresh Opus session via Bash
+        # for strategic guidance when the executor is stuck or looping.
+        # Available to ALL execution paths (interactive, routines, pipelines) —
+        # any model can get stuck. Only skipped when: retrying, context is
+        # minimal (system_prompt=None), or executor is already the advisor model.
+        if (not _retry
+                and system_prompt is not None
+                and session.model != ADVISOR_MODEL):
+            _advisor_script = Path(__file__).resolve().parent / "scripts" / "advisor.sh"
+            _advisor_block = (
+                "\n\n## Advisor — Strategic Guidance\n"
+                f"You have access to a strategic advisor ({ADVISOR_MODEL}) via Bash. "
+                "Call it when:\n"
+                "- Stuck for more than 2 attempts on the same problem\n"
+                "- Confused by conflicting information or uncertain about approach\n"
+                "- Making a significant architectural decision\n"
+                "- In a loop (same error recurring, approach not converging)\n\n"
+                "Do NOT call it for: simple tasks, when you already know the answer, "
+                "or when making steady progress.\n\n"
+                f"Usage: bash {_advisor_script} \"Your question with full context\"\n\n"
+                "IMPORTANT: Include context in your question — what the user asked, "
+                "what you've tried, what went wrong. "
+                "The advisor cannot see your conversation; it only sees what you pass as the argument.\n\n"
+                "Limit: 5 calls per session. Use them wisely."
+            )
+            effective_sp = (effective_sp + _advisor_block) if effective_sp else _advisor_block
 
         # All paths use the same session/model/effort
         effective_session_id = session.session_id

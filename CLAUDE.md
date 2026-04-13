@@ -98,6 +98,7 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager (macOS app).
 | `CLAUDE_WORKSPACE` | No | `vault/main/` | Working directory for Main sessions (named agents override this with their own folder) |
 | `ZAI_API_KEY` | No | — | z.AI API key — required to use any `glm-*` model. Get one at https://z.ai/manage-apikey |
 | `ZAI_BASE_URL` | No | `https://api.z.ai/api/anthropic` | z.AI's Anthropic-compatible gateway URL (rarely changed) |
+| `ADVISOR_MODEL` | No | `opus` | Model used by `scripts/advisor.sh` when executor models escalate for strategic guidance |
 
 **Edited via:** ClaudeBotManager → Settings, or directly in the file.
 
@@ -373,6 +374,26 @@ The two helpers run in sequence inside `_run_claude_prompt()`:
 1. `_find_relevant_skills()` (via `vault_query`) — appends "## Available Skills" block to the system prompt
 2. `_active_memory_lookup()` — appends "## Active Memory" block to the system prompt
 3. `_select_relevant_skills()` (via graph.json) — prepends `<hint>` to the user prompt
+
+## Advisor (v3.8.0+)
+
+Executor models (Sonnet, Haiku, GLM) can escalate to a strategic advisor (default: Opus) mid-task via `scripts/advisor.sh`. The flow mirrors the Claude API's native `advisor_20260301` tool, implemented at the CLI/Bash level:
+
+1. Executor encounters difficulty (stuck, looping, uncertain about architecture)
+2. Executor calls `bash scripts/advisor.sh "question with full context"` — Bash blocks while the script runs
+3. Script spawns a fresh Claude CLI with `ADVISOR_MODEL` (pure reasoning, `--allowedTools ""`), clearing any GLM proxy env vars first
+4. Advisor returns plain-text guidance as Bash stdout
+5. Executor resumes, informed by the advice
+
+**Key design choices:**
+- `--allowedTools ""` on the advisor: prevents recursive calls and unintended side-effects
+- GLM proxy env cleanup (`unset ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY`): ensures advisor always uses native Anthropic auth even when the executor is a GLM session
+- Per-session call limit: 5 (counter file at `/tmp/advisor-<SESSION_ID>.count`)
+- Hard cost cap: `--max-budget-usd 1.00` per invocation; hard timeout: 120s
+- Advisor instructions are only injected into `effective_sp` when `session.model != ADVISOR_MODEL` (no self-loop)
+- Bot detects `advisor.sh` in Bash tool hints and sets `activity_type = "consulting_advisor"` → shows 🧠 reaction on Telegram
+
+**Configuration:** `ADVISOR_MODEL` in `~/claude-bot/.env` (default: `opus`).
 
 ## Lessons (compound engineering)
 
