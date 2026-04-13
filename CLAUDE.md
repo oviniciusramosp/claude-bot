@@ -99,6 +99,7 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager (macOS app).
 | `ZAI_API_KEY` | No | — | z.AI API key — required to use any `glm-*` model. Get one at https://z.ai/manage-apikey |
 | `ZAI_BASE_URL` | No | `https://api.z.ai/api/anthropic` | z.AI's Anthropic-compatible gateway URL (rarely changed) |
 | `ADVISOR_MODEL` | No | `opus` | Model used by `scripts/advisor.sh` when executor models escalate for strategic guidance |
+| `MODEL_FALLBACK_CHAIN` | No | `opus,glm-5.1,sonnet,glm-4.7,haiku` | Comma-separated fallback order — when a model fails after retries, the next model in chain is tried. Configurable via macOS app (Settings → Customization → Model Fallback). |
 
 **Edited via:** ClaudeBotManager → Settings, or directly in the file.
 

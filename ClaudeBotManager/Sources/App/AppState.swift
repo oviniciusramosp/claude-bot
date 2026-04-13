@@ -571,6 +571,8 @@ final class AppState: ObservableObject {
                     config.zaiApiKey = value
                 case "ZAI_BASE_URL" where config.zaiBaseUrl == BotConfig.defaults.zaiBaseUrl:
                     config.zaiBaseUrl = value
+                case "MODEL_FALLBACK_CHAIN" where config.modelFallbackChain == BotConfig.defaults.modelFallbackChain:
+                    config.modelFallbackChain = value
                 default: break
                 }
             }
@@ -588,11 +590,12 @@ final class AppState: ObservableObject {
             "CLAUDE_WORKSPACE=\(config.claudeWorkspace)",
             "TTS_ENGINE=\(config.ttsEngine)",
             "ZAI_API_KEY=\(config.zaiApiKey)",
-            "ZAI_BASE_URL=\(config.zaiBaseUrl)"
+            "ZAI_BASE_URL=\(config.zaiBaseUrl)",
+            "MODEL_FALLBACK_CHAIN=\(config.modelFallbackChain)"
         ]
         // Preserve any extra keys already in the file
         if let existing = try? String(contentsOfFile: envPath, encoding: .utf8) {
-            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE", "TTS_ENGINE", "ZAI_API_KEY", "ZAI_BASE_URL"]
+            let knownKeys = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_PATH", "CLAUDE_WORKSPACE", "TTS_ENGINE", "ZAI_API_KEY", "ZAI_BASE_URL", "MODEL_FALLBACK_CHAIN"]
             for line in existing.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("#") { continue }

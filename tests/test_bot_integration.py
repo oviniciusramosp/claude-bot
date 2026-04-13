@@ -508,5 +508,105 @@ class TextProcessingEdgeCases(unittest.TestCase):
             self.assertTrue(kwargs.get("force_tts", False))
 
 
+class TestModelFallback(unittest.TestCase):
+    """Tests for get_fallback_model() and MODEL_FALLBACK_CHAIN logic."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        tmp_home = Path(self.tmp.name)
+        vault = tmp_home / "vault" / "main"
+        vault.mkdir(parents=True)
+        self.bot_module = load_bot_module(tmp_home=tmp_home, vault_dir=vault)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _set_chain(self, chain_list):
+        self.bot_module.MODEL_FALLBACK_CHAIN = chain_list
+
+    def _set_zai_key(self, key):
+        self.bot_module.ZAI_API_KEY = key
+
+    def test_basic_fallback_opus_to_glm(self):
+        """opus fails → next in chain is glm-5.1."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("opus", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertEqual(result, "glm-5.1")
+
+    def test_basic_fallback_sonnet_skips_to_glm47(self):
+        """sonnet fails → next in default chain is glm-4.7."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("sonnet", self.bot_module.ErrorKind.RATE_LIMIT)
+        self.assertEqual(result, "glm-4.7")
+
+    def test_skips_glm_without_api_key(self):
+        """Without ZAI_API_KEY, GLM models in the chain are skipped."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("")
+        result = self.bot_module.get_fallback_model("opus", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertEqual(result, "sonnet")
+
+    def test_skips_all_glm_without_key_falls_to_haiku(self):
+        """Without ZAI_API_KEY, all GLM models are skipped; sonnet fails → haiku."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("")
+        result = self.bot_module.get_fallback_model("sonnet", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertEqual(result, "haiku")
+
+    def test_skips_same_provider_on_auth_error(self):
+        """AUTH error on opus → skip all anthropic models, use first zai model."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("opus", self.bot_module.ErrorKind.AUTH)
+        self.assertEqual(result, "glm-5.1")
+
+    def test_skips_same_provider_on_credit_error(self):
+        """CREDIT error on opus → skip all anthropic models."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("opus", self.bot_module.ErrorKind.CREDIT)
+        self.assertEqual(result, "glm-5.1")
+
+    def test_end_of_chain_returns_none(self):
+        """haiku is last in chain → no fallback."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("haiku", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertIsNone(result)
+
+    def test_model_not_in_chain_returns_none(self):
+        """Model not in chain → no fallback."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("glm-4.5-air", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertIsNone(result)
+
+    def test_context_too_long_not_in_fallback_logic(self):
+        """CONTEXT_TOO_LONG should still return a model from get_fallback_model itself,
+        but the caller (_run_claude_prompt) skips fallback for this kind."""
+        self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
+        self._set_zai_key("somekey")
+        # get_fallback_model itself doesn't exclude CONTEXT_TOO_LONG —
+        # the exclusion is in _run_claude_prompt. So a result is returned.
+        result = self.bot_module.get_fallback_model("opus", self.bot_module.ErrorKind.CONTEXT_TOO_LONG)
+        self.assertEqual(result, "glm-5.1")
+
+    def test_custom_chain(self):
+        """Custom chain order is respected."""
+        self._set_chain(["haiku", "sonnet", "opus"])
+        self._set_zai_key("")
+        result = self.bot_module.get_fallback_model("haiku", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertEqual(result, "sonnet")
+
+    def test_chain_all_remaining_skipped_returns_none(self):
+        """If all remaining models are skipped (e.g., GLM without key), return None."""
+        self._set_chain(["sonnet", "glm-4.7", "glm-5.1"])
+        self._set_zai_key("")
+        result = self.bot_module.get_fallback_model("sonnet", self.bot_module.ErrorKind.OVERLOADED)
+        self.assertIsNone(result)
+
+
 if __name__ == "__main__":
     unittest.main()

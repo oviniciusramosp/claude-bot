@@ -383,6 +383,16 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
+        // Model Fallback
+        SectionCard(title: "Model Fallback", symbol: "arrow.triangle.branch") {
+            Text("When a model fails after retries, the bot tries the next one in this chain. GLM models require a z.AI API key.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.bottom, Spacing.xs)
+
+            FallbackChainEditor(chain: $config.modelFallbackChain, zaiKeySet: !config.zaiApiKey.isEmpty)
+        }
+
         // Vault Rules (universal — vault/CLAUDE.md)
         SectionCard(title: "Vault Rules", symbol: "doc.text.fill") {
             Text("vault/CLAUDE.md — universal rules loaded by every agent session. Contains the frontmatter contract, graph conventions, and linking rules. NOT specific to any agent — the Main agent's personality lives in vault/main/CLAUDE.md.")
