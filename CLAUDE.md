@@ -61,26 +61,26 @@ The `ClaudeRunner` builds the command with `--print --dangerously-skip-permissio
 
 ```
 vault/
-├── CLAUDE.md        # universal rules (frontmatter, graph, linking) + wikilinks to each agent-info
+├── CLAUDE.md        # universal rules (frontmatter, graph, linking) + wikilinks to each agent hub
 ├── README.md        # root hub
 ├── Tooling.md       # shared
 ├── main/
-│   ├── agent-info.md   # metadata (frontmatter) + hub wikilinks (body)
+│   ├── agent-main.md   # metadata (frontmatter) + hub wikilinks (body)
 │   ├── CLAUDE.md       # personality/instructions (not a graph node)
 │   ├── Skills/, Routines/, Journal/, Reactions/, Lessons/, Notes/, workspace/
 ├── crypto-bro/
-│   └── ... same structure (private to crypto-bro)
+│   └── ... same structure (private to crypto-bro, hub is agent-crypto-bro.md)
 └── parmeirense/
     └── ...
 ```
 
 **Isolamento total:** there is no inheritance between agents. When a session is on crypto-bro, only `crypto-bro/Skills/`, `Routines/`, `Journal/`, etc. are discoverable. To share a skill with another agent, copy the file explicitly.
 
-**Agent detection.** A top-level directory counts as an agent if and only if it contains `agent-info.md`. That's the single source of truth — `iter_agent_ids()` on the Python side and `iterAgentIds()` on the Swift side both use this rule. Reserved vault names (`README.md`, `CLAUDE.md`, `Tooling.md`, `Images`, `.graphs`, `.obsidian`) are never treated as agents.
+**Agent detection.** A top-level directory counts as an agent if and only if it contains `agent-<dirname>.md` (e.g. `main/agent-main.md`, `crypto-bro/agent-crypto-bro.md`). That's the single source of truth — `iter_agent_ids()` on the Python side and `iterAgentIds()` on the Swift side both use this rule. Reserved vault names (`README.md`, `CLAUDE.md`, `Tooling.md`, `Images`, `.graphs`, `.obsidian`) are never treated as agents.
 
-**`agent-info.md`** combines two roles the old layout split across two files:
+**`agent-<id>.md`** (v3.4 naming — each agent has a unique basename for Obsidian wikilink resolution) combines two roles the old layout split across two files:
 - **Frontmatter**: metadata (`name`, `icon`, `model`, `description`, optional `chat_id`/`thread_id`, etc.). Replaces the legacy `agent.md`.
-- **Body**: wikilinks `[[Skills]]`, `[[Routines]]`, `[[Journal]]`, `[[Reactions]]`, `[[Lessons]]`, `[[Notes]]`. Replaces the legacy `<id>.md` graph hub. These wikilinks resolve (via the per-agent resolver in `scripts/vault-graph-builder.py`) to the agent's own sub-indexes, keeping the Obsidian graph a single connected tree: `README → CLAUDE → <agent>/agent-info → <sub-index> → leaves`.
+- **Body**: wikilinks `[[Skills]]`, `[[Routines]]`, `[[Journal]]`, `[[Reactions]]`, `[[Lessons]]`, `[[Notes]]`. Replaces the legacy `<id>.md` graph hub. These wikilinks resolve (via the per-agent resolver in `scripts/vault-graph-builder.py`) to the agent's own sub-indexes, keeping the Obsidian graph a single connected tree: `README → CLAUDE → <agent>/agent-<id> → <sub-index> → leaves`.
 
 ## Configuration
 
@@ -168,7 +168,7 @@ Read by Claude Code when executing tasks in the vault context (routines, interac
 | `/effort <low\|medium\|high>` | Set reasoning effort |
 | `/clear` | Reset current session |
 | `/important` | Record key points from the current session into today's Journal |
-| `/lesson <text>` | Record a manual lesson in `vault/Lessons/` (compound engineering) |
+| `/lesson <text>` | Record a manual lesson in `<agent>/Lessons/` (compound engineering) |
 | `/active-memory [on\|off\|status]` | Toggle proactive vault context injection (default: on) |
 | `/agent [name\|new\|list]` | Switch/create/list agents (no arg → inline keyboard) |
 | `/routine [list\|status]` | Create a routine interactively, or list/status of today's routines |
@@ -291,7 +291,7 @@ python3 scripts/migrate_vault_per_agent.py             # live
 The live run creates a timestamped backup at `vault.backup-YYYYMMDD-HHMMSS/`, auto-detects the starting layout (`legacy`, `v30`, `v31`, or `fresh`), and applies the right transform:
 
 - **legacy**: moves `vault/Skills/*`, `vault/Routines/*`, `vault/Journal/*`, `vault/Reactions/*`, `vault/Lessons/*`, `vault/Notes/*` into `vault/main/`. Routines with `agent: <X>` in frontmatter go to `vault/<X>/Routines/`. Old `Agents/<id>/` wrappers (if present) are unwrapped to `<id>/`.
-- **v30**: unwraps `Agents/<id>/` to `<id>/` and merges `agent.md` + `<id>.md` into `agent-info.md`.
+- **v30**: unwraps `Agents/<id>/` to `<id>/` and merges `agent.md` + `<id>.md` into `agent-<id>.md`.
 - **fresh**: seeds `vault/main/` from `templates/main/` (the starter skill/routine set the repo ships).
 
 The script is idempotent: re-running after a successful migration aborts with "vault is already in v3.1 layout". To re-run after a failure, restore from the backup first.
@@ -309,7 +309,7 @@ The script is idempotent: re-running after a successful migration aborts with "v
 | `schedule.monthdays` | list | — | Days of month e.g. `[1, 15]` — filter for both clock and interval modes |
 | `schedule.until` | string | — | End date YYYY-MM-DD (optional) |
 | `model` | string | `sonnet` | Model to use |
-| `agent` | string | — | **Legacy in v3.0.** Folder location is the source of truth: `Agents/<id>/Routines/foo.md` implies `agent=id`. The `agent:` frontmatter field is still accepted for backcompat and logged with a warning if it disagrees with the folder. |
+| `agent` | string | — | **Legacy in v3.0.** Folder location is the source of truth: `<id>/Routines/foo.md` implies `agent=id`. The `agent:` frontmatter field is still accepted for backcompat and logged with a warning if it disagrees with the folder. |
 | `enabled` | bool | `true` | Enable/disable the routine |
 | `context` | string | `full` | `minimal` = skip vault system prompt, use only CLAUDE.md |
 | `effort` | string | — | Reasoning effort: `low`, `medium`, or `high` (CLI default if omitted) |
@@ -358,7 +358,7 @@ Voice follows the `HEAR_LOCALE` (default `pt-BR` → Luciana voice). The TTS pro
 
 Active Memory is a deterministic pre-reply hook inspired by OpenClaw v2026.4.10. Before each interactive Claude turn, the bot scores non-skill nodes from `vault/.graphs/graph.json` against the user's prompt and appends a compact `## Active Memory` block — with short (≤400 char) file excerpts — to the system prompt. No LLM call, ~50 ms typical, 200 ms hard budget, fail-open.
 
-- **Isolamento total (v3.0):** only nodes whose `source_file` lives under `Agents/<current-agent>/` qualify. A session on `crypto-bro` never sees Main's or `parmeirense`'s notes.
+- **Isolamento total (v3.0):** only nodes whose `source_file` lives under `<current-agent>/` qualify. A session on `crypto-bro` never sees Main's or `parmeirense`'s notes.
 - **Scope:** interactive chat only. Routines and pipelines with `context: minimal` automatically skip it because they pass `system_prompt=None`.
 - **Excluded node types:** `skill` (covered by the skill hint helper) and `history` (churn-y logs).
 - **Per-session toggle:** `/active-memory [on|off|status]` — persists to `sessions.json` via the `Session.active_memory` field.
@@ -368,7 +368,7 @@ Active Memory is a deterministic pre-reply hook inspired by OpenClaw v2026.4.10.
 
 ## Graph-based skill hints (isolated per-agent in v3.0)
 
-Separate from Active Memory but complementary: `_select_relevant_skills(agent_id)` reads the same `vault/.graphs/graph.json` and injects a short `<hint>Relevant skills for this task: …</hint>` prefix into the user prompt on every interactive message. Filters to nodes whose `source_file` starts with `Agents/<agent_id>/Skills/`. Controlled by `SKILL_HINTS_ENABLED = True`. Tests in `tests/test_skill_hints.py` + `tests/test_agent_isolation.py`.
+Separate from Active Memory but complementary: `_select_relevant_skills(agent_id)` reads the same `vault/.graphs/graph.json` and injects a short `<hint>Relevant skills for this task: …</hint>` prefix into the user prompt on every interactive message. Filters to nodes whose `source_file` starts with `<agent_id>/Skills/`. Controlled by `SKILL_HINTS_ENABLED = True`. Tests in `tests/test_skill_hints.py` + `tests/test_agent_isolation.py`.
 
 The two helpers run in sequence inside `_run_claude_prompt()`:
 1. `_find_relevant_skills()` (via `vault_query`) — appends "## Available Skills" block to the system prompt
@@ -397,10 +397,10 @@ Executor models (Sonnet, Haiku, GLM) can escalate to a strategic advisor (defaul
 
 ## Lessons (compound engineering)
 
-Each agent owns its own `Lessons/` folder (`Agents/<id>/Lessons/`) so lessons stay scoped to the context that produced them. Two entry points:
+Each agent owns its own `Lessons/` folder (`<id>/Lessons/`) so lessons stay scoped to the context that produced them. Two entry points:
 
 - **Automatic:** the session consolidator records lessons when the session detects a resolved bug or clear learning
-- **Manual:** `/lesson <text>` writes `Agents/<current-agent>/Lessons/manual-YYYY-MM-DD-HHMM.md` with structured frontmatter (`type: lesson`, `status: recorded`)
+- **Manual:** `/lesson <text>` writes `<current-agent>/Lessons/manual-YYYY-MM-DD-HHMM.md` with structured frontmatter (`type: lesson`, `status: recorded`)
 
 The SYSTEM_PROMPT instructs Claude to scan `Lessons/` before similar tasks. Tests in `tests/test_lessons.py`.
 
@@ -517,7 +517,7 @@ The test suite covers the bot's Python code, scripts, and the Swift `ClaudeBotMa
 
 ```bash
 ./test.sh           # Python + Swift (full suite)
-./test.sh py        # Python only (~380 tests, ~5s)
+./test.sh py        # Python only (~450 tests, ~7s)
 ./test.sh swift     # Swift only (~20 tests)
 ./test.sh tests.test_session_manager  # one Python module
 ```
@@ -527,7 +527,7 @@ CI runs on every push/PR via `.github/workflows/tests.yml` (macOS runner — req
 ### Layout
 
 ```
-tests/                              # Python tests (~380 tests, pure stdlib)
+tests/                              # Python tests (~450 tests, pure stdlib)
   _botload.py                       # imports claude-fallback-bot.py under a tmp HOME
   test_smoke_import.py              # bot module loads cleanly
   test_smoke_compile.py             # all .py + .sh files compile / parse

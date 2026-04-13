@@ -24,7 +24,7 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Live streaming** -- watch Claude's response build in real-time as Telegram message edits
 - **Status reactions** -- emoji reactions on your message show what Claude is doing (thinking, coding, writing)
 - **Model switching** -- switch between Sonnet, Opus, and Haiku mid-conversation
-- **Per-agent vault** (v3.0) -- Obsidian-compatible vault where every agent owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes under `Agents/<id>/`. Isolamento total — no inheritance across agents.
+- **Per-agent vault** (v3.1) -- Obsidian-compatible vault where every agent owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes under `<agent>/` (flat layout at vault root). Isolamento total — no inheritance across agents.
 - **Knowledge graph** -- lightweight deterministic graph (`vault/.graphs/graph.json`) rebuilt daily; powers skill hints and Active Memory
 - **Active Memory** -- before every interactive message, the bot scores vault nodes against your prompt and auto-injects a compact context block (no LLM cost, ~50ms)
 - **Compound engineering (Lessons)** -- `/lesson` captures hard-won knowledge so Claude scans past failures before similar tasks
@@ -129,8 +129,9 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 ### Model
 | Command | Description |
 |---------|-------------|
-| `/sonnet` `/opus` `/haiku` | Quick model switch |
-| `/model` | Model picker (inline keyboard) |
+| `/sonnet` `/opus` `/haiku` | Quick model switch (Anthropic) |
+| `/glm` | Quick switch to `glm-4.7` (z.AI — requires `ZAI_API_KEY`) |
+| `/model` | Model picker (inline keyboard; GLM row shown only when `ZAI_API_KEY` set) |
 | `/effort <low\|medium\|high>` | Reasoning effort level |
 
 ### Control
@@ -165,7 +166,7 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | Command | Description |
 |---------|-------------|
 | `/important` | Register key points from this session in today's Journal |
-| `/lesson <text>` | Record a manual lesson in `vault/Lessons/` (compound engineering) |
+| `/lesson <text>` | Record a manual lesson in `<agent>/Lessons/` (compound engineering) |
 | `/active-memory [on\|off\|status]` | Toggle proactive vault context injection for this session (default: on) |
 
 ### Vault
@@ -206,10 +207,14 @@ When you send a message, the bot sets emoji reactions on it to show processing s
 Agents are specialized personas that live inside the vault. Each agent has its own workspace, CLAUDE.md, personality, model, and journal.
 
 ```
-vault/Agents/cripto/
-  agent.md       # Metadata (name, model, icon — parsed by the bot)
-  CLAUDE.md      # Instructions for Claude Code (loaded automatically)
-  Journal/       # Agent-specific daily logs
+vault/crypto-bro/
+  agent-crypto-bro.md   # Metadata (name, model, icon, chat_id, thread_id — parsed by the bot)
+  CLAUDE.md             # Instructions for Claude Code (loaded automatically)
+  Skills/               # Agent-specific skills
+  Routines/             # Agent-specific scheduled tasks
+  Journal/              # Agent-specific daily logs
+  Lessons/              # Agent-specific lessons (compound engineering)
+  Notes/                # Agent-specific notes
 ```
 
 When an agent is active, Claude Code's working directory changes to the agent's folder. It reads the agent's CLAUDE.md for personality and instructions, plus the project's CLAUDE.md for vault rules -- automatically via Claude Code's directory hierarchy.
@@ -217,7 +222,7 @@ When an agent is active, Claude Code's working directory changes to the agent's 
 ### Creating agents
 
 - **Via Telegram:** `/agent new` -- interactive skill that asks name, personality, model, etc.
-- **Manually:** Create the directory structure and files in `vault/Agents/`
+- **Manually:** Create the directory structure and `agent-<id>.md` hub file under `vault/<id>/`
 
 ### Switching agents
 
@@ -269,15 +274,13 @@ The `vault/` directory (also called "knowledge base" or "KB") is an [Obsidian](h
 
 ```
 vault/
-|-- Journal/        Daily conversation logs (YYYY-MM-DD.md), append-only
-|-- Notes/          Durable knowledge, wikilinked for graph navigation
-|-- Skills/         Reusable task definitions for recurring workflows
-|-- Routines/       Scheduled prompts (cron-like execution)
-|-- Lessons/        Hard-won knowledge captured from past failures (compound engineering)
-|-- Agents/         Specialized personas, each with their own CLAUDE.md and Journal
-|-- Images/         User-requested image storage, organized by theme
+|-- main/           Main agent (default) — Skills, Routines, Journal, Lessons, Notes
+|-- crypto-bro/     Example agent — each has agent-<id>.md, CLAUDE.md, own folders
+|-- parmeirense/    Example agent
 |-- .graphs/        Lightweight knowledge graph (graph.json), regenerated daily
+|-- Images/         User-requested image storage, organized by theme
 |-- Tooling.md      Tool preferences (which tool for each task type)
+|-- CLAUDE.md       Universal vault rules (frontmatter, graph, linking)
 |-- .env            Project credentials (gitignored)
 '-- README.md       Vault index and rules
 ```
@@ -306,7 +309,7 @@ The vault content (Journal, Notes, Skills, Routines, Images) is gitignored -- yo
 
 ## Routines & Pipelines (Scheduled Tasks)
 
-Create `.md` files in `vault/Routines/` to run prompts on a schedule.
+Create `.md` files in `<agent>/Routines/` to run prompts on a schedule.
 
 ### Routines
 
@@ -504,7 +507,7 @@ The repo ships with a full test suite (Python + Swift, no pip dependencies for t
 
 ```bash
 ./test.sh           # Python + Swift (full suite)
-./test.sh py        # Python only (~380 tests, ~5s, pure stdlib)
+./test.sh py        # Python only (~450 tests, ~7s, pure stdlib)
 ./test.sh swift     # Swift only (ClaudeBotManager)
 ```
 
