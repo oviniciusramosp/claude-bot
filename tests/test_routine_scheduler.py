@@ -89,7 +89,7 @@ class SchedulerMatching(unittest.TestCase):
             self.state,
             enqueue_fn=lambda task: self.enqueued.append(task),
             enqueue_pipeline_fn=lambda task: self.enqueued_pipelines.append(task),
-            notify_fn=lambda msg: self.notifications.append(msg),
+            notify_fn=lambda msg, **kw: self.notifications.append(msg),
         )
 
     def tearDown(self):
@@ -256,7 +256,7 @@ class SchedulerPipelineCycle(unittest.TestCase):
             self.state,
             enqueue_fn=lambda task: self.enqueued.append(task),
             enqueue_pipeline_fn=lambda task: self.enqueued_pipelines.append(task),
-            notify_fn=lambda msg: None,
+            notify_fn=lambda msg, **kw: None,
         )
 
     def tearDown(self):
@@ -449,7 +449,7 @@ class PipelineStepWikilinkStripping(unittest.TestCase):
             self.state,
             enqueue_fn=lambda task: None,
             enqueue_pipeline_fn=lambda task: self.enqueued_pipelines.append(task),
-            notify_fn=lambda msg: None,
+            notify_fn=lambda msg, **kw: None,
         )
 
     def tearDown(self):
@@ -708,7 +708,7 @@ class ListTodayRoutines(unittest.TestCase):
             self.state,
             enqueue_fn=lambda task: None,
             enqueue_pipeline_fn=lambda task: None,
-            notify_fn=lambda msg: None,
+            notify_fn=lambda msg, **kw: None,
         )
 
     def tearDown(self):
@@ -797,7 +797,7 @@ class IntervalScheduling(unittest.TestCase):
             self.state,
             enqueue_fn=lambda task: self.enqueued.append(task),
             enqueue_pipeline_fn=lambda task: None,
-            notify_fn=lambda msg: self.notifications.append(msg),
+            notify_fn=lambda msg, **kw: self.notifications.append(msg),
         )
 
     def tearDown(self):
@@ -887,7 +887,7 @@ class MonthDayFilter(unittest.TestCase):
             self.state,
             enqueue_fn=lambda task: self.enqueued.append(task),
             enqueue_pipeline_fn=lambda task: None,
-            notify_fn=lambda msg: None,
+            notify_fn=lambda msg, **kw: None,
         )
 
     def tearDown(self):
@@ -945,6 +945,92 @@ class MonthDayFilter(unittest.TestCase):
         # mday=10, not 15 → should skip
         self.scheduler._check_routines()
         self.assertEqual(self.enqueued, [])
+
+
+class InvalidRoutineNotificationRouting(unittest.TestCase):
+    """Tests that _notify_invalid_routine routes to the agent's thread."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        self.fake_time = _FakeTime()
+        self._real_time = self.bot.time
+        self.bot.time = self.fake_time
+
+        self.notifications = []
+        self.state = self.bot.RoutineStateManager()
+        self.scheduler = self.bot.RoutineScheduler(
+            self.state,
+            enqueue_fn=lambda task: None,
+            enqueue_pipeline_fn=lambda task: None,
+            notify_fn=lambda msg, **kw: self.notifications.append((msg, kw)),
+        )
+
+    def tearDown(self):
+        self.bot.time = self._real_time
+        self._td.cleanup()
+
+    def test_notification_routes_to_agent_thread(self):
+        """Invalid routine notification goes to the agent's chat_id/thread_id."""
+        from tests._botload import ensure_agent_layout
+        ensure_agent_layout(self.vault, "crypto-bro")
+        # Overwrite hub with routing metadata
+        hub = self.vault / "crypto-bro" / "agent-crypto-bro.md"
+        hub.write_text(
+            "---\n"
+            "title: Crypto Bro\n"
+            "type: agent\n"
+            "name: Crypto Bro\n"
+            "model: sonnet\n"
+            'icon: "🟠"\n'
+            "color: orange\n"
+            "chat_id: -100999\n"
+            "thread_id: 42\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        broken = (
+            "---\n"
+            "title: broken\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "---\n"
+            "body\n"
+        )
+        _write_routine(self.vault / "crypto-bro" / "Routines", "broken-cb", broken)
+
+        self.scheduler._check_routines()
+
+        self.assertEqual(len(self.notifications), 1)
+        msg, kw = self.notifications[0]
+        self.assertIn("broken-cb", msg)
+        self.assertIn("crypto-bro", msg)
+        self.assertEqual(kw.get("chat_id"), "-100999")
+        self.assertEqual(kw.get("thread_id"), 42)
+
+    def test_notification_main_agent_no_routing_kwargs(self):
+        """Main agent has no chat_id/thread_id, so kwargs are empty (default fallback)."""
+        broken = (
+            "---\n"
+            "title: broken-main\n"
+            "model: sonnet\n"
+            "enabled: true\n"
+            "---\n"
+            "body\n"
+        )
+        _write_routine(self.bot.ROUTINES_DIR, "broken-main", broken)
+
+        self.scheduler._check_routines()
+
+        self.assertEqual(len(self.notifications), 1)
+        msg, kw = self.notifications[0]
+        self.assertIn("broken-main", msg)
+        self.assertNotIn("chat_id", kw)
+        self.assertNotIn("thread_id", kw)
 
 
 if __name__ == "__main__":

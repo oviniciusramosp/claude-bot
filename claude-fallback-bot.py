@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.9.0"  # feat: restart-resilient pipelines/routines — resume interrupted tasks, clean up orphaned messages
+BOT_VERSION = "3.9.1"  # fix: _notify_invalid_routine now routes to agent's thread instead of #general
 
 import hmac
 import hashlib
@@ -1775,19 +1775,32 @@ class RoutineScheduler:
                 logger.error("Routine scheduler error: %s", exc, exc_info=True)
             self._stop_event.wait(60)
 
-    def _notify_invalid_routine(self, routine_name: str, errors: list) -> None:
+    def _notify_invalid_routine(self, routine_name: str, errors: list,
+                                agent_id: Optional[str] = None) -> None:
         """Send a one-per-day Telegram notification about invalid routine frontmatter."""
         if not self._notify_fn or routine_name in self._notified_invalid_routines:
             return
         self._notified_invalid_routines.add(routine_name)
+        # Resolve agent routing so the notification lands in the correct thread
+        kwargs: Dict[str, Any] = {}
+        if agent_id:
+            agent_def = load_agent(agent_id)
+            if agent_def:
+                _cid = agent_def.get("chat_id") or agent_def.get("telegram_chat_id")
+                _tid = agent_def.get("thread_id")
+                if _cid:
+                    kwargs["chat_id"] = str(_cid)
+                if _tid is not None:
+                    kwargs["thread_id"] = _tid
+        agent_label = agent_id if agent_id else "<agente>"
         bullet_list = "\n".join(f"- {e}" for e in errors)
         msg = (
             f"\u26a0\ufe0f Rotina `{routine_name}` tem erros no frontmatter:\n"
             f"{bullet_list}\n\n"
-            f"Corrija o arquivo em `<agente>/Routines/{routine_name}.md`"
+            f"Corrija o arquivo em `{agent_label}/Routines/{routine_name}.md`"
         )
         try:
-            self._notify_fn(msg)
+            self._notify_fn(msg, **kwargs)
         except Exception as exc:
             logger.error("Failed to notify about invalid routine %s: %s", routine_name, exc)
 
@@ -1822,6 +1835,7 @@ class RoutineScheduler:
                     self._notify_invalid_routine(
                         md_file.stem,
                         [f"Campo `{f}` ausente" for f in _missing],
+                        agent_id=owning_agent,
                     )
                     continue
                 if not fm.get("enabled", False):
@@ -1832,6 +1846,7 @@ class RoutineScheduler:
                     self._notify_invalid_routine(
                         md_file.stem,
                         ["Campo `schedule` deve ser um mapeamento (dict), nao " + type(schedule).__name__],
+                        agent_id=owning_agent,
                     )
                     continue
                 # Check expiry
@@ -1860,6 +1875,7 @@ class RoutineScheduler:
                         self._notify_invalid_routine(
                             md_file.stem,
                             [f"Campo `schedule.interval` inválido: `{interval_str}`. Use ex: `30m`, `4h`, `3d`, `2w`"],
+                            agent_id=owning_agent,
                         )
                         continue
                     # Check day filter (optional — limit interval to certain weekdays)
@@ -1906,6 +1922,7 @@ class RoutineScheduler:
                         self._notify_invalid_routine(
                             md_file.stem,
                             ["Campo `schedule.times` deve ser uma lista não-vazia (ou use `schedule.interval`)"],
+                            agent_id=owning_agent,
                         )
                         continue
                     # Check day filter
