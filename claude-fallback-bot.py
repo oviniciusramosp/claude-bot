@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.21.0"  # feat: read-time lazy FTS refresh — Obsidian/CLI/git edits land on next turn without waiting for 04:05 rebuild
+BOT_VERSION = "3.23.0"  # chore: consolidate vault-graph-update + vault-index-update + vault-indexes-update into vault-nightly
 
 import hmac
 import hashlib
@@ -669,9 +669,8 @@ ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget =>
 
 # Built-in routines shipped with the repo — cannot be deleted via Telegram
 BUILTIN_ROUTINE_IDS: frozenset = frozenset({
-    "update-check", "vault-graph-update", "journal-audit",
-    "vault-indexes-update", "vault-lint",
-    "vault-index-update", "journal-weekly-rollup",
+    "update-check", "vault-nightly", "vault-lint",
+    "journal-audit", "journal-weekly-rollup",
 })
 # Node types EXCLUDED from Active Memory: "skill" is already handled by
 # _select_relevant_skills (SKILL_HINTS_ENABLED); "history" is churn-y log data.
@@ -749,6 +748,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
 • `/routine delete <nome>` — Deletar rotina/pipeline (move arquivos para Lixeira)
 • `/run [nome]` — Executar rotina/pipeline manualmente
+• `/dry-run <pipeline> [step,...]` — Simular pipeline com steps retornando NO_REPLY (previsão de skip/economia, sem rodar Claude)
 
 🤖 *Agentes*
 • `/agent` — Gerenciar agentes (trocar, criar, editar, importar)
@@ -988,6 +988,37 @@ class RoutineTask:
     webhook_payload: Optional[str] = None
 
 
+# Sentinel detection: a step that outputs ONLY this string (with tolerant
+# whitespace / trailing punctuation / casing) signals "nothing to process" and
+# causes downstream auto-skip in _run_dag_loop().  Kept tolerant so a slightly
+# wobbly LLM response ("no_reply.", "NO REPLY", "  NO_REPLY\n") still triggers
+# the early-exit, but strict enough that a long report mentioning "no_reply" in
+# the middle of a sentence does NOT.
+_NO_REPLY_MAX_LEN = 64  # anything longer can't be a bare sentinel
+
+def _is_no_reply_output(text: Optional[str]) -> bool:
+    """Return True when a step output is the 'nothing to process' sentinel.
+
+    Matches (after stripping whitespace and trailing punctuation):
+    - NO_REPLY, NO REPLY, NOREPLY, no_reply, No Reply  (case-insensitive)
+    - NO_REPLY., NO_REPLY! , NO_REPLY;  (trailing punctuation)
+    Does NOT match:
+    - Text longer than _NO_REPLY_MAX_LEN characters (cannot be a bare sentinel)
+    - Text containing NO_REPLY as a substring of a longer line
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > _NO_REPLY_MAX_LEN:
+        return False
+    # Strip trailing punctuation / whitespace, then collapse separators (spaces
+    # and underscores) so "NO_REPLY", "NO REPLY", "NOREPLY" all normalise to
+    # the same token.
+    cleaned = re.sub(r"[\s.!?;,:]+$", "", stripped).strip()
+    normalized = re.sub(r"[_\s]+", "", cleaned.upper())
+    return normalized == "NOREPLY"
+
+
 @dataclass
 class PipelineStep:
     id: str
@@ -1019,6 +1050,11 @@ class PipelineStep:
     manual_timeout: int = 86400  # seconds to wait for human response (default 24h)
     input_file: str = ""         # explicit .md to review (empty = dep_step[0].resolved_filename)
     tunnel: bool = True          # include Tailscale Funnel web editor link in Telegram message
+    # Early-exit gate — when True (default), this step is auto-skipped if ALL
+    # its dependencies returned NO_REPLY (see _is_no_reply_output).  Set False
+    # for steps with side effects that must run even when upstream found
+    # nothing (cleanup, heartbeat log, state reset, etc.).
+    skip_on_no_reply: bool = True
 
     @property
     def resolved_filename(self) -> str:
@@ -1848,6 +1884,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             manual_timeout=int(s.get("manual_timeout", _raw_timeout)) if is_manual else 0,
             input_file=s.get("input_file", "").strip() if is_manual else "",
             tunnel=str(s.get("tunnel", "true")).lower() != "false",
+            skip_on_no_reply=str(s.get("skip_on_no_reply", "true")).lower() != "false",
         ))
 
     if not steps:
@@ -1896,6 +1933,68 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         voice=bool(fm.get("voice", False)),
         effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
     )
+
+
+def _simulate_pipeline_skips(
+    steps: list,
+    no_reply_ids: set,
+) -> Dict[str, Tuple[str, str]]:
+    """Pure simulation of the DAG skip-propagation logic.
+
+    Takes a list of PipelineStep and a set of step ids to treat as if they
+    returned NO_REPLY.  Returns {step_id: (status, reason)} where status is
+    one of: "run", "no-reply-return" (the simulated gate itself),
+    "skip-no-reply" (soft-skipped because all deps returned NO_REPLY),
+    "skip-cascade" (hard-skipped because an upstream dep was skipped/failed),
+    or "run-forced" (would have been NO_REPLY-skipped but skip_on_no_reply=False).
+
+    Mirrors the logic in PipelineExecutor._run_dag_loop() — keep them in sync.
+    """
+    status: Dict[str, str] = {}
+    reason: Dict[str, str] = {}
+
+    for s in steps:
+        if s.id in no_reply_ids:
+            status[s.id] = "no-reply-return"
+            reason[s.id] = "simulated NO_REPLY"
+        else:
+            status[s.id] = "pending"
+
+    terminal_states = {"run", "run-forced", "no-reply-return", "skip-no-reply", "skip-cascade"}
+    changed = True
+    while changed:
+        changed = False
+        for s in steps:
+            if status[s.id] != "pending":
+                continue
+            deps = s.depends_on or []
+            if not deps:
+                status[s.id] = "run"
+                changed = True
+                continue
+            if not all(status.get(d) in terminal_states for d in deps):
+                continue
+            failed_or_skipped = [
+                d for d in deps if status.get(d) in ("skip-no-reply", "skip-cascade")
+            ]
+            all_no_reply = all(status.get(d) == "no-reply-return" for d in deps)
+            if failed_or_skipped:
+                status[s.id] = "skip-cascade"
+                reason[s.id] = f"upstream skipped: {', '.join(failed_or_skipped)}"
+                changed = True
+            elif all_no_reply:
+                if getattr(s, "skip_on_no_reply", True):
+                    status[s.id] = "skip-no-reply"
+                    reason[s.id] = f"upstream NO_REPLY: {', '.join(deps)}"
+                else:
+                    status[s.id] = "run-forced"
+                    reason[s.id] = "skip_on_no_reply=false — runs anyway"
+                changed = True
+            else:
+                status[s.id] = "run"
+                changed = True
+
+    return {sid: (st, reason.get(sid, "")) for sid, st in status.items()}
 
 
 def _find_routine_file(routine_name: str, source_file_hint: Optional[str] = None) -> Optional[Path]:
@@ -3992,6 +4091,8 @@ class PipelineExecutor:
             self._step_outputs: Dict[str, str] = {}
             self._step_errors: Dict[str, str] = {}
             self._step_attempts: Dict[str, int] = {s.id: 0 for s in task.steps}
+        # Why each step was skipped — shown in progress messages + savings summary
+        self._skip_reasons: Dict[str, str] = {}
         self._active_runners: Dict[str, ClaudeRunner] = {}
         self._lock = threading.Lock()
         self._activity_lock = threading.Lock()
@@ -4194,11 +4295,15 @@ class PipelineExecutor:
 
             # Propagate skips: if all deps of a pending step are terminal, decide
             # whether to skip or run it.  Two cases trigger a skip:
-            #   1. Any dep is failed or skipped (existing cascade semantics).
-            #   2. All deps completed but every one returned NO_REPLY (nothing to
-            #      process).  If even one dep has real output the step still runs.
-            # This runs each wave so cascades propagate naturally over multiple
-            # iterations without explicit recursion.
+            #   1. Hard cascade — any dep is failed or skipped.  The step
+            #      CANNOT run (missing input) so it's always skipped
+            #      regardless of skip_on_no_reply.
+            #   2. Soft cascade — all deps completed but every one returned
+            #      NO_REPLY (nothing to process).  Honoured only when the step
+            #      has skip_on_no_reply=True (the default).  Steps with
+            #      skip_on_no_reply=False run anyway (cleanup / heartbeat /
+            #      side-effects that must always execute).
+            # Runs each wave so cascades propagate naturally over iterations.
             with self._lock:
                 for step in self.task.steps:
                     if self._step_status[step.id] != "pending":
@@ -4215,16 +4320,27 @@ class PipelineExecutor:
                         self._step_status.get(d) != "completed" for d in deps
                     )
                     all_deps_no_reply = all(
-                        (self._step_outputs.get(d) or "").strip() == "NO_REPLY"
+                        _is_no_reply_output(self._step_outputs.get(d))
                         for d in deps
                     )
-                    if any_dep_non_completed or all_deps_no_reply:
+                    reason: Optional[str] = None
+                    if any_dep_non_completed:
+                        failed_or_skipped = [
+                            d for d in deps
+                            if self._step_status.get(d) in ("failed", "skipped")
+                        ]
                         reason = (
-                            "All dependencies returned NO_REPLY"
-                            if all_deps_no_reply and not any_dep_non_completed
-                            else "Dependency skipped or failed"
+                            f"upstream skipped/failed: {', '.join(failed_or_skipped)}"
+                            if failed_or_skipped
+                            else "upstream skipped/failed"
                         )
+                    elif all_deps_no_reply and step.skip_on_no_reply:
+                        reason = (
+                            f"upstream returned NO_REPLY: {', '.join(deps)}"
+                        )
+                    if reason:
                         self._step_status[step.id] = "skipped"
+                        self._skip_reasons[step.id] = reason
                         self.state.set_step_status(
                             self.task.name, self.task.time_slot, step.id, "skipped",
                             error=reason,
@@ -4727,20 +4843,78 @@ class PipelineExecutor:
         for step in self.task.steps:
             st = self._step_status.get(step.id, "pending")
             icon = icons.get(st, "⏳")
-            lines.append(f"{icon} {step.name}")
+            line = f"{icon} {step.name}"
+            if st == "skipped":
+                reason = self._skip_reasons.get(step.id, "")
+                if reason:
+                    line += f" _({reason})_"
+            lines.append(line)
         total = len(self.task.steps)
         done = sum(1 for st in self._step_status.values() if st == "completed")
         running = sum(1 for st in self._step_status.values() if st == "running")
         waiting = sum(1 for st in self._step_status.values() if st == "waiting_for_approval")
+        skipped = sum(1 for st in self._step_status.values() if st == "skipped")
         elapsed_str = f" — {elapsed // 60}m{elapsed % 60:02d}s" if elapsed else ""
         status = f"\n_{done}/{total} concluídos"
         if running:
             status += f", {running} rodando"
         if waiting:
             status += f", {waiting} aguardando aprovação"
+        if skipped:
+            status += f", {skipped} pulados"
         status += f"{elapsed_str}_"
         lines.append(status)
         return "\n".join(lines)
+
+    def _compute_savings_summary(self) -> Optional[str]:
+        """Return a short Markdown line showing how many steps were auto-skipped
+        via the NO_REPLY early-exit and which models that saved, or None when
+        nothing was skipped for token-saving reasons.
+
+        Only counts steps whose skip reason starts with 'upstream returned
+        NO_REPLY' — the token-savings case.  Steps skipped because of upstream
+        failures don't count as savings (they're forced skips).
+        """
+        saved_steps: List[PipelineStep] = []
+        for step in self.task.steps:
+            if self._step_status.get(step.id) != "skipped":
+                continue
+            reason = self._skip_reasons.get(step.id, "")
+            if reason.startswith("upstream returned NO_REPLY"):
+                saved_steps.append(step)
+        if not saved_steps:
+            return None
+        # Group by model to show the save breakdown
+        by_model: Dict[str, int] = {}
+        for step in saved_steps:
+            by_model[step.model] = by_model.get(step.model, 0) + 1
+        parts = [f"{cnt}×{model}" for model, cnt in sorted(by_model.items())]
+        return f"⚡ Early-exit: {len(saved_steps)} step(s) pulado(s) ({', '.join(parts)})"
+
+    def _maybe_send_savings_summary(self, elapsed: int) -> None:
+        """Send a silent Telegram message summarising early-exit savings.
+
+        Called from _notify_success when the pipeline finished via NO_REPLY
+        cascade.  Fails silently — visibility is best-effort, never blocks
+        the pipeline lifecycle.
+        """
+        try:
+            summary = self._compute_savings_summary()
+            if not summary:
+                return
+            mins = elapsed // 60
+            secs = elapsed % 60
+            msg = (
+                f"🔗 *{self.task.title}* — silent finish\n"
+                f"{summary}\n"
+                f"_Elapsed: {mins}m{secs:02d}s_"
+            )
+            self.bot.send_message(
+                msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
+                disable_notification=True,
+            )
+        except Exception as exc:
+            logger.debug("Savings summary send failed: %s", exc)
 
     def _send_progress_message(self) -> None:
         """Send the initial progress message and store its message_id."""
@@ -5071,8 +5245,10 @@ class PipelineExecutor:
                     break
 
         # NO_REPLY from the output step means nothing worth reporting — silent success
-        if output_text and output_text.strip() == "NO_REPLY":
+        if _is_no_reply_output(output_text):
             logger.info("Pipeline %s: output step returned NO_REPLY — skipping notification", self.task.title)
+            # Still emit the savings summary (silent, no notification sound)
+            self._maybe_send_savings_summary(elapsed)
             return
 
         sent_text = None
@@ -5099,6 +5275,10 @@ class PipelineExecutor:
                 self.bot._maybe_send_tts(sent_text, self.ctx.chat_id, self.ctx.thread_id)
             except Exception as exc:
                 logger.warning("Pipeline TTS failed: %s", exc)
+
+        # Savings summary — only sent if at least one step was auto-skipped
+        # via the NO_REPLY cascade (token savings case).  Noop otherwise.
+        self._maybe_send_savings_summary(elapsed)
 
         # Activity log
         _log_activity({
@@ -7619,6 +7799,115 @@ class ClaudeTelegramBot:
                 f"Journal: `{owner}/Journal/{time.strftime('%Y-%m-%d')}.md`"
             )
 
+    def cmd_dry_run(self, arg: str) -> None:
+        """Simulate a pipeline's execution plan to preview NO_REPLY skips.
+
+        Usage: /dry-run <pipeline> [step1,step2,...]
+
+        The second argument is a comma- or space-separated list of step ids
+        to treat AS IF they returned NO_REPLY.  All other steps behave as if
+        they returned real output.  The command then computes which steps
+        would run, which would be auto-skipped, and how many model
+        invocations that would save — WITHOUT spawning any Claude runner.
+        """
+        arg = arg.strip()
+        if not arg:
+            self.send_message(
+                "❌ Use: `/dry-run <pipeline> [step1,step2,...]`\n\n"
+                "Ex: `/dry-run crypto-news scout` — simula scout retornando NO_REPLY",
+            )
+            return
+
+        parts = arg.split(None, 1)
+        name = parts[0].replace(".md", "").strip()
+        no_reply_raw = parts[1] if len(parts) > 1 else ""
+        no_reply_ids = {
+            s.strip() for s in re.split(r"[,\s]+", no_reply_raw) if s.strip()
+        }
+
+        # Locate the pipeline file (agent-scoped first, then vault-wide)
+        session = self._get_session()
+        current_agent = (session.agent if session else None) or MAIN_AGENT_ID
+        _agent_candidate = routines_dir(current_agent) / f"{name}.md"
+        md_file = _agent_candidate if _agent_candidate.is_file() else _find_routine_file(name)
+
+        if md_file is None:
+            self.send_message(f"❌ Pipeline `{name}` não encontrada.")
+            return
+
+        fm, body = get_frontmatter_and_body(md_file)
+        if not fm or not body:
+            self.send_message(f"❌ Arquivo de pipeline `{name}` inválido.")
+            return
+
+        if str(fm.get("type", "")).lower() != "pipeline":
+            self.send_message(
+                f"❌ `{name}` não é um pipeline (type: {fm.get('type', 'routine')}).\n"
+                "O `/dry-run` só funciona para pipelines."
+            )
+            return
+
+        model = str(fm.get("model", "sonnet"))
+        task = _parse_pipeline_task(md_file, fm, body, name, model, "dry-run")
+        if not task:
+            self.send_message(f"❌ Falha ao parsear pipeline `{name}`. Veja o log.")
+            return
+
+        step_ids = {s.id for s in task.steps}
+        unknown = no_reply_ids - step_ids
+        if unknown:
+            self.send_message(
+                f"❌ Steps desconhecidos: `{', '.join(sorted(unknown))}`\n"
+                f"Disponíveis: `{', '.join(sorted(step_ids))}`"
+            )
+            return
+
+        result = _simulate_pipeline_skips(task.steps, no_reply_ids)
+
+        status_icons = {
+            "run": "▶️",
+            "run-forced": "▶️",
+            "no-reply-return": "🤫",
+            "skip-no-reply": "⏭",
+            "skip-cascade": "⏭",
+        }
+        lines = [f"🧪 *Dry run: {task.title}*"]
+        if no_reply_ids:
+            lines.append(f"_Simulando NO\\_REPLY em: {', '.join(sorted(no_reply_ids))}_")
+        else:
+            lines.append("_Nenhum step simulando NO\\_REPLY — todos rodariam_")
+        lines.append("")
+
+        for step in task.steps:
+            st, rsn = result[step.id]
+            icon = status_icons.get(st, "?")
+            flag = ""
+            if st == "run-forced":
+                flag = " 🔒"  # indicates skip_on_no_reply=false override
+            line = f"{icon} `{step.id}` _({step.model})_{flag}"
+            if rsn:
+                line += f" — {rsn}"
+            lines.append(line)
+
+        run_count = sum(1 for (st, _) in result.values() if st in ("run", "run-forced"))
+        skip_count = sum(1 for (st, _) in result.values() if st in ("skip-no-reply", "skip-cascade"))
+        gate_count = sum(1 for (st, _) in result.values() if st == "no-reply-return")
+
+        lines.append("")
+        lines.append(
+            f"_{run_count} rodariam · {skip_count} skipariam · {gate_count} simulando NO\\_REPLY_"
+        )
+
+        if skip_count:
+            saved_by_model: Dict[str, int] = {}
+            for step in task.steps:
+                if result[step.id][0] in ("skip-no-reply", "skip-cascade"):
+                    saved_by_model[step.model] = saved_by_model.get(step.model, 0) + 1
+            savings_parts = [f"{cnt}×{mdl}" for mdl, cnt in sorted(saved_by_model.items())]
+            lines.append(f"⚡ Economia: {', '.join(savings_parts)}")
+
+        self.send_message("\n".join(lines))
+
     # -- Stop helpers --
 
     def _get_running_routines(self) -> list:
@@ -9234,6 +9523,8 @@ class ClaudeTelegramBot:
                 "/save": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
                 "/run": lambda: self.cmd_run(arg),
+                "/dry-run": lambda: self.cmd_dry_run(arg),
+                "/dryrun": lambda: self.cmd_dry_run(arg),
                 "/agent": lambda: self.cmd_agent(arg),
                 "/skill": lambda: self.cmd_skill(arg),
                 "/audio": lambda: self.cmd_audio(),

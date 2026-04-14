@@ -81,9 +81,8 @@ struct Routine: Identifiable, Hashable, Sendable {
 
     /// Built-in routines shipped with the repo — can be disabled but not deleted
     static let builtInIds: Set<String> = [
-        "update-check", "vault-graph-update", "journal-audit",
-        "vault-indexes-update", "vault-lint",
-        "vault-index-update", "journal-weekly-rollup",
+        "update-check", "vault-nightly", "vault-lint",
+        "journal-audit", "journal-weekly-rollup",
     ]
     var isBuiltIn: Bool { Self.builtInIds.contains(id) }
 
@@ -117,6 +116,10 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
     var isManual: Bool = false        // true = human review gate, no Claude invocation
     var manualInputFile: String = "" // explicit .md to review (empty = derived from depends_on[0])
     var manualTunnel: Bool = true    // include Tailscale Funnel web editor link in Telegram message
+    /// When true (default), this step is auto-skipped if ALL its dependencies
+    /// returned NO_REPLY. Set false for steps with side effects that must
+    /// always run even when upstream found nothing (cleanup, heartbeat, etc.).
+    var skipOnNoReply: Bool = true
 
     /// Resolved output filename: custom if set, otherwise {stepId}.md
     var resolvedFilename: String {
@@ -158,6 +161,9 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
         } else {
             if !outputFile.isEmpty { lines.append("    output_file: \(outputFile)") }
         }
+        // Only serialise when opting OUT — default (true) stays implicit so
+        // existing pipelines don't get a noisy new field on every save.
+        if !skipOnNoReply { lines.append("    skip_on_no_reply: false") }
         return lines
     }
 
