@@ -1,5 +1,21 @@
 import Foundation
 
+/// Errors thrown by `VaultService` that surface to the UI layer so the user
+/// gets a clear explanation when a vault write goes wrong (zero silent errors).
+enum VaultServiceError: LocalizedError {
+    case routineNotFound(String)
+    case partialDelete(id: String, failures: [String])
+
+    var errorDescription: String? {
+        switch self {
+        case .routineNotFound(let id):
+            return "Rotina '\(id)' não encontrada no vault."
+        case .partialDelete(let id, let failures):
+            return "Rotina '\(id)' não foi totalmente deletada — \(failures.joined(separator: "; "))"
+        }
+    }
+}
+
 actor VaultService {
     private let vaultURL: URL
     private let fm = FileManager.default
@@ -420,19 +436,105 @@ actor VaultService {
         )
     }
 
+    /// Move a routine/pipeline to the macOS Trash, including its step
+    /// subdirectory for pipelines, and drop it from the owner's routines
+    /// index. Resilient: each filesystem op is attempted independently so a
+    /// permission failure on one artifact does not leave the other orphaned.
+    /// Also appends a deletion note to the owner agent's daily journal.
+    ///
+    /// Throws `VaultServiceError.routineNotFound` if there is nothing to
+    /// delete, or `.partialDelete` if any trash operation failed (with the
+    /// list of individual failures so the UI can show them).
     func deleteRoutine(id: String, ownerAgentId: String = "main") throws {
         let owner = ownerAgentId.isEmpty ? "main" : ownerAgentId
         let routinesURL = agentDirURL(for: owner)
             .appending(component: "Routines", directoryHint: .isDirectory)
         let fileURL = routinesURL.appending(component: "\(id).md")
-        guard fm.fileExists(atPath: fileURL.path) else { return }
-        try fm.trashItem(at: fileURL, resultingItemURL: nil)
-        // Also trash pipeline step directory if it exists
         let pipelineDir = routinesURL.appending(component: id, directoryHint: .isDirectory)
-        if fm.fileExists(atPath: pipelineDir.path) {
-            try fm.trashItem(at: pipelineDir, resultingItemURL: nil)
+
+        let mdExists = fm.fileExists(atPath: fileURL.path)
+        let dirExists = fm.fileExists(atPath: pipelineDir.path)
+
+        guard mdExists || dirExists else {
+            throw VaultServiceError.routineNotFound(id)
         }
-        try removeFromRoutinesIndex(id: id, ownerAgentId: owner)
+
+        var failures: [String] = []
+
+        if mdExists {
+            do {
+                try fm.trashItem(at: fileURL, resultingItemURL: nil)
+            } catch {
+                failures.append(".md: \(error.localizedDescription)")
+            }
+        }
+
+        if dirExists {
+            do {
+                try fm.trashItem(at: pipelineDir, resultingItemURL: nil)
+            } catch {
+                failures.append("steps dir: \(error.localizedDescription)")
+            }
+        }
+
+        // Index cleanup — best-effort, never fatal.
+        do {
+            try removeFromRoutinesIndex(id: id, ownerAgentId: owner)
+        } catch {
+            NSLog("VaultService.deleteRoutine: index cleanup failed for \(id): \(error)")
+        }
+
+        // Journal the deletion — best-effort, must not block the delete
+        // response. Users can always check the Trash if the journal fails.
+        do {
+            let body = """
+            - Arquivo: `\(owner)/Routines/\(id).md`
+            - Origem: macOS app
+            - Restaurável via Finder → Lixeira → botão direito → "Colocar de volta"
+            """
+            try appendJournalEntry(
+                agent: owner,
+                header: "Rotina/pipeline `\(id)` deletada",
+                body: body
+            )
+        } catch {
+            NSLog("VaultService.deleteRoutine: journal append failed for \(id): \(error)")
+        }
+
+        if !failures.isEmpty {
+            throw VaultServiceError.partialDelete(id: id, failures: failures)
+        }
+    }
+
+    /// Append a timestamped entry to the agent's daily journal at
+    /// `vault/<agent>/Journal/YYYY-MM-DD.md`. Creates the file with a standard
+    /// frontmatter header if it doesn't exist. Append-only: existing content
+    /// is never rewritten.
+    func appendJournalEntry(agent: String, header: String, body: String) throws {
+        let owner = agent.isEmpty ? "main" : agent
+        let journalDir = agentDirURL(for: owner)
+            .appending(component: "Journal", directoryHint: .isDirectory)
+        try fm.createDirectory(at: journalDir, withIntermediateDirectories: true)
+
+        let dateFmt = DateFormatter()
+        dateFmt.dateFormat = "yyyy-MM-dd"
+        let timeFmt = DateFormatter()
+        timeFmt.dateFormat = "HH:mm"
+        let today = dateFmt.string(from: Date())
+        let now = timeFmt.string(from: Date())
+
+        let fileURL = journalDir.appending(component: "\(today).md")
+        let entry = "\n## \(now) — \(header)\n\n\(body)\n"
+
+        if fm.fileExists(atPath: fileURL.path) {
+            let handle = try FileHandle(forWritingTo: fileURL)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(entry.utf8))
+        } else {
+            let frontmatter = "---\ndate: \(today)\ntype: journal\nagent: \(owner)\n---\n"
+            try (frontmatter + entry).write(to: fileURL, atomically: true, encoding: .utf8)
+        }
     }
 
     // MARK: - Skills

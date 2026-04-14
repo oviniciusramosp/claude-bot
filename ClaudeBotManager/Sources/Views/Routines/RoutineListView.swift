@@ -81,6 +81,19 @@ struct RoutineListView: View {
             // Pre-select the filter agent for new routine creation (defaults to "main")
             RoutineFormSheet(initialOwnerAgentId: agentFilter == "__all__" ? "main" : agentFilter)
         }
+        // Surface deletion / vault errors so the user actually sees them
+        // instead of silent failures from swallowed `try?`.
+        .alert(
+            "Erro",
+            isPresented: Binding(
+                get: { appState.lastError != nil },
+                set: { if !$0 { appState.lastError = nil } }
+            )
+        ) {
+            Button("OK") { appState.lastError = nil }
+        } message: {
+            Text(appState.lastError ?? "")
+        }
     }
 
     @ViewBuilder
@@ -414,7 +427,7 @@ struct RoutineRow: View {
         if !routine.isBuiltIn {
             Divider()
             Button(role: .destructive) {
-                Task { try? await appState.deleteRoutine(routine) }
+                Task { await appState.deleteRoutine(routine) }
             } label: {
                 Label("Move to Trash", systemImage: "trash")
             }

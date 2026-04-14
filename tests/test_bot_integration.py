@@ -728,5 +728,182 @@ class TestModelFallback(unittest.TestCase):
         self.assertIsNone(result)
 
 
+class RoutineDeleteDispatch(unittest.TestCase):
+    """Coverage for `/routine delete` — confirmation keyboard, callback
+    handling, trash invocation, and journal logging. Patches ``trash_path``
+    at module level to avoid moving real files into the developer's Trash.
+    """
+
+    def setUp(self):
+        import time as _time
+        self._time = _time
+        self._td = tempfile.TemporaryDirectory()
+        self.fixture = _BotFixture(Path(self._td.name))
+        self.bot = self.fixture.bot
+        self.bot_module = self.fixture.bot_module
+
+        # Patch trash_path to pretend-trash: actually delete the file/dir so
+        # subsequent existence checks work, and record every call.
+        self.trashed: list[Path] = []
+        self._orig_trash = self.bot_module.trash_path
+
+        def fake_trash(p):
+            self.trashed.append(Path(p))
+            import shutil
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p)
+                else:
+                    p.unlink()
+                return True
+            except OSError:
+                return False
+
+        self.bot_module.trash_path = fake_trash
+
+    def tearDown(self):
+        self.bot_module.trash_path = self._orig_trash
+        self.fixture.cleanup()
+        self._td.cleanup()
+
+    def _last_send(self) -> dict:
+        for method, data in reversed(self.fixture.tg_calls):
+            if method == "sendMessage":
+                return data
+        raise AssertionError("no sendMessage was made")
+
+    def _seed_agent_routine(self, agent: str, name: str, is_pipeline: bool = False) -> Path:
+        """Create `vault/<agent>/` with the hub file + a routine .md. When
+        ``is_pipeline`` is set, also creates ``Routines/<name>/step1.md`` to
+        simulate a pipeline steps dir."""
+        agent_dir = self.fixture.vault / agent
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        (agent_dir / f"agent-{agent}.md").write_text(
+            f"---\nname: {agent}\n---\n[[Skills]] [[Routines]] [[Journal]]\n",
+            encoding="utf-8",
+        )
+        routines_dir = agent_dir / "Routines"
+        routines_dir.mkdir(parents=True, exist_ok=True)
+        routine_path = routines_dir / f"{name}.md"
+        routine_path.write_text(
+            f"---\ntitle: {name}\ntype: {'pipeline' if is_pipeline else 'routine'}\n"
+            f"enabled: true\nmodel: sonnet\n---\n\nBody.\n",
+            encoding="utf-8",
+        )
+        if is_pipeline:
+            steps_dir = routines_dir / name
+            steps_dir.mkdir(parents=True, exist_ok=True)
+            (steps_dir / "step1.md").write_text("step one prompt", encoding="utf-8")
+        return routine_path
+
+    def _fire_callback(self, data: str):
+        self.bot._handle_callback({
+            "id": "cb-test",
+            "data": data,
+            "from": {"id": 123456789},
+            "message": {"chat": {"id": 123456789}, "message_id": 1},
+        })
+
+    # --- Dispatch ---------------------------------------------------------
+
+    def test_routine_delete_requires_name(self):
+        self.bot._handle_text("/routine delete")
+        self.assertIn("Uso", self._last_send()["text"])
+
+    def test_routine_delete_not_found(self):
+        self.bot._handle_text("/routine delete does-not-exist")
+        self.assertIn("não encontrada", self._last_send()["text"])
+
+    def test_routine_delete_shows_confirm_keyboard(self):
+        self._seed_agent_routine("main", "test-del-me")
+        self.bot._handle_text("/routine delete test-del-me")
+        last = self._last_send()
+        self.assertIn("Deletar rotina", last["text"])
+        self.assertIn("test-del-me", last["text"])
+        self.assertIn("main", last["text"])
+        markup = last.get("reply_markup", {})
+        kb = markup.get("inline_keyboard", [])
+        # One row with [Confirmar, Cancelar]
+        self.assertEqual(len(kb), 1)
+        buttons = kb[0]
+        self.assertEqual(len(buttons), 2)
+        self.assertIn("routine_del:main:test-del-me", buttons[0]["callback_data"])
+        self.assertEqual(buttons[1]["callback_data"], "routine_del:cancel")
+
+    def test_routine_delete_pipeline_mentions_steps_dir(self):
+        self._seed_agent_routine("main", "my-pipe", is_pipeline=True)
+        self.bot._handle_text("/routine delete my-pipe")
+        last = self._last_send()
+        self.assertIn("steps", last["text"].lower())
+
+    # --- Callback ---------------------------------------------------------
+
+    def test_cancel_callback_keeps_files(self):
+        routine_path = self._seed_agent_routine("main", "keep-me")
+        self._fire_callback("routine_del:cancel")
+        # Nothing trashed, file still present
+        self.assertEqual(self.trashed, [])
+        self.assertTrue(routine_path.exists())
+
+    def test_confirm_callback_trashes_routine_and_writes_journal(self):
+        routine_path = self._seed_agent_routine("main", "kill-me")
+        self._fire_callback("routine_del:main:kill-me")
+        # Trash_path was called on the .md
+        self.assertTrue(any(p == routine_path for p in self.trashed),
+                        f"expected {routine_path} in {self.trashed}")
+        self.assertFalse(routine_path.exists())
+        # Journal entry exists and mentions the routine
+        today = self._time.strftime("%Y-%m-%d")
+        journal = self.fixture.vault / "main" / "Journal" / f"{today}.md"
+        self.assertTrue(journal.exists(), "journal file should have been created")
+        content = journal.read_text(encoding="utf-8")
+        self.assertIn("kill-me", content)
+        self.assertIn("Rotina/pipeline", content)
+        # Success message on Telegram
+        self.assertIn("deletada", self._last_send()["text"])
+
+    def test_confirm_callback_trashes_pipeline_steps_dir_too(self):
+        routine_path = self._seed_agent_routine("main", "bye-pipe", is_pipeline=True)
+        steps_dir = routine_path.parent / "bye-pipe"
+        self.assertTrue(steps_dir.is_dir())  # sanity
+        self._fire_callback("routine_del:main:bye-pipe")
+        # Both md and steps dir should have been trashed
+        trashed_names = [p.name for p in self.trashed]
+        self.assertIn("bye-pipe.md", trashed_names)
+        self.assertIn("bye-pipe", trashed_names)
+        self.assertFalse(routine_path.exists())
+        self.assertFalse(steps_dir.exists())
+
+    def test_confirm_callback_not_found_reports_cleanly(self):
+        """If the routine vanished between keyboard and confirm, report it."""
+        self._fire_callback("routine_del:main:ghost-routine")
+        self.assertIn("não encontrada", self._last_send()["text"])
+        self.assertEqual(self.trashed, [])
+
+    # --- Helpers isoladamente -------------------------------------------------
+
+    def test_append_journal_entry_creates_file_with_frontmatter(self):
+        result = self.bot._append_journal_entry(
+            "main", "Test header", "- body line 1\n- body line 2"
+        )
+        self.assertIsNotNone(result)
+        content = result.read_text(encoding="utf-8")
+        self.assertIn("---", content)
+        self.assertIn("type: journal", content)
+        self.assertIn("agent: main", content)
+        self.assertIn("Test header", content)
+        self.assertIn("body line 1", content)
+
+    def test_append_journal_entry_appends_not_rewrites(self):
+        path1 = self.bot._append_journal_entry("main", "First", "body1")
+        path2 = self.bot._append_journal_entry("main", "Second", "body2")
+        self.assertEqual(path1, path2)  # same daily file
+        content = path1.read_text(encoding="utf-8")
+        self.assertIn("First", content)
+        self.assertIn("Second", content)
+        # Frontmatter must appear only once
+        self.assertEqual(content.count("type: journal"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

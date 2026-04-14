@@ -49,6 +49,12 @@ final class AppState: ObservableObject {
     /// Settings → Customization → Vault Rules. NOT specific to any agent.
     @Published var vaultClaudeMd: String = ""
 
+    /// User-facing error message from the most recent failed operation (e.g.
+    /// a routine delete that couldn't trash the step directory). Views bind
+    /// an alert to this and clear it on dismissal. `nil` means no pending
+    /// error to show.
+    @Published var lastError: String?
+
     // Vault env internals (preserves comments/blanks on save)
     private var vaultEnvRawLines: [String] = []
 
@@ -392,14 +398,33 @@ final class AppState: ObservableObject {
         return result
     }
 
-    func deleteRoutine(id: String, ownerAgentId: String = "main") async throws {
-        try await vaultService?.deleteRoutine(id: id, ownerAgentId: ownerAgentId)
-        await loadRoutines()
+    /// Delete a routine by id. Returns `true` on full success; on failure,
+    /// stores a user-facing message in `lastError` (which view-level alerts
+    /// observe) and returns `false`. Never throws — the alert IS the error
+    /// channel, so callers don't need to remember to `try?`.
+    @discardableResult
+    func deleteRoutine(id: String, ownerAgentId: String = "main") async -> Bool {
+        guard let svc = vaultService else {
+            self.lastError = "VaultService indisponível."
+            return false
+        }
+        do {
+            try await svc.deleteRoutine(id: id, ownerAgentId: ownerAgentId)
+            await loadRoutines()
+            return true
+        } catch {
+            self.lastError = error.localizedDescription
+            NSLog("deleteRoutine failed for \(id): \(error)")
+            // Reload anyway — the trash may have succeeded partially and the
+            // UI should reflect whatever state we actually have on disk.
+            await loadRoutines()
+            return false
+        }
     }
 
-    func deleteRoutine(_ routine: Routine) async throws {
-        try await vaultService?.deleteRoutine(id: routine.id, ownerAgentId: routine.ownerAgentId)
-        await loadRoutines()
+    @discardableResult
+    func deleteRoutine(_ routine: Routine) async -> Bool {
+        return await deleteRoutine(id: routine.id, ownerAgentId: routine.ownerAgentId)
     }
 
     func stopRoutine(_ routine: Routine) async throws {

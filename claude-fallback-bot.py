@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.16.1"  # fix: inject TELEGRAM_NOTIFY + AGENT_CHAT_ID/THREAD_ID into subprocess env; telegram_notify.py auto-detects agent
+BOT_VERSION = "3.17.0"  # feat: /routine delete + thorough trash+journal deletion in macOS app (zero silent errors on UI)
 
 import hmac
 import hashlib
@@ -270,6 +270,32 @@ def iter_agent_ids() -> List[str]:
         if hub.is_file():
             ids.append(entry.name)
     return ids
+
+
+def trash_path(path: Path) -> bool:
+    """Move a file or directory to the macOS Trash via Finder (AppleScript).
+
+    Preserves Finder's "Put Back" feature, matching the Swift macOS app
+    that uses FileManager.trashItem. Stdlib-only (osascript via subprocess),
+    so the main bot keeps its no-pip-dependencies rule.
+
+    Returns True on success, False if the path does not exist or the move
+    failed (and the failure is logged — zero silent errors).
+    """
+    if not path.exists():
+        return False
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'tell application "Finder" to delete POSIX file "{path}"'],
+            check=True, capture_output=True, timeout=10,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        logger.error("trash_path failed for %s: %s", path, e)
+        return False
+
+
 TEMP_AUDIO_DIR = Path("/tmp/claude-bot-audio")
 HEAR_BIN_DIR = DATA_DIR / "bin"
 
@@ -698,6 +724,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 🔁 *Rotinas*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
+• `/routine delete <nome>` — Deletar rotina/pipeline (move arquivos para Lixeira)
 • `/run [nome]` — Executar rotina/pipeline manualmente
 
 🤖 *Agentes*
@@ -6896,6 +6923,37 @@ class ClaudeTelegramBot:
         journal_dir = get_agent_journal_dir(session.agent if session else None)
         return str(journal_dir / f"{today}.md")
 
+    def _append_journal_entry(self, agent: Optional[str], header: str, body: str) -> Optional[Path]:
+        """Append a timestamped entry to ``<agent>/Journal/YYYY-MM-DD.md``.
+
+        Append-only: never rewrites existing content. Creates the file with a
+        standard frontmatter header if it doesn't exist yet. Used by commands
+        like ``/routine delete`` to leave an audit trail of destructive
+        actions in the agent's journal.
+
+        Returns the journal path on success, or None on failure (errors are
+        logged, never silent).
+        """
+        try:
+            journal_d = get_agent_journal_dir(agent, create=True)
+            today = time.strftime("%Y-%m-%d")
+            path = journal_d / f"{today}.md"
+            now = time.strftime("%H:%M")
+            entry = f"\n## {now} — {header}\n\n{body}\n"
+            if not path.exists():
+                owner = agent or "main"
+                fm_header = (
+                    f"---\ndate: {today}\ntype: journal\nagent: {owner}\n---\n"
+                )
+                path.write_text(fm_header + entry, encoding="utf-8")
+            else:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(entry)
+            return path
+        except OSError as e:
+            logger.error("_append_journal_entry failed for agent=%s: %s", agent, e)
+            return None
+
     def cmd_important(self) -> None:
         journal_path = self._get_journal_path()
         prompt = (
@@ -6947,6 +7005,11 @@ class ClaudeTelegramBot:
         elif arg_lower.startswith("edit"):
             edit_arg = arg[4:].strip()
             self._routine_edit(edit_arg)
+        elif arg_lower.startswith("delete") or arg_lower.startswith("rm"):
+            # Strip leading "delete " or "rm " (and aliases) to get the name
+            rest = arg.split(maxsplit=1)
+            del_arg = rest[1].strip() if len(rest) > 1 else ""
+            self._routine_delete(del_arg)
         else:
             # Treat as creation request with context
             self._routine_create(arg)
@@ -7017,6 +7080,126 @@ class ClaudeTelegramBot:
         if name:
             prompt += f"\n\nO usuario quer editar: {name}"
         self._run_claude_prompt(prompt)
+
+    def _routine_delete(self, name: str) -> None:
+        """Show a confirmation keyboard before deleting a routine/pipeline.
+
+        The actual delete happens in the ``routine_del:*`` callback handler so
+        the user gets a chance to cancel. Locates the routine across all
+        agents via :func:`_find_routine_file` and reports "não encontrada"
+        immediately if there's nothing to delete.
+        """
+        name = (name or "").strip()
+        if not name:
+            self.send_message(
+                "Uso: `/routine delete <nome>`\n\n"
+                "Exemplo: `/routine delete crypto-news`"
+            )
+            return
+        routine_path = _find_routine_file(name)
+        if routine_path is None:
+            self.send_message(f"❌ Rotina `{name}` não encontrada.")
+            return
+        # v3.1 per-agent layout: the owning agent is the folder two levels up
+        # (e.g. vault/crypto-bro/Routines/foo.md → crypto-bro).
+        owner = routine_path.parent.parent.name
+        pipeline_dir = routine_path.parent / name  # no .md suffix
+        extras = []
+        if pipeline_dir.is_dir():
+            extras.append(f"+ diretório de steps `{name}/`")
+        extras_text = ("\n" + "\n".join(extras)) if extras else ""
+        markup = {"inline_keyboard": [[
+            {"text": "🗑 Confirmar", "callback_data": f"routine_del:{owner}:{name}"},
+            {"text": "Cancelar", "callback_data": "routine_del:cancel"},
+        ]]}
+        self.send_message(
+            f"🗑 *Deletar rotina*\n\n"
+            f"Rotina: `{name}`\n"
+            f"Agente: `{owner}`\n"
+            f"Arquivo: `{owner}/Routines/{name}.md`{extras_text}\n\n"
+            f"Os arquivos serão movidos para a Lixeira (recuperáveis via Finder).",
+            reply_markup=markup,
+        )
+
+    def _routine_delete_confirmed(self, owner: str, name: str) -> None:
+        """Perform the actual delete after the user confirmed via inline kbd.
+
+        Trashes the .md and the pipeline steps dir (if present), removes the
+        entry from the agent's routines index, and appends a deletion note to
+        the agent's daily journal. Every failure is reported — no silent
+        errors (per CLAUDE.md zero-silent-errors rule).
+        """
+        routine_path = _find_routine_file(name)
+        if routine_path is None:
+            self.send_message(f"❌ Rotina `{name}` não encontrada (talvez já deletada).")
+            return
+        pipeline_dir = routine_path.parent / name  # no .md
+        failures: list = []
+        trashed: list = []
+
+        if trash_path(routine_path):
+            trashed.append(f"`{name}.md`")
+        else:
+            failures.append(f"`{name}.md`")
+
+        if pipeline_dir.is_dir():
+            if trash_path(pipeline_dir):
+                trashed.append(f"`{name}/` (steps)")
+            else:
+                failures.append(f"`{name}/` (steps)")
+
+        # Best-effort index cleanup — strip the routine's wikilink / bullet
+        # from the per-agent index file. Missing or unreadable index is not
+        # fatal; the next ``vault-indexes-update`` run will reconcile it.
+        try:
+            index_path = routine_path.parent / "agent-routines.md"
+            if index_path.is_file():
+                original = index_path.read_text(encoding="utf-8")
+                # Remove any line mentioning the routine name in a wikilink or
+                # bare stem form. Stay conservative: only drop lines that
+                # explicitly reference the stem to avoid eating unrelated
+                # content.
+                cleaned_lines = [
+                    ln for ln in original.splitlines()
+                    if f"[[{name}]]" not in ln
+                    and f"/{name}.md" not in ln
+                    and f" {name} " not in ln
+                    and not ln.strip().endswith(f" {name}")
+                ]
+                cleaned = "\n".join(cleaned_lines)
+                if cleaned != original:
+                    index_path.write_text(cleaned + ("\n" if original.endswith("\n") else ""), encoding="utf-8")
+        except OSError as e:
+            logger.error("routine delete index cleanup failed for %s: %s", name, e)
+
+        # Journal entry — best-effort. The trash is authoritative; a missing
+        # journal note is annoying but not a data-loss situation.
+        body = (
+            f"- Arquivo: `{owner}/Routines/{name}.md`\n"
+            f"- Origem: Telegram `/routine delete`\n"
+            f"- Restaurável via Finder → Lixeira → botão direito → \"Colocar de volta\""
+        )
+        self._append_journal_entry(owner, f"Rotina/pipeline `{name}` deletada", body)
+
+        if failures and not trashed:
+            self.send_message(
+                f"❌ Falha ao deletar `{name}`: nenhum arquivo foi movido para a Lixeira.\n"
+                f"Itens com erro: {', '.join(failures)}\n"
+                f"Veja `~/.claude-bot/bot.log` para detalhes."
+            )
+        elif failures:
+            self.send_message(
+                f"⚠️ Deleção parcial de `{name}`.\n"
+                f"Movidos para a Lixeira: {', '.join(trashed)}\n"
+                f"Falharam: {', '.join(failures)}\n"
+                f"Veja `~/.claude-bot/bot.log` para detalhes."
+            )
+        else:
+            self.send_message(
+                f"✅ `{name}` deletada.\n"
+                f"Movidos para a Lixeira: {', '.join(trashed)}\n"
+                f"Journal: `{owner}/Journal/{time.strftime('%Y-%m-%d')}.md`"
+            )
 
     # -- Stop helpers --
 
@@ -8782,6 +8965,20 @@ class ClaudeTelegramBot:
                 self._routine_create("")
             elif action == "edit":
                 self._routine_edit("")
+        elif data.startswith("routine_del:"):
+            # Callback from /routine delete <name> confirmation keyboard.
+            # Formats: routine_del:<agent>:<name>  |  routine_del:cancel
+            payload = data.split(":", 2)
+            if len(payload) >= 2 and payload[1] == "cancel":
+                self.answer_callback(cb_id, "Cancelado")
+                self.send_message("🚫 Deleção cancelada.")
+                return
+            if len(payload) == 3:
+                owner, name = payload[1], payload[2]
+                self.answer_callback(cb_id, "Deletando…")
+                self._routine_delete_confirmed(owner, name)
+            else:
+                self.answer_callback(cb_id, "Callback inválido")
         elif data.startswith("run:"):
             name = data.split(":", 1)[1]
             self.answer_callback(cb_id, f"Executando {name}...")

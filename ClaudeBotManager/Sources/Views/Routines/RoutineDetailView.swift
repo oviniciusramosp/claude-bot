@@ -72,12 +72,26 @@ struct RoutineDetailView: View {
         .confirmationDialog("Move to Trash?", isPresented: $showDeleteConfirm, titleVisibility: .visible) {
             Button("Move to Trash", role: .destructive) {
                 Task {
-                    try? await appState.deleteRoutine(routine)
-                    dismiss()
+                    // Only dismiss on full success — if the delete failed,
+                    // leave the sheet open so the user can see the alert
+                    // bound to `appState.lastError` below and retry.
+                    let ok = await appState.deleteRoutine(routine)
+                    if ok { dismiss() }
                 }
             }
         } message: {
             Text("The routine will be moved to Trash. You can restore from Finder.")
+        }
+        .alert(
+            "Erro",
+            isPresented: Binding(
+                get: { appState.lastError != nil },
+                set: { if !$0 { appState.lastError = nil } }
+            )
+        ) {
+            Button("OK") { appState.lastError = nil }
+        } message: {
+            Text(appState.lastError ?? "")
         }
         .task {
             history = await appState.routineHistory(id: routine.id)
