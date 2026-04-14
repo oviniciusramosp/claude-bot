@@ -27,6 +27,18 @@ pinchtab click <ref> --port 9870     # click element
 pinchtab fill <ref> "text" --port 9870  # fill form field
 ```
 
+### Tab cleanup rule
+
+**Every routine/pipeline that uses PinchTab MUST close its tabs after finishing.** Unclosed tabs accumulate, exhaust Chrome resources, and cause `context deadline exceeded` errors that block all subsequent PinchTab operations.
+
+Add at the end of every routine prompt that uses PinchTab:
+```
+**Cleanup:** After extracting all needed content, close the current tab:
+```bash
+pinchtab tabs close --port 9870
+```
+```
+
 ## Telegram notifications from pipelines/routines
 
 - **`scripts/telegram_notify.py`** — Send messages to the correct Telegram topic for any agent.
