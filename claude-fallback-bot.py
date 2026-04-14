@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.19.0"  # feat: update-check with changelog/buttons + OSS Radar pipeline + pipeline NO_REPLY support
+BOT_VERSION = "3.19.1"  # fix: protect all built-in routines from deletion (vault-index-update, journal-weekly-rollup, vault-indexes-update, vault-lint)
 
 import hmac
 import hashlib
@@ -671,6 +671,7 @@ ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget =>
 BUILTIN_ROUTINE_IDS: frozenset = frozenset({
     "update-check", "vault-graph-update", "journal-audit",
     "vault-indexes-update", "vault-lint",
+    "vault-index-update", "journal-weekly-rollup",
 })
 # Node types EXCLUDED from Active Memory: "skill" is already handled by
 # _select_relevant_skills (SKILL_HINTS_ENABLED); "history" is churn-y log data.
