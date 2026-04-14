@@ -169,14 +169,14 @@ struct AgentDetailView: View {
                                 .textFieldStyle(.plain)
                                 .padding(.horizontal, 8)
                                 .frame(height: 24)
-                                .background(Color.black.opacity(0.05))
+                                .background(Color.primary.opacity(0.06))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                             TextField("Thread", text: $agent.threadId)
                                 .font(.system(size: 13, design: .monospaced))
                                 .textFieldStyle(.plain)
                                 .padding(.horizontal, 8)
                                 .frame(width: 80, height: 24)
-                                .background(Color.black.opacity(0.05))
+                                .background(Color.primary.opacity(0.06))
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
                         }
                         Text("Chat and thread where this agent responds")
@@ -232,11 +232,11 @@ struct AgentDetailView: View {
                 .frame(minHeight: 80)
                 .padding(8)
                 .scrollContentBackground(.hidden)
-                .background(Color.white)
+                .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 )
         }
     }
@@ -250,11 +250,11 @@ struct AgentDetailView: View {
                 .frame(minHeight: 120)
                 .padding(8)
                 .scrollContentBackground(.hidden)
-                .background(Color.white)
+                .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 )
         }
     }
@@ -268,11 +268,11 @@ struct AgentDetailView: View {
                 .frame(minHeight: 80)
                 .padding(8)
                 .scrollContentBackground(.hidden)
-                .background(Color.white)
+                .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 )
         }
     }
@@ -286,11 +286,11 @@ struct AgentDetailView: View {
                 .frame(minHeight: 80)
                 .padding(8)
                 .scrollContentBackground(.hidden)
-                .background(Color.white)
+                .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 )
         }
     }
@@ -384,7 +384,7 @@ struct AgentDetailView: View {
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .frame(height: 24)
-            .background(Color.black.opacity(0.05))
+            .background(Color.primary.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
