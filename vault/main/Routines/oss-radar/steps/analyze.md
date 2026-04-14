@@ -6,8 +6,6 @@ Read the collected data from the previous step:
 cat data/collect.md
 ```
 
-If the file contains exactly `NO_ACTIVITY`, respond with exactly `NO_REPLY` and stop.
-
 ## Your product context
 
 claude-bot key capabilities for comparison:

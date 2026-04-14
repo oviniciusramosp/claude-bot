@@ -36,6 +36,7 @@ BEFORE creating anything, analyze the user's goal to determine whether it would 
 - Intermediate steps could use **different models** (haiku for collection, opus for analysis)
 - The whole process would take **more than 5 minutes** with a single agent
 - Parts of the work are **independent of each other** and could run in parallel
+- **A cheap screening step can decide whether expensive downstream work should run at all** — pipelines support early-exit via `NO_REPLY` (a haiku gate that finds nothing causes the opus/sonnet steps behind it to auto-skip, saving real tokens). See `Skills/create-pipeline.md` Rule 6.
 
 **If 2+ pipeline signals are detected:**
 
@@ -91,6 +92,11 @@ Help the user formulate an effective prompt. If the provided prompt is vague, su
 - [ ] Defined output format (bullets, table, plain text)
 - [ ] Fallback instruction (what to do if something fails)
 - [ ] Quantity/limit when applicable (top 5, last 3 days)
+
+**Note on `NO_REPLY`:**
+- In a **simple routine**, `NO_REPLY` makes the bot send nothing to Telegram — the routine completes silently. Use it when there's nothing worth reporting that run.
+- In a **pipeline**, `NO_REPLY` ALSO triggers early-exit: every downstream step that depends on a gate returning `NO_REPLY` is auto-skipped, saving tokens on expensive models. If the user's use case involves "check X and only analyze if something changed", that's a pipeline signal — suggest conversion.
+- **Detection is tolerant.** The bot accepts `NO_REPLY`, `NO REPLY`, `NOREPLY`, `no_reply`, and variants with trailing punctuation (`NO_REPLY.`, `NO_REPLY!`). Any of these forms in the prompt are equivalent, but prefer the canonical `NO_REPLY` for consistency.
 
 #### When to add an `## Example Output` section
 

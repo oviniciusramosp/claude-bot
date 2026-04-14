@@ -432,7 +432,8 @@ actor VaultService {
             outputFile: dict["output_file"]?.trimmingCharacters(in: .whitespaces) ?? "",
             isManual: dict["manual"]?.trimmingCharacters(in: .whitespaces).lowercased() == "true",
             manualInputFile: dict["input_file"]?.trimmingCharacters(in: .whitespaces) ?? "",
-            manualTunnel: dict["tunnel"]?.trimmingCharacters(in: .whitespaces).lowercased() != "false"
+            manualTunnel: dict["tunnel"]?.trimmingCharacters(in: .whitespaces).lowercased() != "false",
+            skipOnNoReply: dict["skip_on_no_reply"]?.trimmingCharacters(in: .whitespaces).lowercased() != "false"
         )
     }
 

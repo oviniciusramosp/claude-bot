@@ -153,6 +153,38 @@ Steps that make external calls (APIs, scraping, webhooks) should have `retry: 1`
 - Review: 300-600s timeout, 180s inactivity
 - Publishing (API calls): 120-180s timeout, 60s inactivity
 
+**Rule 6 — Early-exit via NO_REPLY (screening/gate steps).**
+When a step's output is exactly `NO_REPLY`, the bot auto-skips every step that depends on it — **provided all of that step's dependencies also returned `NO_REPLY`**. This enables cheap screening without explicit branching logic in the YAML.
+
+Pattern: a fast haiku step checks whether there is anything to process. If not, it outputs `NO_REPLY`; every downstream step is automatically skipped and the pipeline exits silently without notifying Telegram.
+
+**Detection is tolerant.** The bot accepts `NO_REPLY`, `NO REPLY`, `NOREPLY`, `no_reply`, `No Reply`, with or without trailing punctuation (`.`, `!`, `?`, `;`, `,`, `:`) and surrounding whitespace. All of these trigger the skip. Writing any of these variants in step prompts is safe.
+
+Design rules:
+- **Screening step must be a direct dependency.** The dependent step is skipped only when ALL of its own `depends_on` steps returned `NO_REPLY` or were themselves skipped/failed. If even one dep has real output, the dependent runs.
+- **For serial pipelines:** gate step returns `NO_REPLY` → all dependents cascade-skip automatically.
+- **For parallel collectors:** each collector that finds nothing returns `NO_REPLY`. The aggregator (depends_on all collectors) is skipped only when *every* collector returned `NO_REPLY`. If one has data, the aggregator runs with whatever was collected.
+- **The step itself completes normally** (status: `completed`); only its dependents are skipped. The pipeline ends silently with no Telegram notification.
+- **In the step prompt**, add an explicit conditional at the end: *"If [condition meaning nothing to process], respond with exactly `NO_REPLY` and stop."* Do not write a data file in that case.
+
+Example — serial gate:
+```
+scout (haiku, no deps)       → if tier=none, outputs NO_REPLY
+  └── collect (haiku)        → auto-skipped
+        └── analyze (opus)   → auto-skipped
+```
+
+Example — parallel collectors:
+```
+fetch-a (haiku) ──┐
+fetch-b (haiku) ──┤──► select-topics (sonnet) → skipped only if ALL three return NO_REPLY
+fetch-c (haiku) ──┘
+```
+
+**Opt-out: `skip_on_no_reply: false`** — add this YAML field on a step that should run even when all its deps returned `NO_REPLY`. Use for cleanup, heartbeat, or state-reset steps with side effects that must always execute. The macOS app exposes this as a per-step Toggle (`Early-exit on NO_REPLY`). Default is `true` — leave it alone unless you actively need the override.
+
+**Testing with `/dry-run`** — before publishing a new pipeline (or any time you change a gate step), run `/dry-run <pipeline-name> <step1,step2,…>` on Telegram to simulate which steps would be skipped if the listed steps returned `NO_REPLY`. The command walks the DAG in-memory and prints a plan (no Claude runner spawned, zero tokens spent). Use this to verify your skip cascade before wasting real model calls.
+
 #### 4. Present visual DAG to the user
 
 Before creating the files, show the proposed DAG in visual format:

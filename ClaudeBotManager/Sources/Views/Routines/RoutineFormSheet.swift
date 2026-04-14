@@ -788,6 +788,25 @@ struct PipelineStepCard: View {
                                 }
                             }
                         }
+
+                        // Early-exit gate — opt-out per step.  When every
+                        // dep returns NO_REPLY the step is auto-skipped
+                        // unless this toggle is off.
+                        Toggle(isOn: $step.skipOnNoReply) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "bolt.slash")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Early-exit on NO_REPLY")
+                                        .font(.system(size: 13, weight: .medium))
+                                    Text("Pula este step quando todas as dependências retornam NO_REPLY (padrão: on — economiza tokens)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.secondary)
+                                }
+                            }
+                        }
+                        .toggleStyle(.switch)
                     } else {
                         // Manual review step fields
                         let depPlaceholder = step.dependsOn.first.map { "\($0).md" } ?? "reviewer.md"

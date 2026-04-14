@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.23.2"  # chore: rename vault-nightly → vault-rebuild, vault-lint → vault-health
+BOT_VERSION = "3.23.3"  # feat: skip_on_no_reply UI toggle in RoutineFormSheet + oss-radar schedule/flow fixes
 
 import hmac
 import hashlib

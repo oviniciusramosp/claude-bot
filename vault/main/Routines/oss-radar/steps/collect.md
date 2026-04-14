@@ -110,7 +110,6 @@ Write ALL collected data to the data file. Structure it as:
 ## Summary
 - OpenClaw: {N} new commits, {M} releases
 - Hermes Agent: {N} new commits, {M} releases, {K} open PRs
-
-If BOTH repos had zero activity in the last 48h, write exactly:
-NO_ACTIVITY
 ```
+
+If BOTH repos had zero activity in the last 48h, respond with exactly `NO_REPLY` and stop. Do not write the data file.

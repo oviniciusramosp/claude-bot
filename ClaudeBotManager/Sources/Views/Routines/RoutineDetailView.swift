@@ -395,7 +395,7 @@ struct RoutineDetailView: View {
                     .tracking(-0.6)
                     .foregroundStyle(Color.primary.opacity(0.5))
 
-                Text("Steps share a workspace. Each reads previous outputs from data/{id}.md.")
+                Text("Steps share a workspace. Each reads previous outputs from data/{id}.md. If a step outputs exactly NO_REPLY, all steps that depend on it are auto-skipped.")
                     .font(.system(size: 10))
                     .foregroundStyle(Color(white: 0.45))
 

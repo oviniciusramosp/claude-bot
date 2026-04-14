@@ -1,5 +1,5 @@
 ---
-title: "OSS Radar"
+title: OSS Radar
 description: Daily scan of OpenClaw and Hermes Agent repos for new commits, PRs, and releases. Opus analyzes relevance to claude-bot product and reports actionable insights.
 type: pipeline
 created: 2026-04-14
@@ -7,7 +7,7 @@ updated: 2026-04-14
 tags: [pipeline, oss, openclaw, hermes, competitive-intel, daily]
 schedule:
   days: ["*"]
-  times: ["11:00"]
+  times: [07:00]
 model: sonnet
 enabled: true
 context: minimal
@@ -31,6 +31,7 @@ steps:
     prompt_file: steps/analyze.md
     timeout: 600
     output: telegram
+
 ```
 
 ## Steps
