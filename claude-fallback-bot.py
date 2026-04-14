@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.19.1"  # fix: protect all built-in routines from deletion (vault-index-update, journal-weekly-rollup, vault-indexes-update, vault-lint)
+BOT_VERSION = "3.20.0"  # feat: pipeline early-exit — auto-skip steps when all deps return NO_REPLY
 
 import hmac
 import hashlib
@@ -4177,7 +4177,50 @@ class PipelineExecutor:
                 if not non_terminal:
                     break
 
-            # Find ready steps (pending + all deps completed)
+            # Propagate skips: if all deps of a pending step are terminal, decide
+            # whether to skip or run it.  Two cases trigger a skip:
+            #   1. Any dep is failed or skipped (existing cascade semantics).
+            #   2. All deps completed but every one returned NO_REPLY (nothing to
+            #      process).  If even one dep has real output the step still runs.
+            # This runs each wave so cascades propagate naturally over multiple
+            # iterations without explicit recursion.
+            with self._lock:
+                for step in self.task.steps:
+                    if self._step_status[step.id] != "pending":
+                        continue
+                    deps = step.depends_on
+                    if not deps:
+                        continue
+                    all_deps_terminal = all(
+                        self._step_status.get(d) in terminal for d in deps
+                    )
+                    if not all_deps_terminal:
+                        continue
+                    any_dep_non_completed = any(
+                        self._step_status.get(d) != "completed" for d in deps
+                    )
+                    all_deps_no_reply = all(
+                        (self._step_outputs.get(d) or "").strip() == "NO_REPLY"
+                        for d in deps
+                    )
+                    if any_dep_non_completed or all_deps_no_reply:
+                        reason = (
+                            "All dependencies returned NO_REPLY"
+                            if all_deps_no_reply and not any_dep_non_completed
+                            else "Dependency skipped or failed"
+                        )
+                        self._step_status[step.id] = "skipped"
+                        self.state.set_step_status(
+                            self.task.name, self.task.time_slot, step.id, "skipped",
+                            error=reason,
+                        )
+                        logger.info(
+                            "Pipeline %s: step %s auto-skipped (%s)",
+                            self.task.name, step.id, reason,
+                        )
+
+            # Find ready steps (pending + all deps completed, at least one with
+            # real output — NO_REPLY-only deps are handled by the pass above).
             ready = []
             with self._lock:
                 for sid, st in self._step_status.items():
