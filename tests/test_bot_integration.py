@@ -373,6 +373,115 @@ trigger: "when {name}"
         self.assertEqual(results, [])
 
 
+class SkillShellExpansionTest(unittest.TestCase):
+    """Dynamic shell substitution in skills (!`cmd` / ```! blocks).
+
+    Opt-in via `allow_shell: true` frontmatter. The expansion happens inside
+    _find_relevant_skills when a matching skill has the flag, so the caller
+    gets a `body` field pre-filled with live shell output.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.fixture = _BotFixture(Path(self._td.name))
+        self.bot = self.fixture.bot
+        self.skills_dir = self.fixture.vault / "main" / "Skills"
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.fixture.cleanup()
+        self._td.cleanup()
+
+    def _write_skill(self, name, body, allow_shell=False, tags=None, trigger=None):
+        tags = tags or ["skill", "test"]
+        trigger = trigger or name
+        lines = [
+            "---",
+            f'title: "{name}"',
+            f'description: "Test skill for {name}"',
+            "type: skill",
+            "created: 2026-04-14",
+            "updated: 2026-04-14",
+            f"tags: [{', '.join(tags)}]",
+            f'trigger: "{trigger}"',
+        ]
+        if allow_shell:
+            lines.append("allow_shell: true")
+        lines.append("---")
+        lines.append("")
+        lines.append(body)
+        (self.skills_dir / f"{name}.md").write_text("\n".join(lines), encoding="utf-8")
+
+    # --- helper direct tests (not dependent on vault_query) ---
+
+    def test_expand_inline_shell_substitution(self):
+        result = self.bot._expand_shell_substitutions("before !`echo hello` after")
+        self.assertEqual(result, "before hello after")
+
+    def test_expand_multiple_inline_substitutions(self):
+        result = self.bot._expand_shell_substitutions("!`echo a` and !`echo b`")
+        self.assertEqual(result, "a and b")
+
+    def test_expand_fenced_shell_block(self):
+        content = "pre\n```!\necho fenced\n```\npost"
+        result = self.bot._expand_shell_substitutions(content)
+        self.assertIn("fenced", result)
+        self.assertNotIn("```!", result)
+
+    def test_expand_handles_failing_command(self):
+        result = self.bot._expand_shell_substitutions("!`false`")
+        self.assertTrue(result.startswith("[error"), f"got: {result!r}")
+
+    def test_expand_handles_timeout(self):
+        result = self.bot._expand_shell_substitutions("!`sleep 10`", timeout=1)
+        self.assertEqual(result, "[timeout]")
+
+    def test_expand_ignores_content_without_shell_markers(self):
+        content = "just some text without shell markers"
+        result = self.bot._expand_shell_substitutions(content)
+        self.assertEqual(result, content)
+
+    # --- end-to-end tests via _find_relevant_skills ---
+
+    def test_find_skills_with_allow_shell_expands_body(self):
+        self._write_skill(
+            "shellfoo",
+            "Task description.\n\nCurrent: !`echo live-state-marker`\n\nEnd.",
+            allow_shell=True,
+            trigger="shellfoo needed",
+        )
+        results = self.bot._find_relevant_skills("shellfoo needed now please", limit=1)
+        self.assertEqual(len(results), 1, f"results: {results}")
+        self.assertIn("body", results[0])
+        self.assertIn("live-state-marker", results[0]["body"])
+        # Placeholder should be substituted, not left as literal
+        self.assertNotIn("!`echo live-state-marker`", results[0]["body"])
+
+    def test_find_skills_without_allow_shell_does_not_expand(self):
+        self._write_skill(
+            "nosshellfoo",
+            "!`echo should-not-run`",
+            allow_shell=False,
+            trigger="nosshellfoo needed",
+        )
+        results = self.bot._find_relevant_skills("nosshellfoo needed now please", limit=1)
+        self.assertEqual(len(results), 1, f"results: {results}")
+        # body key should be absent when allow_shell is not set
+        self.assertNotIn("body", results[0])
+
+    def test_find_skills_allow_shell_but_no_blocks(self):
+        self._write_skill(
+            "plainfoo",
+            "Just a plain body with no shell blocks at all.",
+            allow_shell=True,
+            trigger="plainfoo needed",
+        )
+        results = self.bot._find_relevant_skills("plainfoo needed now please", limit=1)
+        self.assertEqual(len(results), 1)
+        self.assertIn("body", results[0])
+        self.assertIn("plain body", results[0]["body"])
+
+
 class LongMessageSplitting(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()

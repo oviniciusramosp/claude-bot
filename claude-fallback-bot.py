@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.13.3"  # fix: z.AI proxy absorbs transient 429s, fallback skips same-provider on rate limit
+BOT_VERSION = "3.14.0"  # feat: dynamic shell substitution in skills (opt-in via allow_shell: true)
 
 import hmac
 import hashlib
@@ -6229,6 +6229,64 @@ class ClaudeTelegramBot:
             ascii_text = ascii_text.replace(sep, " ")
         return ascii_text.lower()
 
+    @staticmethod
+    def _expand_shell_substitutions(content: str, cwd: Optional[str] = None, timeout: int = 5) -> str:
+        """Pre-process shell substitutions in a skill body.
+
+        Supports two forms (matching Claude Code's native skill syntax):
+          - Inline:       !`command`
+          - Fenced block: ```!<newline>command<newline>```
+
+        Each command runs via ``subprocess.run(shell=True, cwd=cwd,
+        timeout=timeout, capture_output=True, text=True)``. On success the
+        placeholder is replaced by the trimmed stdout (capped at 500 chars).
+        On non-zero exit with no stdout, the placeholder is replaced with
+        ``[error: exit <code>: <stderr>]``. On timeout, ``[timeout]``. On any
+        other exception, ``[error: <message>]``.
+
+        This is an opt-in feature: a skill must declare ``allow_shell: true``
+        in its frontmatter for the caller to invoke this helper. Skills
+        without the flag keep the standard metadata-only injection.
+        """
+        def _run(cmd: str) -> str:
+            cmd_stripped = cmd.strip()
+            if not cmd_stripped:
+                return ""
+            try:
+                result = subprocess.run(
+                    cmd_stripped,
+                    shell=True,
+                    cwd=cwd,
+                    timeout=timeout,
+                    capture_output=True,
+                    text=True,
+                )
+                out = (result.stdout or "").strip()
+                if not out and result.returncode != 0:
+                    err = (result.stderr or "").strip()[:200]
+                    return f"[error: exit {result.returncode}: {err}]"
+                return out[:500]
+            except subprocess.TimeoutExpired:
+                return "[timeout]"
+            except Exception as exc:  # pylint: disable=broad-except
+                return f"[error: {exc}]"
+
+        # Fenced form first (greedy DOTALL), so inline `!` inside fences
+        # isn't mistakenly treated as a standalone substitution.
+        content = re.sub(
+            r"```!\s*\n(.*?)\n```",
+            lambda m: _run(m.group(1)),
+            content,
+            flags=re.DOTALL,
+        )
+        # Inline form: !`cmd` — single line, no backtick inside.
+        content = re.sub(
+            r"!`([^`\n]+)`",
+            lambda m: _run(m.group(1)),
+            content,
+        )
+        return content
+
     def _find_relevant_skills(self, prompt: str, limit: int = 3) -> List[Dict[str, str]]:
         """Return up to `limit` skills that match the prompt — for the current agent only.
 
@@ -6243,7 +6301,14 @@ class ClaudeTelegramBot:
         Short words (<= 3 chars) are ignored to avoid noise. Skills with score
         0 are filtered out.
 
-        Returns list of {name, description, path}.
+        Opt-in dynamic shell: if a matched skill declares ``allow_shell: true``
+        in its frontmatter, the body is loaded, ``!`cmd``` / ```!`` blocks are
+        expanded via ``_expand_shell_substitutions``, and the first ~1200 chars
+        are returned under the ``body`` key. Consumers can then inject this
+        into the system prompt so Claude sees live state without an extra
+        Read tool call.
+
+        Returns list of {name, description, path, [body]}.
         """
         norm_prompt = self._normalize_text(prompt)
         prompt_words = {w for w in norm_prompt.split() if len(w) > 3}
@@ -6286,13 +6351,32 @@ class ClaudeTelegramBot:
                 elif any(pw in tw for tw in text_words):
                     score += 1
             if score > 0:
-                scored.append((score, {
+                scored.append((score, f, {
                     "name": name,
                     "description": desc,
                     "path": str(f.path),
                 }))
         scored.sort(key=lambda x: -x[0])
-        return [s[1] for s in scored[:limit]]
+        top = scored[:limit]
+
+        # Opt-in dynamic shell expansion for skills flagged with `allow_shell: true`.
+        # When present, read the body, run !`cmd` / ```! substitutions, and include
+        # the first ~1200 chars under the `body` key so the caller can inject a
+        # live-state snapshot into the system prompt. Fail-open: any error is
+        # logged and the skill is returned without the body.
+        results: List[Dict[str, str]] = []
+        cwd_for_shell = str(VAULT_DIR.parent)  # project root — makes git/ls natural
+        for _, vf, entry in top:
+            allow_shell = bool(vf.frontmatter.get("allow_shell"))
+            if allow_shell:
+                try:
+                    fm, body = get_frontmatter_and_body(vf.path)  # noqa: F841
+                    expanded = self._expand_shell_substitutions(body or "", cwd=cwd_for_shell)
+                    entry["body"] = expanded.strip()[:1200]
+                except Exception:
+                    logger.exception("allow_shell expansion failed for %s", entry["path"])
+            results.append(entry)
+        return results
 
     def _snapshot_session_to_journal(self, session: Session) -> None:
         """Generate a structured snapshot of the session and append it to today's journal.
@@ -7672,6 +7756,12 @@ class ClaudeTelegramBot:
                 skills_block = "\n\n## Available Skills (consider invoking if relevant):\n"
                 for s in relevant_skills:
                     skills_block += f"- **{s['name']}**: {s['description']} (`{s['path']}`)\n"
+                    body = s.get("body")
+                    if body:
+                        # Indent body lines so the live-state snapshot is
+                        # visually grouped under the skill bullet.
+                        indented = "\n".join("  " + line for line in body.splitlines())
+                        skills_block += f"{indented}\n"
                 effective_sp = (effective_sp + skills_block) if effective_sp else skills_block
 
         # Active Memory (inspired by OpenClaw v2026.4.10) — proactive vault
