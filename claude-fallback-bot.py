@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.18.0"  # feat: FTS5 vault index + SessionStart auto-recall + Active Memory v2 + 3 MCP tools (vault_search_text / vault_timeline / vault_get_excerpt) + weekly rollup routine
+BOT_VERSION = "3.18.1"  # fix: add missing Tuple to typing imports
 
 import hmac
 import hashlib
@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Make scripts/ importable so we can share helpers between the bot, the
 # graph builder, and the optional MCP server. Single source of truth for
