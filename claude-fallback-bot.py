@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.20.0"  # feat: pipeline early-exit — auto-skip steps when all deps return NO_REPLY
+BOT_VERSION = "3.21.0"  # feat: read-time lazy FTS refresh — Obsidian/CLI/git edits land on next turn without waiting for 04:05 rebuild
 
 import hmac
 import hashlib
@@ -2685,6 +2685,14 @@ def _session_start_recall(prompt: str, session: "Session") -> Optional[str]:
     if conn is None:
         return None
     agent = _agent_id_or_main(session.agent)
+    # Read-time lazy refresh: stat-walk the agent folder and re-index any
+    # .md file newer than the DB row. Guarantees Obsidian/CLI/git-pull edits
+    # land on the next turn without waiting for the 04:05 daily rebuild.
+    # Fail-open: a refresh error should never break the search itself.
+    try:
+        vi.refresh_stale(conn, VAULT_DIR, agent)
+    except Exception as exc:
+        logger.warning("SessionStart recall: refresh_stale failed: %s", exc)
     try:
         hits = vi.search(
             conn, agent, prompt,
@@ -2795,6 +2803,13 @@ def _active_memory_fts_lookup(prompt: str, agent_id: Optional[str], t0: float) -
     if conn is None:
         return None  # no DB yet → caller falls back to graph scoring
     agent = _agent_id_or_main(agent_id)
+    # Read-time lazy refresh before the FTS read. ~2-5ms fast path when no
+    # files changed; picks up Obsidian/CLI edits made since the last turn.
+    # Fail-open: the daily 04:05 rebuild is the safety net for any drift.
+    try:
+        vi.refresh_stale(conn, VAULT_DIR, agent)
+    except Exception as exc:
+        logger.warning("Active Memory v2 FTS: refresh_stale failed: %s", exc)
 
     def _over_budget() -> bool:
         elapsed_ms = (time.monotonic() - t0) * 1000

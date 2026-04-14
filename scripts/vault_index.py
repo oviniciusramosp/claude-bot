@@ -697,6 +697,117 @@ def upsert_agent(conn: sqlite3.Connection, vault_dir: Path, agent: str) -> Index
     )
 
 
+@dataclass
+class RefreshStats:
+    """Return value from refresh_stale() — lightweight, for logging only."""
+    checked: int        # files walked (stat-only, no parse)
+    upserted: int       # rows inserted after re-parsing stale files
+    deleted: int        # rows removed for files that vanished from disk
+    duration_ms: float
+
+
+def refresh_stale(
+    conn: sqlite3.Connection, vault_dir: Path, agent: str
+) -> RefreshStats:
+    """Read-time lazy refresh: reconcile the FTS index for ``agent`` with the
+    current ``.md`` files on disk.
+
+    The fast path (no files changed) is one GROUP BY query + one ``stat()``
+    per file with **zero** parsing and zero writes — target ~2-5ms for a
+    vault with 200 files. Called at the top of every FTS read operation so
+    human edits in Obsidian, ``git pull``, and edits from external tools land
+    on the next bot turn without waiting for the 04:05 daily rebuild.
+
+    Handles three drift cases:
+      1. File modified on disk (filesystem mtime > stored mtime) → DELETE +
+         re-parse + INSERT all rows for that file.
+      2. New file on disk not yet in the DB → parse + INSERT.
+      3. File removed from disk but still in DB → DELETE the orphan rows.
+
+    Contract C2: ``agent`` is required. Raises ValueError on empty input.
+    Other errors bubble up — the caller should log and fail-open, treating
+    the refresh as best-effort (the daily rebuild is the safety net).
+    """
+    if not agent or not agent.strip():
+        raise ValueError("refresh_stale: agent is required (contract C2)")
+    agent = agent.strip()
+    vault_dir = Path(vault_dir)
+    t0 = time.monotonic()
+
+    # One round-trip to pull the per-file max mtime. MAX() because
+    # upsert_journal_section writes sections with their own mtimes — if
+    # any section was updated after the file itself, we don't want to
+    # treat the file as stale.
+    stored: Dict[str, float] = {}
+    cur = conn.execute(
+        "SELECT rel_path, MAX(mtime) AS mtime FROM entries "
+        "WHERE agent = ? GROUP BY rel_path",
+        (agent,),
+    )
+    for row in cur.fetchall():
+        stored[row["rel_path"]] = float(row["mtime"])
+
+    # Stat-only walk — NO frontmatter parsing in the fast path.
+    seen: set = set()
+    stale: List[Tuple[str, Path, str]] = []
+
+    def _check(kind: str, abs_path: Path, rel_path: str) -> None:
+        try:
+            fs_mtime = abs_path.stat().st_mtime
+        except OSError:
+            return
+        seen.add(rel_path)
+        prev = stored.get(rel_path)
+        # +0.001s fudge so float precision doesn't flag a row as stale
+        # immediately after we wrote it.
+        if prev is None or fs_mtime > prev + 0.001:
+            stale.append((kind, abs_path, rel_path))
+
+    for kind, abs_path, rel_path in _iter_agent_files(vault_dir, agent):
+        _check(kind, abs_path, rel_path)
+    # Contract C4: pre-v3.1 vault/Journal/*.md is owned by agent=main
+    if agent == "main":
+        for kind, abs_path, rel_path in _iter_legacy_main_journal_files(vault_dir):
+            _check(kind, abs_path, rel_path)
+
+    orphans = [p for p in stored if p not in seen]
+    checked = len(seen)
+
+    # Fast path — the whole function is now ~2-5ms.
+    if not stale and not orphans:
+        return RefreshStats(
+            checked=checked, upserted=0, deleted=0,
+            duration_ms=(time.monotonic() - t0) * 1000,
+        )
+
+    upserted = 0
+    for kind, abs_path, rel_path in stale:
+        # Full DELETE+INSERT per file so section renames/removals land
+        # cleanly — mirrors upsert_file.
+        conn.execute(
+            "DELETE FROM entries WHERE agent = ? AND rel_path = ?",
+            (agent, rel_path),
+        )
+        file_rows = _rows_for_file(vault_dir, agent, kind, abs_path, rel_path)
+        upserted += _insert_rows(conn, file_rows)
+
+    deleted = 0
+    for rel_path in orphans:
+        cur = conn.execute(
+            "DELETE FROM entries WHERE agent = ? AND rel_path = ?",
+            (agent, rel_path),
+        )
+        deleted += cur.rowcount or 0
+
+    conn.commit()
+    return RefreshStats(
+        checked=checked,
+        upserted=upserted,
+        deleted=deleted,
+        duration_ms=(time.monotonic() - t0) * 1000,
+    )
+
+
 def upsert_file(
     conn: sqlite3.Connection,
     vault_dir: Path,

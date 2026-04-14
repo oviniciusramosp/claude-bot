@@ -445,6 +445,12 @@ def vault_search_text(
         return _vault_index_error_payload()
     if not agent_id or not agent_id.strip():
         return {"error": "agent_id is required (contract C2 — per-agent isolation)"}
+    # Read-time lazy refresh so edits made directly in Obsidian / editors /
+    # via `git pull` show up without waiting for the 04:05 daily rebuild.
+    try:
+        vault_index.refresh_stale(conn, VAULT_DIR, agent_id.strip())
+    except Exception as exc:
+        sys.stderr.write(f"vault_search_text refresh_stale failed: {exc}\n")
     try:
         hits = vault_index.search(
             conn, agent_id.strip(), query,
@@ -501,6 +507,10 @@ def vault_timeline(
     if not agent_id or not agent_id.strip():
         return {"error": "agent_id is required (contract C2)"}
     try:
+        vault_index.refresh_stale(conn, VAULT_DIR, agent_id.strip())
+    except Exception as exc:
+        sys.stderr.write(f"vault_timeline refresh_stale failed: {exc}\n")
+    try:
         hits = vault_index.timeline(
             conn, agent_id.strip(), int(entry_id),
             before=int(before), after=int(after),
@@ -554,6 +564,10 @@ def vault_get_excerpt(
         return _vault_index_error_payload()
     if not agent_id or not agent_id.strip():
         return {"error": "agent_id is required (contract C2)"}
+    try:
+        vault_index.refresh_stale(conn, VAULT_DIR, agent_id.strip())
+    except Exception as exc:
+        sys.stderr.write(f"vault_get_excerpt refresh_stale failed: {exc}\n")
     try:
         detail = vault_index.get_excerpt(
             conn, agent_id.strip(), int(entry_id), max_chars=int(max_chars),
