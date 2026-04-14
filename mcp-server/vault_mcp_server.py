@@ -268,15 +268,13 @@ def vault_create_note(
 def vault_append_journal(text: str, agent_id: Optional[str] = None) -> Dict[str, Any]:
     """Append a timestamped entry to today's journal.
 
-    If `agent_id` is provided, appends to vault/Agents/{agent_id}/Journal/
-    instead of the main vault/Journal/.
+    Writes to `vault/<agent_id>/Journal/YYYY-MM-DD.md` (v3.1 flat per-agent
+    layout). If `agent_id` is omitted, defaults to "main".
     """
     today = time.strftime("%Y-%m-%d")
     timestamp = time.strftime("%H:%M")
-    if agent_id:
-        journal_dir = VAULT_DIR / "Agents" / agent_id / "Journal"
-    else:
-        journal_dir = VAULT_DIR / "Journal"
+    agent = agent_id or "main"
+    journal_dir = VAULT_DIR / agent / "Journal"
     journal_dir.mkdir(parents=True, exist_ok=True)
     journal_path = journal_dir / f"{today}.md"
     if not journal_path.exists():
