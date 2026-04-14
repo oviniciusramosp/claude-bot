@@ -110,6 +110,7 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
     var outputToTelegram: Bool = false
     var outputType: String = "file"  // "none", "file", "telegram", or vault-relative path
     var outputFile: String = ""      // custom output filename (empty = {stepId}.md)
+    var isManual: Bool = false       // true = human review gate, no Claude invocation
 
     /// Resolved output filename: custom if set, otherwise {stepId}.md
     var resolvedFilename: String {
@@ -128,17 +129,25 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
         var lines = [
             "  - id: \(stepId)",
             "    name: \"\(name)\"",
-            "    model: \(model)",
         ]
+        if isManual {
+            lines.append("    manual: true")
+        } else {
+            lines.append("    model: \(model)")
+        }
         if !dependsOn.isEmpty {
             lines.append("    depends_on: [\(dependsOn.joined(separator: ", "))]")
         }
-        lines.append("    prompt_file: steps/\(stepId).md")
+        if !isManual {
+            lines.append("    prompt_file: steps/\(stepId).md")
+        }
         if timeout != 1200 { lines.append("    timeout: \(timeout)") }
-        if inactivityTimeout != 300 { lines.append("    inactivity_timeout: \(inactivityTimeout)") }
-        if retry > 0 { lines.append("    retry: \(retry)") }
-        if outputType != "file" { lines.append("    output: \(outputType)") }
-        if !outputFile.isEmpty { lines.append("    output_file: \(outputFile)") }
+        if !isManual {
+            if inactivityTimeout != 300 { lines.append("    inactivity_timeout: \(inactivityTimeout)") }
+            if retry > 0 { lines.append("    retry: \(retry)") }
+            if outputType != "file" { lines.append("    output: \(outputType)") }
+            if !outputFile.isEmpty { lines.append("    output_file: \(outputFile)") }
+        }
         return lines
     }
 

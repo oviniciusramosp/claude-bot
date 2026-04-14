@@ -413,7 +413,8 @@ actor VaultService {
                 if lower == "telegram" || lower == "none" { return lower }
                 return raw  // vault path
             }(),
-            outputFile: dict["output_file"]?.trimmingCharacters(in: .whitespaces) ?? ""
+            outputFile: dict["output_file"]?.trimmingCharacters(in: .whitespaces) ?? "",
+            isManual: dict["manual"]?.trimmingCharacters(in: .whitespaces).lowercased() == "true"
         )
     }
 

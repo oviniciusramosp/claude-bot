@@ -39,7 +39,7 @@ struct RoutineFormSheet: View {
 
     private var canCreate: Bool {
         guard !title.isEmpty && !isSaving else { return false }
-        if isPipeline { return !pipelineSteps.isEmpty && pipelineSteps.allSatisfy { !$0.name.isEmpty && !$0.prompt.isEmpty } }
+        if isPipeline { return !pipelineSteps.isEmpty && pipelineSteps.allSatisfy { !$0.name.isEmpty && ($0.isManual || !$0.prompt.isEmpty) } }
         return !promptBody.isEmpty
     }
 
@@ -176,7 +176,7 @@ struct RoutineFormSheet: View {
                     Button(label) { toggleDay(day) }
                         .font(.system(size: 13, weight: .medium))
                         .frame(width: 64, height: 24)
-                        .background(selected ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
+                        .background(selected ? Color(hex: 0x0D6FFF) : Color.primary.opacity(0.06))
                         .foregroundStyle(selected ? .white : Color.primary)
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                         .buttonStyle(.plain)
@@ -198,7 +198,7 @@ struct RoutineFormSheet: View {
                     }
                     .font(.system(size: 12, weight: .medium))
                     .frame(width: 36, height: 24)
-                    .background(isOn ? Color(hex: 0x0D6FFF) : Color.black.opacity(0.05))
+                    .background(isOn ? Color(hex: 0x0D6FFF) : Color.primary.opacity(0.06))
                     .foregroundStyle(isOn ? .white : Color.primary)
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                     .buttonStyle(.plain)
@@ -302,11 +302,11 @@ struct RoutineFormSheet: View {
                 .frame(minHeight: 181)
                 .padding(8)
                 .scrollContentBackground(.hidden)
-                .background(Color.white)
+                .background(Color(NSColor.textBackgroundColor))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.black.opacity(0.08), lineWidth: 1)
+                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
                 )
         }
     }
@@ -359,7 +359,7 @@ struct RoutineFormSheet: View {
                 }
                 .padding(.horizontal, 16)
                 .frame(height: 24)
-                .background(Color.black.opacity(0.05))
+                .background(Color.primary.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             }
             .buttonStyle(.plain)
@@ -387,7 +387,7 @@ struct RoutineFormSheet: View {
                 .font(.system(size: 13, weight: .medium))
                 .padding(.horizontal, 16)
                 .frame(height: 24)
-                .background(Color.black.opacity(0.05))
+                .background(Color.primary.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .buttonStyle(.plain)
 
@@ -481,7 +481,7 @@ struct RoutineFormSheet: View {
     }
 
     private var sectionDivider: some View {
-        Color.black.opacity(0.05)
+        Color.primary.opacity(0.08)
             .frame(height: 1)
             .padding(.horizontal, 20)
     }
@@ -520,7 +520,7 @@ struct RoutineFormSheet: View {
             .padding(.horizontal, 8)
             .frame(maxWidth: .infinity)
             .frame(height: 24)
-            .background(Color.black.opacity(0.05))
+            .background(Color.primary.opacity(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
@@ -622,7 +622,7 @@ struct PipelineStepCard: View {
                 Button { withAnimation(.easeInOut(duration: 0.2)) { isExpanded.toggle() } } label: {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 17))
-                        .foregroundStyle(Color(white: 0.75))
+                        .foregroundStyle(Color.secondary)
                         .frame(width: 22)
                 }
                 .buttonStyle(.plain)
@@ -640,18 +640,57 @@ struct PipelineStepCard: View {
 
                 Spacer(minLength: 8)
 
-                Picker("", selection: $step.model) {
-                    ForEach(ModelCatalog.all, id: \.id) { option in
-                        Text(option.label).tag(option.id)
+                if step.isManual {
+                    HStack(spacing: 4) {
+                        Image(systemName: "hand.raised.fill")
+                            .font(.system(size: 11))
+                        Text("Manual")
+                            .font(.system(size: 11, weight: .semibold))
                     }
+                    .foregroundStyle(Color(hex: 0xFF9500))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color(hex: 0xFF9500).opacity(0.12))
+                    .clipShape(Capsule())
+                } else {
+                    Picker("", selection: $step.model) {
+                        ForEach(ModelCatalog.all, id: \.id) { option in
+                            Text(option.label).tag(option.id)
+                        }
+                    }
+                    .fixedSize()
                 }
-                .fixedSize()
             }
 
             if isExpanded {
-                Color.black.opacity(0.05).frame(height: 1).padding(.top, 10)
+                Color.primary.opacity(0.08).frame(height: 1).padding(.top, 10)
 
                 VStack(alignment: .leading, spacing: 10) {
+                    // Manual step toggle
+                    Toggle(isOn: $step.isManual) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "hand.raised.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Color(hex: 0xFF9500))
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Revisão Manual")
+                                    .font(.system(size: 13, weight: .medium))
+                                Text("Pausa a pipeline aguardando aprovação humana — sem prompt nem modelo")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color.secondary)
+                            }
+                        }
+                    }
+                    .toggleStyle(.switch)
+                    .onChange(of: step.isManual) { _, newVal in
+                        if newVal {
+                            step.prompt = ""
+                            step.outputType = "file"
+                            step.retry = 0
+                            step.inactivityTimeout = 300
+                        }
+                    }
+
                     // Step name (editable inline)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Step Name")
@@ -662,114 +701,126 @@ struct PipelineStepCard: View {
                             .textFieldStyle(.roundedBorder)
                     }
 
-                    // Prompt
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text("Prompt")
-                            .font(.system(size: 10))
-                            .foregroundStyle(Color(hex: 0x727272))
+                    if !step.isManual {
+                        // Prompt
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Prompt")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(hex: 0x727272))
 
-                        TextEditor(text: $step.prompt)
-                            .font(.system(size: 13, weight: .medium))
-                            .frame(height: 100)
-                            .padding(8)
-                            .scrollContentBackground(.hidden)
-                            .background(Color.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.black.opacity(0.08), lineWidth: 1)
-                            )
-                    }
+                            TextEditor(text: $step.prompt)
+                                .font(.system(size: 13, weight: .medium))
+                                .frame(height: 100)
+                                .padding(8)
+                                .scrollContentBackground(.hidden)
+                                .background(Color(NSColor.textBackgroundColor))
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                                )
+                        }
 
-                    // Settings row: Output + File | Retries + Timeouts
-                    HStack(alignment: .top, spacing: 20) {
-                        // Left half: Output + File name
-                        HStack(alignment: .top, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Output")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color(hex: 0x727272))
-                                Picker("", selection: Binding(
-                                    get: {
-                                        let ot = step.outputType
-                                        if ot == "none" || ot == "file" || ot == "telegram" { return ot }
-                                        return "vault"
-                                    },
-                                    set: { val in
-                                        step.outputType = val
-                                        step.outputToTelegram = (val == "telegram")
-                                        if val == "vault" {
-                                            step.outputType = "Routines/\(pipelineName)/"
-                                        }
-                                    }
-                                )) {
-                                    Text("Temp. File").tag("file")
-                                    Text("Vault Path").tag("vault")
-                                    Text("Telegram Message").tag("telegram")
-                                    Text("None").tag("none")
-                                }
-                                .labelsHidden()
-                            }
-
-                            // File name / File path field
-                            if step.outputType == "file" || (step.outputType != "telegram" && step.outputType != "none") {
-                                let isVault = step.outputType != "file" && step.outputType != "telegram" && step.outputType != "none"
+                        // Settings row: Output + File | Retries + Timeouts
+                        HStack(alignment: .top, spacing: 20) {
+                            // Left half: Output + File name
+                            HStack(alignment: .top, spacing: 10) {
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text(isVault ? "File path" : "File name")
+                                    Text("Output")
                                         .font(.system(size: 10))
                                         .foregroundStyle(Color(hex: 0x727272))
-
-                                    if isVault {
-                                        TextField("Routines/pipeline/output.md", text: $step.outputType)
-                                            .font(.system(size: 13, weight: .medium))
-                                            .textFieldStyle(.roundedBorder)
-                                            .frame(height: 24)
-                                    } else {
-                                        let defaultName = effectiveStepId.isEmpty ? "step.md" : "\(effectiveStepId).md"
-                                        TextField(defaultName, text: Binding(
-                                            get: { step.outputFile.isEmpty ? defaultName : step.outputFile },
-                                            set: { newVal in
-                                                // Only store custom value; clear if user restores default
-                                                step.outputFile = (newVal == defaultName) ? "" : newVal
+                                    Picker("", selection: Binding(
+                                        get: {
+                                            let ot = step.outputType
+                                            if ot == "none" || ot == "file" || ot == "telegram" { return ot }
+                                            return "vault"
+                                        },
+                                        set: { val in
+                                            step.outputType = val
+                                            step.outputToTelegram = (val == "telegram")
+                                            if val == "vault" {
+                                                step.outputType = "Routines/\(pipelineName)/"
                                             }
-                                        ))
-                                            .font(.system(size: 13, weight: .medium))
-                                            .textFieldStyle(.roundedBorder)
-                                            .frame(height: 24)
+                                        }
+                                    )) {
+                                        Text("Temp. File").tag("file")
+                                        Text("Vault Path").tag("vault")
+                                        Text("Telegram Message").tag("telegram")
+                                        Text("None").tag("none")
                                     }
+                                    .labelsHidden()
+                                }
+
+                                // File name / File path field
+                                if step.outputType == "file" || (step.outputType != "telegram" && step.outputType != "none") {
+                                    let isVault = step.outputType != "file" && step.outputType != "telegram" && step.outputType != "none"
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(isVault ? "File path" : "File name")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(Color(hex: 0x727272))
+
+                                        if isVault {
+                                            TextField("Routines/pipeline/output.md", text: $step.outputType)
+                                                .font(.system(size: 13, weight: .medium))
+                                                .textFieldStyle(.roundedBorder)
+                                                .frame(height: 24)
+                                        } else {
+                                            let defaultName = effectiveStepId.isEmpty ? "step.md" : "\(effectiveStepId).md"
+                                            TextField(defaultName, text: Binding(
+                                                get: { step.outputFile.isEmpty ? defaultName : step.outputFile },
+                                                set: { newVal in
+                                                    step.outputFile = (newVal == defaultName) ? "" : newVal
+                                                }
+                                            ))
+                                                .font(.system(size: 13, weight: .medium))
+                                                .textFieldStyle(.roundedBorder)
+                                                .frame(height: 24)
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Right half: Retries + Timeout (Idle) + Timeout (Max)
+                            HStack(alignment: .top, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Retries")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color(hex: 0x727272))
+                                    TextField("0", value: $step.retry, format: .number)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(height: 24)
+                                }
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Timeout (Idle)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color(hex: 0x727272))
+                                    TextField("60s", value: $step.inactivityTimeout, format: .number)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(height: 24)
+                                }
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text("Timeout (Max)")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color(hex: 0x727272))
+                                    TextField("600s", value: $step.timeout, format: .number)
+                                        .font(.system(size: 13, weight: .medium))
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(height: 24)
                                 }
                             }
                         }
-
-                        // Right half: Retries + Timeout (Idle) + Timeout (Max)
-                        HStack(alignment: .top, spacing: 10) {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Retries")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color(hex: 0x727272))
-                                TextField("0", value: $step.retry, format: .number)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(height: 24)
-                            }
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Timeout (Idle)")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color(hex: 0x727272))
-                                TextField("60s", value: $step.inactivityTimeout, format: .number)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(height: 24)
-                            }
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("Timeout (Max)")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color(hex: 0x727272))
-                                TextField("600s", value: $step.timeout, format: .number)
-                                    .font(.system(size: 13, weight: .medium))
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(height: 24)
-                            }
+                    } else {
+                        // Manual step: only show wait timeout
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text("Timeout de Espera")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Color(hex: 0x727272))
+                            TextField("86400s", value: $step.timeout, format: .number)
+                                .font(.system(size: 13, weight: .medium))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(height: 24)
                         }
                     }
 
@@ -833,7 +884,7 @@ struct PipelineStepCard: View {
                                     .padding(.leading, 10)
                                     .padding(.trailing, 5)
                                     .frame(height: 24)
-                                    .background(Color.black.opacity(0.05))
+                                    .background(Color.primary.opacity(0.08))
                                     .clipShape(Capsule())
                                 }
                             }
@@ -854,7 +905,7 @@ struct PipelineStepCard: View {
             }
         }
         .padding(20)
-        .background(Color(red: 0.965, green: 0.965, blue: 0.965, opacity: 0.6))
+        .background(Color.primary.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
