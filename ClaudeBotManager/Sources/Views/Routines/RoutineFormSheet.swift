@@ -640,57 +640,34 @@ struct PipelineStepCard: View {
 
                 Spacer(minLength: 8)
 
-                if step.isManual {
-                    HStack(spacing: 4) {
-                        Image(systemName: "hand.raised.fill")
-                            .font(.system(size: 11))
-                        Text("Manual")
-                            .font(.system(size: 11, weight: .semibold))
-                    }
-                    .foregroundStyle(Color(hex: 0xFF9500))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color(hex: 0xFF9500).opacity(0.12))
-                    .clipShape(Capsule())
-                } else {
-                    Picker("", selection: $step.model) {
-                        ForEach(ModelCatalog.all, id: \.id) { option in
-                            Text(option.label).tag(option.id)
+                Picker("", selection: Binding(
+                    get: { step.isManual ? "__manual__" : step.model },
+                    set: { val in
+                        if val == "__manual__" {
+                            step.isManual = true
+                            step.prompt = ""
+                            step.outputType = "file"
+                            step.retry = 0
+                            step.inactivityTimeout = 300
+                        } else {
+                            step.isManual = false
+                            step.model = val
                         }
                     }
-                    .fixedSize()
+                )) {
+                    Text("🔍 Revisão Manual").tag("__manual__")
+                    Divider()
+                    ForEach(ModelCatalog.all, id: \.id) { option in
+                        Text(option.label).tag(option.id)
+                    }
                 }
+                .fixedSize()
             }
 
             if isExpanded {
                 Color.primary.opacity(0.08).frame(height: 1).padding(.top, 10)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    // Manual step toggle
-                    Toggle(isOn: $step.isManual) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "hand.raised.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(Color(hex: 0xFF9500))
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Revisão Manual")
-                                    .font(.system(size: 13, weight: .medium))
-                                Text("Pausa a pipeline aguardando aprovação humana — sem prompt nem modelo")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(Color.secondary)
-                            }
-                        }
-                    }
-                    .toggleStyle(.switch)
-                    .onChange(of: step.isManual) { _, newVal in
-                        if newVal {
-                            step.prompt = ""
-                            step.outputType = "file"
-                            step.retry = 0
-                            step.inactivityTimeout = 300
-                        }
-                    }
-
                     // Step name (editable inline)
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Step Name")
@@ -812,16 +789,61 @@ struct PipelineStepCard: View {
                             }
                         }
                     } else {
-                        // Manual step: only show wait timeout
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("Timeout de Espera")
-                                .font(.system(size: 10))
-                                .foregroundStyle(Color(hex: 0x727272))
-                            TextField("86400s", value: $step.timeout, format: .number)
-                                .font(.system(size: 13, weight: .medium))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(height: 24)
+                        // Manual review step fields
+                        let depPlaceholder = step.dependsOn.first.map { "\($0).md" } ?? "reviewer.md"
+                        let outPlaceholder = effectiveStepId.isEmpty ? "approved.md" : "\(effectiveStepId).md"
+
+                        HStack(alignment: .top, spacing: 10) {
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Input")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                TextField(depPlaceholder, text: $step.manualInputFile)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 24)
+                                Text("Arquivo .md a revisar (vazio = saída da dependência)")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color.secondary)
+                            }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Output")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                TextField(outPlaceholder, text: $step.outputFile)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 24)
+                                Text("Arquivo gerado após aprovação")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Color.secondary)
+                            }
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text("Timeout de Espera")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Color(hex: 0x727272))
+                                TextField("86400s", value: $step.timeout, format: .number)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(height: 24)
+                            }
                         }
+
+                        Toggle(isOn: $step.manualTunnel) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "network")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Color.secondary)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Editor Web (Tailscale Funnel)")
+                                        .font(.system(size: 13, weight: .medium))
+                                    Text("Gera link público para editar o .md no navegador e aprovar")
+                                        .font(.system(size: 10))
+                                        .foregroundStyle(Color.secondary)
+                                }
+                            }
+                        }
+                        .toggleStyle(.switch)
                     }
 
                     // Dependencies (only for steps after step 1)

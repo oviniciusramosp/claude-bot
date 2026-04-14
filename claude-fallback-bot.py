@@ -375,37 +375,57 @@ def _start_zai_proxy(glm_model: str, zai_base_url: str, zai_api_key: str):
                 if self.headers.get(h):
                     hdrs[h] = self.headers[h]
 
-            req = urllib.request.Request(target, data=body, headers=hdrs, method="POST")
-            try:
-                with urllib.request.urlopen(req, timeout=600) as resp:
-                    self.send_response(resp.status)
-                    for k, v in resp.headers.items():
-                        if k.lower() not in ("transfer-encoding", "connection", "content-length"):
-                            self.send_header(k, v)
-                    self.end_headers()
-                    while True:
-                        chunk = resp.read(4096)
-                        if not chunk:
-                            break
+            # Forward to z.AI with a single absorber retry on 429 (code 1302).
+            # Transient per-second bursts clear quickly; a short in-proxy backoff
+            # handles them without involving the bot's outer retry+fallback chain.
+            # Sustained quota errors still propagate, and the bot-level RATE_LIMIT
+            # recovery handles those.
+            for _attempt in range(2):
+                req = urllib.request.Request(target, data=body, headers=hdrs, method="POST")
+                try:
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        self.send_response(resp.status)
+                        for k, v in resp.headers.items():
+                            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                                self.send_header(k, v)
+                        self.end_headers()
+                        while True:
+                            chunk = resp.read(4096)
+                            if not chunk:
+                                break
+                            try:
+                                self.wfile.write(chunk)
+                                self.wfile.flush()
+                            except (BrokenPipeError, ConnectionResetError):
+                                pass
+                        return
+                except urllib.error.HTTPError as exc:
+                    # Absorb ONE 429: respect Retry-After header (capped 15s), default 8s.
+                    if exc.code == 429 and _attempt == 0:
                         try:
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                        except (BrokenPipeError, ConnectionResetError):
-                            break
-            except urllib.error.HTTPError as exc:
-                err_body = exc.read()
-                self.send_response(exc.code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(err_body)))
-                self.end_headers()
-                self.wfile.write(err_body)
-            except Exception as exc:
-                payload = json.dumps({"error": str(exc)}).encode()
-                self.send_response(502)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(payload)))
-                self.end_headers()
-                self.wfile.write(payload)
+                            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+                            delay = float(retry_after) if retry_after else 8.0
+                        except (TypeError, ValueError):
+                            delay = 8.0
+                        delay = max(1.0, min(delay, 15.0))
+                        logger.info("zai-proxy: 429 absorbed, sleeping %.1fs then retrying", delay)
+                        time.sleep(delay)
+                        continue
+                    err_body = exc.read()
+                    self.send_response(exc.code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(err_body)))
+                    self.end_headers()
+                    self.wfile.write(err_body)
+                    return
+                except Exception as exc:
+                    payload = json.dumps({"error": str(exc)}).encode()
+                    self.send_response(502)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
 
         def log_message(self, fmt, *args):  # suppress noisy proxy logs
             pass
@@ -947,6 +967,8 @@ class PipelineStep:
     # Manual review gate — pauses pipeline, sends output to Telegram + web editor, waits for user
     manual: bool = False
     manual_timeout: int = 86400  # seconds to wait for human response (default 24h)
+    input_file: str = ""         # explicit .md to review (empty = dep_step[0].resolved_filename)
+    tunnel: bool = True          # include Tailscale Funnel web editor link in Telegram message
 
     @property
     def resolved_filename(self) -> str:
@@ -1774,6 +1796,8 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             loop_on_no_progress=loop_np,
             manual=is_manual,
             manual_timeout=int(s.get("manual_timeout", _raw_timeout)) if is_manual else 0,
+            input_file=s.get("input_file", "").strip() if is_manual else "",
+            tunnel=str(s.get("tunnel", "true")).lower() != "false",
         ))
 
     if not steps:
@@ -4369,7 +4393,7 @@ class PipelineExecutor:
                                        error=f"Dependency {dep_step_id} not found")
             return
 
-        content_path = data_dir / dep_step.resolved_filename
+        content_path = data_dir / (step.input_file if step.input_file else dep_step.resolved_filename)
         if not content_path.exists():
             with self._lock:
                 self._step_status[step.id] = "failed"
@@ -4429,7 +4453,7 @@ class PipelineExecutor:
                 "",
                 f"📄 Arquivo: `{content_path}`",
             ]
-            if _REVIEW_PUBLIC_URL:
+            if _REVIEW_PUBLIC_URL and step.tunnel:
                 lines.append(f"🌐 [Abrir editor web]({_REVIEW_PUBLIC_URL}/review/{review_id})")
             lines.append("")
             lines.append("Escolha uma ação:")

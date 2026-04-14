@@ -414,7 +414,9 @@ actor VaultService {
                 return raw  // vault path
             }(),
             outputFile: dict["output_file"]?.trimmingCharacters(in: .whitespaces) ?? "",
-            isManual: dict["manual"]?.trimmingCharacters(in: .whitespaces).lowercased() == "true"
+            isManual: dict["manual"]?.trimmingCharacters(in: .whitespaces).lowercased() == "true",
+            manualInputFile: dict["input_file"]?.trimmingCharacters(in: .whitespaces) ?? "",
+            manualTunnel: dict["tunnel"]?.trimmingCharacters(in: .whitespaces).lowercased() != "false"
         )
     }
 

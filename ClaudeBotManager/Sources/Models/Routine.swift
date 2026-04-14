@@ -110,7 +110,9 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
     var outputToTelegram: Bool = false
     var outputType: String = "file"  // "none", "file", "telegram", or vault-relative path
     var outputFile: String = ""      // custom output filename (empty = {stepId}.md)
-    var isManual: Bool = false       // true = human review gate, no Claude invocation
+    var isManual: Bool = false        // true = human review gate, no Claude invocation
+    var manualInputFile: String = "" // explicit .md to review (empty = derived from depends_on[0])
+    var manualTunnel: Bool = true    // include Tailscale Funnel web editor link in Telegram message
 
     /// Resolved output filename: custom if set, otherwise {stepId}.md
     var resolvedFilename: String {
@@ -132,6 +134,8 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
         ]
         if isManual {
             lines.append("    manual: true")
+            if !manualInputFile.isEmpty { lines.append("    input_file: \(manualInputFile)") }
+            if !manualTunnel { lines.append("    tunnel: false") }
         } else {
             lines.append("    model: \(model)")
         }
@@ -146,6 +150,8 @@ struct PipelineStepDef: Identifiable, Hashable, Sendable {
             if inactivityTimeout != 300 { lines.append("    inactivity_timeout: \(inactivityTimeout)") }
             if retry > 0 { lines.append("    retry: \(retry)") }
             if outputType != "file" { lines.append("    output: \(outputType)") }
+            if !outputFile.isEmpty { lines.append("    output_file: \(outputFile)") }
+        } else {
             if !outputFile.isEmpty { lines.append("    output_file: \(outputFile)") }
         }
         return lines
