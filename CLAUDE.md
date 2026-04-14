@@ -9,6 +9,8 @@ Topic-specific rules live in `.claude/rules/` and auto-load when Claude reads ma
 - `macos-manager.md` — ClaudeBotManager app, build, design system (when touching `ClaudeBotManager/**`)
 - `migration-v31.md` — vault v3.1 migration script (when touching `scripts/migrate_vault_per_agent.py`)
 
+The repo also contains a standalone Claude Code plugin at `plugins/methodology/` that packages three methodology skills (systematic-debugging, test-driven-development, verify-before-completion) for distribution to any Claude Code user, independent of the bot runtime. See `plugins/methodology/README.md` for installation.
+
 ## Overview
 
 Telegram bot that provides remote access to [Claude Code CLI](https://code.claude.com/docs) via Telegram messages. Pure Python (stdlib only), runs as a macOS launchd service.

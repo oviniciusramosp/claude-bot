@@ -1,0 +1,10 @@
+{
+  "name": "methodology",
+  "description": "Methodology skills distilled from claude-bot: systematic debugging, test-driven development, and verify-before-completion. Enforces root-cause investigation, Red-Green-Refactor, and evidence-before-claims.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Vinicius Ramos"
+  },
+  "homepage": "https://github.com/viniciusramos/claude-bot",
+  "license": "MIT"
+}
