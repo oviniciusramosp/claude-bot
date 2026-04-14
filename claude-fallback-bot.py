@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.13.1"  # fix: inject AGENT_ID env var into subprocess, telegram_notify.py auto-detects agent
+BOT_VERSION = "3.13.3"  # fix: z.AI proxy absorbs transient 429s, fallback skips same-provider on rate limit
 
 import hmac
 import hashlib
@@ -3034,13 +3034,17 @@ def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str
     """Return the next model in MODEL_FALLBACK_CHAIN after failed_model, or None.
 
     Skips GLM models when ZAI_API_KEY is not set.
-    Skips same-provider models for AUTH/CREDIT errors (provider-wide failure).
+    Skips same-provider models for AUTH/CREDIT/RATE_LIMIT errors — these are
+    account-wide failures, so trying another model from the same provider is
+    almost certainly going to hit the same limit/credit/auth wall.
     """
     if failed_model not in MODEL_FALLBACK_CHAIN:
         return None
     idx = MODEL_FALLBACK_CHAIN.index(failed_model)
     failed_provider = model_provider(failed_model)
-    skip_provider = failed_provider if error_kind in (ErrorKind.AUTH, ErrorKind.CREDIT) else None
+    skip_provider = failed_provider if error_kind in (
+        ErrorKind.AUTH, ErrorKind.CREDIT, ErrorKind.RATE_LIMIT
+    ) else None
 
     for candidate in MODEL_FALLBACK_CHAIN[idx + 1:]:
         if model_provider(candidate) == "zai" and not ZAI_API_KEY:

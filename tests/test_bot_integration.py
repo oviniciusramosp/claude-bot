@@ -569,6 +569,17 @@ class TestModelFallback(unittest.TestCase):
         result = self.bot_module.get_fallback_model("opus", self.bot_module.ErrorKind.CREDIT)
         self.assertEqual(result, "glm-5.1")
 
+    def test_skips_same_provider_on_rate_limit_error(self):
+        """RATE_LIMIT on a zai model → skip all zai models (account-wide limit).
+
+        Uses a custom chain where glm-4.7 immediately follows glm-5.1 so the skip
+        is observable: without skip, fallback would be glm-4.7; with skip it's sonnet.
+        """
+        self._set_chain(["opus", "glm-5.1", "glm-4.7", "sonnet", "haiku"])
+        self._set_zai_key("somekey")
+        result = self.bot_module.get_fallback_model("glm-5.1", self.bot_module.ErrorKind.RATE_LIMIT)
+        self.assertEqual(result, "sonnet")
+
     def test_end_of_chain_returns_none(self):
         """haiku is last in chain → no fallback."""
         self._set_chain(["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"])
