@@ -25,8 +25,10 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Status reactions** -- emoji reactions on your message show what Claude is doing (thinking, coding, writing)
 - **Model switching** -- switch between Sonnet, Opus, and Haiku mid-conversation
 - **Per-agent vault** (v3.1) -- Obsidian-compatible vault where every agent owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes under `<agent>/` (flat layout at vault root). Isolamento total — no inheritance across agents.
-- **Knowledge graph** -- lightweight deterministic graph (`vault/.graphs/graph.json`) rebuilt daily; powers skill hints and Active Memory
-- **Active Memory** -- before every interactive message, the bot scores vault nodes against your prompt and auto-injects a compact context block (no LLM cost, ~50ms)
+- **Knowledge graph** -- lightweight deterministic graph (`vault/.graphs/graph.json`) rebuilt daily; powers skill hints and Active Memory fallback
+- **Full-text vault index** (v3.18+) -- stdlib SQLite + FTS5 index over every agent's journals, lessons, notes, and weekly rollups at `~/.claude-bot/vault-index.sqlite`. Zero new dependencies, built nightly by the `vault-index-update` routine, kept fresh by write-through from every journal writer. Per-agent isolation is baked into the query helper so cross-agent leakage is impossible.
+- **Active Memory v2** -- before every interactive message, the bot searches the FTS index for matches to your prompt and injects a compact `## Active Memory` block with short excerpts (falls back to the graph scoring if the index isn't built yet). Deterministic, ~50ms, no LLM cost.
+- **SessionStart auto-recall** (v3.18+) -- on the very first turn of a new session, the bot FTS-searches prior journals, weekly rollups, and lessons for the current agent and injects a `## Recent Context` block so you pick up where the last conversation left off — no `/find` required.
 - **Compound engineering (Lessons)** -- `/lesson` captures hard-won knowledge so Claude scans past failures before similar tasks
 - **Scheduled routines & pipelines** -- cron-like system that runs prompts on a schedule, with multi-step pipelines and Ralph loops
 - **Isolated sub-agents** -- `/delegate` spawns a fresh Claude with its own context and 10-minute hard limit, result is injected back into the parent session
@@ -293,7 +295,40 @@ vault/
 - Notes use `[[wikilinks]]` to form a navigable knowledge graph
 - Open the vault in Obsidian to explore connections via Graph View
 - A daily routine (`vault-graph-update`) rebuilds a lightweight deterministic graph at `vault/.graphs/graph.json` from frontmatter and wikilinks — no LLM cost
-- **Active Memory** (v2.34.0+): before every interactive message, the bot scores graph nodes against your prompt and injects a compact `## Active Memory` block with short excerpts of the top 3 matches (notes, references, routines, pipelines, indexes — skills are handled by a separate hint). Zero LLM cost, ~50ms, fail-open. Toggle per session with `/active-memory on|off|status`.
+- A second daily routine (`vault-index-update`, 04:05) rebuilds a SQLite FTS5 full-text index at `~/.claude-bot/vault-index.sqlite` so Active Memory v2 and SessionStart auto-recall can query journal bodies by keyword in <10ms
+- A weekly routine (`journal-weekly-rollup`, Mondays 05:00) produces `<agent>/Journal/weekly/YYYY-Www.md` summaries for every agent automatically — new agents are covered without any config change
+- **Active Memory v2** (v3.18+): before every interactive message, the bot runs an FTS search for matches to your prompt and injects a compact `## Active Memory` block with short excerpts. Falls back to the graph-based scoring if the index hasn't been built yet. Zero LLM cost, ~50ms, fail-open. Toggle per session with `/active-memory on|off|status`.
+- **SessionStart auto-recall** (v3.18+): on the first turn of a fresh session (`message_count == 0` and no resumed `session_id`), the bot FTS-searches journals, weekly rollups, and lessons for the current agent and prepends a `## Recent Context` block to the prompt — scoped strictly to `session.agent`, respects the per-session `/active-memory off` toggle.
+- **Future-proof across agents**: the daily rebuild discovers agents via `iter_agent_ids()` (contract C1), every query helper builds `WHERE agent = ?` internally (contract C3), and new agents get an eager bootstrap immediately after `/agent new` (contract C6) so auto-recall works from turn 1 — no edits required to any routine or config when you add an agent.
+
+### Private journal content (`<private>...</private>`)
+
+Wrap any text in a journal, lesson, or note entry with `<private>...</private>` (case-insensitive, multi-line) to keep it OUT of the FTS index and Active Memory:
+
+```markdown
+## 14:30
+
+Reflection that's fair game for auto-recall next session.
+
+<private>
+Stuff I want in the file but don't want Claude to surface automatically —
+sensitive reasoning, half-baked ideas, names I'd rather not hear quoted back.
+</private>
+```
+
+The raw markdown file keeps the original text unchanged — only the in-memory copy that feeds the index has the private blocks stripped. SessionStart auto-recall passes `include_private=False` so files with any private marker are hidden from recall entirely, even though the private text is already gone from the index. Use it like a paper notebook, not as a security feature.
+
+### MCP tools for external clients
+
+The optional sidecar at `mcp-server/vault_mcp_server.py` exposes three new MCP tools that mirror claude-mem's progressive-disclosure pattern and share the same SQLite index with the bot:
+
+| Tool | Role |
+|---|---|
+| `vault_search_text(query, agent_id, kinds?, date_from?, date_to?, limit?)` | FTS5 search — returns compact hits with IDs + snippets (~50-100 tokens each) |
+| `vault_timeline(agent_id, entry_id, before?, after?)` | Return the N entries immediately before and after a hit in chronological order |
+| `vault_get_excerpt(agent_id, entry_id, max_chars?)` | Fetch the full body of a specific entry, up to `max_chars` |
+
+All three are hard-scoped by `agent_id` and return a friendly error when the index hasn't been built yet. Use from Claude Desktop, Cursor, or any MCP-capable client by pointing at the sidecar — see `mcp-server/README.md`.
 
 ### Personalizing Your Vault
 
@@ -489,15 +524,25 @@ claude-bot/
 |-- claude-bot-menubar.py             Menu bar indicator (requires rumps)
 |-- claude-bot.sh                     Service manager
 |-- com.claudebot.bot.plist           launchd template (bot)
-|-- com.claudebot.menubar.plist   launchd template (menu bar)
+|-- com.claudebot.menubar.plist       launchd template (menu bar)
 |-- ClaudeBotManager/                 macOS native manager app (SwiftUI)
+|-- scripts/
+|   |-- vault_index.py                SQLite FTS5 library (stdlib)
+|   |-- vault-index-update.py         Daily rebuild CLI (04:05 routine)
+|   |-- journal-weekly-rollup.py      Weekly per-agent summary driver (Mondays 05:00)
+|   |-- vault-graph-builder.py        Lightweight graph builder
+|   |-- vault_query.py                Frontmatter query engine
+|   |-- vault_lint.py                 Vault hygiene linter
+|   '-- ...
+|-- mcp-server/                       Optional MCP sidecar (vault_search_text, vault_timeline, vault_get_excerpt, etc.)
+|-- tests/                            Python test suite (~610 tests, pure stdlib)
 |-- .env.example                      Environment variable template
 |-- CLAUDE.md                         Instructions for Claude Code
 |-- README.md                         This file
 '-- vault/                            Obsidian knowledge vault
 ```
 
-Runtime data: `~/.claude-bot/` (sessions, logs, routine state).
+Runtime data: `~/.claude-bot/` — `sessions.json`, `bot.log`, `routines-state/`, and `vault-index.sqlite` (the FTS cache, safely deletable).
 
 ---
 
@@ -507,7 +552,7 @@ The repo ships with a full test suite (Python + Swift, no pip dependencies for t
 
 ```bash
 ./test.sh           # Python + Swift (full suite)
-./test.sh py        # Python only (~450 tests, ~7s, pure stdlib)
+./test.sh py        # Python only (~610 tests, ~12s, pure stdlib)
 ./test.sh swift     # Swift only (ClaudeBotManager)
 ```
 

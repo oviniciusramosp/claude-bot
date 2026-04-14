@@ -322,3 +322,29 @@ Map of preferences: which tool to use for each type of task. Consult before choo
 **Reading:** Before choosing a tool for a task, read Tooling.md.
 
 **Writing:** When the user informs about a new tool, tooling preference, or useful command — update Tooling.md (do not save to auto-memory).
+
+## Private journal content
+
+Any text you want to keep OUT of the SQLite FTS index (and therefore out of Active Memory injection and SessionStart auto-recall) can be wrapped in `<private>...</private>`. The tags are case-insensitive and can span multiple lines.
+
+```markdown
+## 14:30
+
+Regular reflection for the day that is fair game for auto-recall.
+
+<private>
+Stuff I want to keep in the journal file but don't want Claude to surface
+automatically next session — sensitive reasoning, half-baked ideas, names
+I'd rather not have quoted back at the user.
+</private>
+
+More public content after the private block.
+```
+
+**What happens:**
+- `vault/.graphs/graph.json` and the on-disk markdown file keep the original text unchanged — nothing is deleted or rewritten. You can still read it by opening the file directly.
+- `scripts/vault_index.py` strips the `<private>...</private>` block before it gets stored in the FTS column, so searching for words inside the block returns nothing.
+- The row storing the file is flagged `private=1`. SessionStart auto-recall passes `include_private=False`, so files with any private marker are hidden entirely — an extra layer of caution at the moment the user sees the response.
+- Regular `vault_search_text` calls still return public content from files that had private blocks (default `include_private=True`), so the public parts remain useful — only the private text is unrecoverable via search.
+
+Use it for thoughts you'd jot in a paper notebook but wouldn't dictate to a colleague. Do NOT use it as a security feature — anyone with filesystem access still reads the raw file.

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.17.0"  # feat: /routine delete + thorough trash+journal deletion in macOS app (zero silent errors on UI)
+BOT_VERSION = "3.18.0"  # feat: FTS5 vault index + SessionStart auto-recall + Active Memory v2 + 3 MCP tools (vault_search_text / vault_timeline / vault_get_excerpt) + weekly rollup routine
 
 import hmac
 import hashlib
@@ -669,6 +669,22 @@ ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget =>
 # Node types EXCLUDED from Active Memory: "skill" is already handled by
 # _select_relevant_skills (SKILL_HINTS_ENABLED); "history" is churn-y log data.
 ACTIVE_MEMORY_EXCLUDED_TYPES = frozenset({"skill", "history"})
+
+# --- Vault FTS index (v3.18+) ---
+# SQLite FTS5 full-text index over the per-agent vault. Powers Active Memory
+# v2 (FTS primary path, graph fallback), SessionStart auto-recall, and the
+# three MCP tools vault_search_text / vault_timeline / vault_get_excerpt.
+# Built by scripts/vault-index-update.py (daily routine at 04:05) and kept
+# fresh by write-through calls from every Python journal/note writer.
+# Fail-open everywhere: if the DB is missing, the bot behaves exactly as
+# before (Active Memory v1 + no auto-recall).
+# See .claude/rules/vault-runtime-features.md for the 8 contracts that
+# make the index future-proof for all current and future agents.
+VAULT_INDEX_DB = DATA_DIR / "vault-index.sqlite"
+# How many hits SessionStart auto-recall surfaces on the first turn of a
+# fresh session. 5 is enough to hint at continuity without pushing the
+# system prompt over the cache budget.
+SESSION_RECALL_MAX_HITS = 5
 
 SYSTEM_PROMPT = (
     "You are being accessed via a Telegram bot as a remote fallback. "
@@ -2500,6 +2516,206 @@ def _select_relevant_skills(prompt: str, agent_id: Optional[str] = None,
 
 
 # ---------------------------------------------------------------------------
+# Vault FTS index — stdlib SQLite+FTS5 helpers
+# ---------------------------------------------------------------------------
+#
+# The actual library lives in scripts/vault_index.py. We import lazily per
+# call so the bot does NOT pay an sqlite3 import cost at startup and so
+# tests that repoint DATA_DIR / VAULT_DIR after module load still pick up
+# the right paths. Every helper here is fail-open: missing DB, sqlite errors,
+# or any exception returns None / skips the write-through and logs at
+# WARNING. The daily vault-index-update routine is the safety net.
+
+def _vault_index_module():
+    """Import scripts.vault_index lazily, returning None on any failure."""
+    scripts_dir = Path(__file__).resolve().parent / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    try:
+        import vault_index  # type: ignore  # noqa: WPS433
+        return vault_index
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning("vault-index: import failed: %s", exc)
+        return None
+
+
+def _vault_index_connect():
+    """Return an open sqlite3.Connection to VAULT_INDEX_DB, or None.
+
+    Fail-open: missing DB (fresh install), sqlite3 without FTS5, or any
+    other error returns None and the caller proceeds as if no index exists.
+    """
+    db_path = VAULT_INDEX_DB
+    try:
+        if not db_path.exists():
+            return None
+    except OSError:
+        return None
+    vi = _vault_index_module()
+    if vi is None:
+        return None
+    try:
+        return vi.connect(db_path)
+    except Exception as exc:
+        logger.warning("vault-index: connect failed (%s)", exc)
+        return None
+
+
+def _vault_index_upsert(
+    *,
+    agent: str,
+    rel_path: str,
+    journal_section: Optional[Tuple[str, str]] = None,
+) -> None:
+    """Best-effort write-through to VAULT_INDEX_DB from any Python writer.
+
+    Called by _snapshot_session_to_journal, record_manual_lesson,
+    _consolidate_session, and by the MCP server's vault_append_journal /
+    vault_create_note tools. Fail-open: if the index doesn't exist yet
+    (fresh install, before the first daily rebuild), we silently skip —
+    the next rebuild picks the file up. Any exception is logged at
+    WARNING per the zero-silent-errors rule but NEVER raised, so a broken
+    index can never block a journal write.
+
+    Contract C2: empty agent raises ValueError inside the library.
+    """
+    if not agent:
+        return
+    vi = _vault_index_module()
+    if vi is None:
+        return
+    db_path = VAULT_INDEX_DB
+    try:
+        if not db_path.exists():
+            return
+        conn = vi.connect(db_path)
+    except Exception as exc:
+        logger.warning("vault-index write-through: connect failed: %s", exc)
+        return
+    try:
+        if journal_section is not None:
+            ts, text = journal_section
+            vi.upsert_journal_section(conn, VAULT_DIR, agent, rel_path, ts, text)
+        else:
+            vi.upsert_file(conn, VAULT_DIR, agent, rel_path)
+    except Exception as exc:
+        logger.warning(
+            "vault-index write-through failed for %s/%s (non-fatal): %s",
+            agent, rel_path, exc,
+        )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _vault_index_bootstrap_agent(agent_id: str) -> None:
+    """Eager-index a brand-new agent's files (contract C6).
+
+    Called from _run_agent_create_skill right after /agent new finishes,
+    so auto-recall surfaces the new agent's content from turn 1 without
+    waiting for the 04:05 daily rebuild. Fail-open like every other
+    write-through helper.
+    """
+    if not agent_id:
+        return
+    vi = _vault_index_module()
+    if vi is None:
+        return
+    db_path = VAULT_INDEX_DB
+    try:
+        if not db_path.exists():
+            # Fresh install — no index yet. The daily routine will pick
+            # this agent up on its first run; nothing to bootstrap.
+            return
+        conn = vi.connect(db_path)
+    except Exception as exc:
+        logger.warning("vault-index bootstrap: connect failed: %s", exc)
+        return
+    try:
+        stats = vi.upsert_agent(conn, VAULT_DIR, agent_id)
+        logger.info(
+            "vault-index: bootstrapped agent %s (%d rows in %.0fms)",
+            agent_id, stats.rows_inserted, stats.duration_ms,
+        )
+    except Exception as exc:
+        logger.warning("vault-index bootstrap failed for %s: %s", agent_id, exc)
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _session_start_recall(prompt: str, session: "Session") -> Optional[str]:
+    """Return a compact ``## Recent Context`` block for a fresh session.
+
+    Fires only on the very first turn of a new session (message_count == 0
+    AND session_id is None) so the user gets an automatic "here is what
+    was discussed last time about this topic" nudge without having to run
+    /find manually. Mirrors the SessionStart hook pattern in claude-mem
+    but adapted to our append-only per-agent journal architecture.
+
+    Scoped hard to ``session.agent`` via the index library (contract C3),
+    excludes files with any <private> marker (contract: extra caution at
+    SessionStart), and fail-opens to None on any error.
+    """
+    if not ACTIVE_MEMORY_ENABLED:
+        return None
+    if not getattr(session, "active_memory", True):
+        return None
+    # Only fire on the first turn of a brand-new session. Resumed sessions
+    # (session_id is not None) or sessions with any history skip this.
+    if session.session_id or session.message_count > 0:
+        return None
+    if not prompt or not prompt.strip():
+        return None
+    vi = _vault_index_module()
+    if vi is None:
+        return None
+    conn = _vault_index_connect()
+    if conn is None:
+        return None
+    agent = _agent_id_or_main(session.agent)
+    try:
+        hits = vi.search(
+            conn, agent, prompt,
+            kinds=[vi.KIND_JOURNAL, vi.KIND_JOURNAL_WEEKLY, vi.KIND_LESSON],
+            limit=SESSION_RECALL_MAX_HITS,
+            include_private=False,  # extra caution at session start
+        )
+    except Exception as exc:
+        logger.warning("SessionStart recall: search failed: %s", exc)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
+    try:
+        conn.close()
+    except Exception:
+        pass
+    if not hits:
+        return None
+    lines: List[str] = [
+        "## Recent Context",
+        "",
+        "Previous sessions on this agent recorded these related entries. "
+        "Read only if useful — don't quote them back at the user verbatim:",
+        "",
+    ]
+    for h in hits:
+        section = f" {h.section_path}" if h.section_path else ""
+        date = f" ({h.date})" if h.date else ""
+        snippet = (h.snippet or "").replace("\n", " ").strip()
+        if len(snippet) > 220:
+            snippet = snippet[:220].rstrip() + "…"
+        lines.append(f"- [[{h.rel_path}]]{section}{date} — {snippet}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Active Memory — proactive vault context injection (OpenClaw v2026.4.10 idea)
 # ---------------------------------------------------------------------------
 
@@ -2552,8 +2768,103 @@ def _active_memory_read_excerpt(source_file: str, max_chars: int) -> str:
     return text
 
 
+def _active_memory_fts_lookup(prompt: str, agent_id: Optional[str], t0: float) -> Optional[str]:
+    """Active Memory v2 FTS path — the primary lookup since v3.18.
+
+    Uses ``scripts/vault_index.py`` to run an FTS5 full-text search scoped
+    to the current agent (contract C3). Returns the same
+    ``## Active Memory`` markdown block the graph path emits so the call
+    site at line ~8060 is unchanged. Fail-open: any error returns None so
+    the caller falls back to the deterministic graph scoring.
+
+    The FTS query is built with the same tokenization rules as the graph
+    path so term treatment stays aligned — stopwords filtered, words <3
+    chars dropped, quoted terms OR'd together.
+    """
+    vi = _vault_index_module()
+    if vi is None:
+        return None
+    conn = _vault_index_connect()
+    if conn is None:
+        return None  # no DB yet → caller falls back to graph scoring
+    agent = _agent_id_or_main(agent_id)
+
+    def _over_budget() -> bool:
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if elapsed_ms > ACTIVE_MEMORY_BUDGET_MS:
+            logger.warning("Active Memory v2 (FTS): budget exceeded (%.1fms)", elapsed_ms)
+            return True
+        return False
+
+    try:
+        hits = vi.search(
+            conn, agent, prompt,
+            # Skills are never indexed by vault_index.py, so we don't need
+            # to filter them out here (unlike the graph path).
+            limit=ACTIVE_MEMORY_MAX_NODES,
+        )
+    except Exception as exc:
+        logger.warning("Active Memory v2 FTS: search failed: %s", exc)
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return None
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+    if not hits:
+        return None
+    if _over_budget():
+        return None
+
+    lines: List[str] = [
+        "## Active Memory",
+        "",
+        "The vault has these entries that may be relevant to the user's message — "
+        "read the full file only if you actually need it:",
+        "",
+    ]
+    for h in hits:
+        if _over_budget():
+            return None
+        # Read a short excerpt from the stored body via get_excerpt (cheap,
+        # no file I/O). Falls back to the FTS snippet if the fetch fails.
+        try:
+            detail = vi.get_excerpt(
+                conn, agent, h.id, max_chars=ACTIVE_MEMORY_MAX_CHARS_PER_NODE,
+            ) if False else None  # conn already closed; use snippet only
+        except Exception:
+            detail = None
+        excerpt = (h.snippet or "").replace("\n", " ").strip()
+        if len(excerpt) > ACTIVE_MEMORY_MAX_CHARS_PER_NODE:
+            excerpt = excerpt[:ACTIVE_MEMORY_MAX_CHARS_PER_NODE].rstrip() + "…"
+        section = f" {h.section_path}" if h.section_path else ""
+        date = f" ({h.date})" if h.date else ""
+        if excerpt:
+            lines.append(
+                f"- [[{h.rel_path}]]{section}{date} ({h.kind}) · excerpt: \"{excerpt}\""
+            )
+        else:
+            lines.append(f"- [[{h.rel_path}]]{section}{date} ({h.kind})")
+
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    logger.info(
+        "Active Memory v2 (FTS): injected %d entries in %.1fms", len(hits), elapsed_ms,
+    )
+    return "\n".join(lines)
+
+
 def _active_memory_lookup(prompt: str, agent_id: Optional[str] = None) -> Optional[str]:
-    """Active Memory: deterministic vault graph lookup before main Claude turn.
+    """Active Memory: vault lookup before main Claude turn.
+
+    **v3.18 strategy.** Try the FTS5 index first (``scripts/vault_index.py``,
+    built by the daily ``vault-index-update`` routine). If the index is
+    missing, empty, or errors, fall back to the graph-based scoring that
+    has been in place since v2.34.0 — so existing installs keep working
+    with no regression until their first daily rebuild.
 
     **Isolamento total:** only nodes whose ``source_file`` lives under
     ``<agent_id>/`` (directly at the vault root) are candidates — the Main
@@ -2561,11 +2872,6 @@ def _active_memory_lookup(prompt: str, agent_id: Optional[str] = None) -> Option
 
     Returns a compact "## Active Memory" block to append to the system prompt,
     or None if disabled / no matches / any error / over budget.
-
-    Inspired by OpenClaw v2026.4.10 Active Memory plugin — but deterministic:
-    no LLM call, no token cost, ~50ms typical. Reuses vault/.graphs/graph.json
-    (regenerated daily by vault-graph-update). Filters out node types already
-    covered elsewhere (skills → _select_relevant_skills; history → churn).
 
     Fail-open: any exception is logged at WARNING and the helper returns None
     so the main Claude turn proceeds unchanged.
@@ -2582,6 +2888,17 @@ def _active_memory_lookup(prompt: str, agent_id: Optional[str] = None) -> Option
             logger.warning("Active Memory: budget exceeded (%.1fms)", elapsed_ms)
             return True
         return False
+
+    # v3.18: try FTS first. Returns None if the index doesn't exist yet or
+    # if the search produces no hits — we fall through to the graph path in
+    # either case, so users without a daily rebuild yet still get results.
+    try:
+        fts_block = _active_memory_fts_lookup(prompt, agent_id, t0)
+    except Exception as exc:
+        logger.warning("Active Memory v2 FTS raised: %s", exc)
+        fts_block = None
+    if fts_block:
+        return fts_block
 
     graph_path = VAULT_DIR / ".graphs" / "graph.json"
     if not graph_path.is_file():
@@ -2723,6 +3040,16 @@ def record_manual_lesson(text: str, agent_id: Optional[str] = None) -> Optional[
         )
         path.write_text(frontmatter + markdown, encoding="utf-8")
         logger.info("Manual lesson recorded: %s", path)
+        # v3.18: write-through to FTS so the lesson is searchable now.
+        try:
+            rel = path.relative_to(VAULT_DIR).as_posix()
+        except ValueError:
+            rel = None
+        if rel:
+            _vault_index_upsert(
+                agent=_agent_id_or_main(agent_id),
+                rel_path=rel,
+            )
         return path
     except Exception as exc:
         logger.error("Failed to record manual lesson: %s", exc)
@@ -6552,6 +6879,21 @@ class ClaudeTelegramBot:
             with journal_path.open("a", encoding="utf-8") as f:
                 f.write(header + snapshot + "\n")
             logger.info("Session snapshot appended to %s (%d chars)", journal_path, len(snapshot))
+
+            # v3.18: write-through to the FTS index so the snapshot is
+            # searchable immediately (auto-recall would otherwise have to
+            # wait for the 04:05 daily rebuild). Fail-open — any error
+            # is logged at WARNING but never blocks the main write.
+            try:
+                rel = journal_path.relative_to(VAULT_DIR).as_posix()
+            except ValueError:
+                rel = None
+            if rel:
+                _vault_index_upsert(
+                    agent=session.agent or MAIN_AGENT_ID,
+                    rel_path=rel,
+                    journal_section=(timestamp, snapshot),
+                )
         except Exception as exc:
             logger.error("Session snapshot failed: %s", exc)
             # Non-fatal — compact proceeds regardless
@@ -7471,6 +7813,10 @@ class ClaudeTelegramBot:
         new_agents = after - before
         if len(new_agents) == 1:
             new_id = new_agents.pop()
+            # v3.18: eager-index the brand-new agent's files (contract C6)
+            # so SessionStart auto-recall works from turn 1 instead of
+            # waiting for the 04:05 daily rebuild. Fail-open.
+            _vault_index_bootstrap_agent(new_id)
             self.cmd_agent_switch(new_id)
             # Reset session_id so next message starts fresh with new agent's context
             session = self._get_session()
@@ -8061,6 +8407,20 @@ class ClaudeTelegramBot:
                 am_block = None
             if am_block:
                 prompt = am_block + "\n\n" + prompt
+
+            # SessionStart auto-recall (v3.18): on the very first turn of a
+            # fresh session, search the FTS index for prior journal entries,
+            # lessons, and weekly rollups that are relevant to the user's
+            # opening prompt. Mirrors the SessionStart hook pattern from
+            # claude-mem but scoped to the current agent (contract C3).
+            # Fail-open: any error returns None and this block is omitted.
+            try:
+                recall_block = _session_start_recall(prompt, session)
+            except Exception as exc:
+                logger.warning("SessionStart recall raised: %s", exc)
+                recall_block = None
+            if recall_block:
+                prompt = recall_block + "\n\n" + prompt
 
         # Graph-based skill hint (user-prompt prefix) — lightweight nudge sourced
         # from vault/.graphs/graph.json. Filters to the current agent's skills

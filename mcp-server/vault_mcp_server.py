@@ -62,6 +62,16 @@ from vault_query import (  # noqa: E402
     load_vault,
     parse_filter_expression,
 )
+# vault_index is an optional import — if the FTS library fails to load
+# (e.g. sqlite3 without FTS5), the three search/timeline/get tools below
+# return a helpful error message instead of crashing the server.
+try:
+    import vault_index  # noqa: E402
+except Exception as _vi_exc:  # pragma: no cover
+    vault_index = None  # type: ignore
+    _VAULT_INDEX_IMPORT_ERROR = str(_vi_exc)
+else:
+    _VAULT_INDEX_IMPORT_ERROR = ""
 
 try:
     from mcp.server.fastmcp import FastMCP
@@ -75,6 +85,76 @@ except ImportError as exc:  # pragma: no cover
 
 
 mcp = FastMCP("claude-bot-vault")
+
+
+# ---------------------------------------------------------------------------
+# Vault FTS5 index — optional cache shared with the bot
+# ---------------------------------------------------------------------------
+
+# Default index location mirrors claude-fallback-bot.py:VAULT_INDEX_DB so
+# the MCP sidecar and the bot read/write the same file. Users running the
+# sidecar in a non-default home can override with CLAUDE_BOT_INDEX_DB.
+_VAULT_INDEX_DB = Path(
+    os.environ.get("CLAUDE_BOT_INDEX_DB")
+    or (Path.home() / ".claude-bot" / "vault-index.sqlite")
+).resolve()
+
+_VAULT_INDEX_CONN: Optional[Any] = None
+
+
+def _get_vault_index_conn():
+    """Return a cached sqlite3 connection to the index, or None.
+
+    The connection is opened lazily on first use and reused across tool
+    calls so we don't pay the FTS5 setup cost on every request. Fail-open
+    everywhere — missing DB, missing FTS5 extension, and any sqlite error
+    surface as None so the tools return a friendly error instead of
+    crashing the MCP server.
+    """
+    global _VAULT_INDEX_CONN
+    if vault_index is None:
+        return None
+    if _VAULT_INDEX_CONN is not None:
+        return _VAULT_INDEX_CONN
+    if not _VAULT_INDEX_DB.exists():
+        return None
+    try:
+        _VAULT_INDEX_CONN = vault_index.connect(_VAULT_INDEX_DB)
+        return _VAULT_INDEX_CONN
+    except Exception as exc:
+        sys.stderr.write(f"vault-index: connect failed: {exc}\n")
+        return None
+
+
+def _vault_index_write_through(
+    agent: str,
+    rel_path: str,
+    journal_section: Optional[tuple] = None,
+) -> None:
+    """Fire-and-forget write-through from MCP write tools.
+
+    Best-effort: any failure is logged to stderr and swallowed. The
+    daily ``vault-index-update`` routine is the safety net — users never
+    see a broken search because the MCP server couldn't keep the cache
+    in sync.
+    """
+    if vault_index is None or not agent:
+        return
+    conn = _get_vault_index_conn()
+    if conn is None:
+        return
+    try:
+        if journal_section is not None:
+            ts, text = journal_section
+            vault_index.upsert_journal_section(
+                conn, VAULT_DIR, agent, rel_path, ts, text,
+            )
+        else:
+            vault_index.upsert_file(conn, VAULT_DIR, agent, rel_path)
+    except Exception as exc:
+        sys.stderr.write(
+            f"vault-index write-through failed for {agent}/{rel_path}: {exc}\n"
+        )
 
 
 def _file_to_dict(f: VaultFile) -> Dict[str, Any]:
@@ -256,7 +336,13 @@ def vault_create_note(
         f"{summary}\n"
     )
     path.write_text(text, encoding="utf-8")
-    return {"created": path.relative_to(VAULT_DIR).as_posix()}
+    rel = path.relative_to(VAULT_DIR).as_posix()
+    # Write-through to the FTS index so the note is immediately searchable.
+    # Notes created via this tool are currently vault-root scoped (legacy),
+    # so we tag them under "main" for index purposes; when the MCP tool
+    # grows an explicit agent_id parameter this will switch to that value.
+    _vault_index_write_through(agent="main", rel_path=rel)
+    return {"created": rel}
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +378,202 @@ def vault_append_journal(text: str, agent_id: Optional[str] = None) -> Dict[str,
     entry = f"## {timestamp}\n\n{text.strip()}\n\n---\n\n"
     with journal_path.open("a", encoding="utf-8") as f:
         f.write(entry)
+    rel = journal_path.relative_to(VAULT_DIR).as_posix()
+    # Write-through to the FTS index so SessionStart auto-recall sees this
+    # section on the very next fresh session. Fail-open per the
+    # zero-silent-errors rule at the bot layer.
+    _vault_index_write_through(
+        agent=agent, rel_path=rel, journal_section=(timestamp, text),
+    )
     return {
-        "appended_to": journal_path.relative_to(VAULT_DIR).as_posix(),
+        "appended_to": rel,
         "timestamp": timestamp,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool: vault_search_text  (FTS5 full-text search — v3.18+)
+# ---------------------------------------------------------------------------
+
+
+def _vault_index_error_payload() -> Dict[str, Any]:
+    """Shared error payload when the FTS index is unavailable."""
+    if vault_index is None:
+        return {
+            "error": "vault-index module unavailable",
+            "reason": _VAULT_INDEX_IMPORT_ERROR or "import failed",
+            "hint": "Ensure sqlite3 was built with FTS5 support.",
+        }
+    return {
+        "error": "vault-index database not yet built",
+        "hint": "Run scripts/vault-index-update.py or wait for the 04:05 "
+                "daily vault-index-update routine.",
+    }
+
+
+@mcp.tool()
+def vault_search_text(
+    query: str,
+    agent_id: str,
+    kinds: Optional[List[str]] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 20,
+    include_private: bool = True,
+) -> Dict[str, Any]:
+    """Full-text search over the per-agent vault index.
+
+    Progressive disclosure — returns a compact list of hits with integer
+    IDs, titles, and FTS5 snippets (~50-100 tokens per hit). Call
+    ``vault_get_excerpt`` to fetch the body of a specific entry only when
+    you need it. Optionally expand context around a hit with
+    ``vault_timeline``.
+
+    Scoped hard to a single agent (contract C3) — ``agent_id`` is
+    required. ``kinds`` filters by the indexed categories
+    (``journal``, ``journal_weekly``, ``lesson``, ``note``). ``date_from``
+    and ``date_to`` accept ``YYYY-MM-DD`` strings for journals and
+    ``YYYY-Www`` for weekly rollups.
+
+    By default, rows from files with any ``<private>`` marker are
+    returned (their private TEXT has already been stripped at index time).
+    Pass ``include_private=False`` to hide those files entirely — used by
+    SessionStart auto-recall for extra caution.
+    """
+    conn = _get_vault_index_conn()
+    if conn is None:
+        return _vault_index_error_payload()
+    if not agent_id or not agent_id.strip():
+        return {"error": "agent_id is required (contract C2 — per-agent isolation)"}
+    try:
+        hits = vault_index.search(
+            conn, agent_id.strip(), query,
+            kinds=kinds, date_from=date_from, date_to=date_to,
+            limit=limit, include_private=include_private,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        sys.stderr.write(f"vault_search_text failed: {exc}\n")
+        return {"error": f"search failed: {exc}"}
+    return {
+        "agent": agent_id.strip(),
+        "query": query,
+        "count": len(hits),
+        "results": [
+            {
+                "id": h.id,
+                "kind": h.kind,
+                "rel_path": h.rel_path,
+                "section_path": h.section_path,
+                "date": h.date,
+                "title": h.title,
+                "snippet": h.snippet,
+            }
+            for h in hits
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool: vault_timeline
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def vault_timeline(
+    agent_id: str,
+    entry_id: int,
+    before: int = 3,
+    after: int = 3,
+    include_private: bool = True,
+) -> Dict[str, Any]:
+    """Return the entries immediately before and after ``entry_id`` in
+    chronological order, scoped to ``agent_id``.
+
+    Useful for expanding context around a search hit without having to
+    fetch every surrounding file. Returns the neighbors with short
+    snippets — call ``vault_get_excerpt`` if you need the full body.
+    """
+    conn = _get_vault_index_conn()
+    if conn is None:
+        return _vault_index_error_payload()
+    if not agent_id or not agent_id.strip():
+        return {"error": "agent_id is required (contract C2)"}
+    try:
+        hits = vault_index.timeline(
+            conn, agent_id.strip(), int(entry_id),
+            before=int(before), after=int(after),
+            include_private=include_private,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        sys.stderr.write(f"vault_timeline failed: {exc}\n")
+        return {"error": f"timeline failed: {exc}"}
+    return {
+        "agent": agent_id.strip(),
+        "anchor_id": int(entry_id),
+        "count": len(hits),
+        "results": [
+            {
+                "id": h.id,
+                "kind": h.kind,
+                "rel_path": h.rel_path,
+                "section_path": h.section_path,
+                "date": h.date,
+                "title": h.title,
+                "snippet": h.snippet,
+            }
+            for h in hits
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tool: vault_get_excerpt
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def vault_get_excerpt(
+    agent_id: str,
+    entry_id: int,
+    max_chars: int = 800,
+) -> Dict[str, Any]:
+    """Return the full (up to ``max_chars``) body of a single indexed
+    entry, scoped to ``agent_id``.
+
+    Use after ``vault_search_text`` / ``vault_timeline`` to fetch the
+    body of hits that actually matter — this is the third tier of the
+    progressive-disclosure pattern, mirroring claude-mem's
+    ``get_observations``.
+    """
+    conn = _get_vault_index_conn()
+    if conn is None:
+        return _vault_index_error_payload()
+    if not agent_id or not agent_id.strip():
+        return {"error": "agent_id is required (contract C2)"}
+    try:
+        detail = vault_index.get_excerpt(
+            conn, agent_id.strip(), int(entry_id), max_chars=int(max_chars),
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    except Exception as exc:
+        sys.stderr.write(f"vault_get_excerpt failed: {exc}\n")
+        return {"error": f"get_excerpt failed: {exc}"}
+    if detail is None:
+        return {"error": f"no entry id={entry_id} for agent={agent_id!r}"}
+    return {
+        "id": detail.id,
+        "agent": detail.agent,
+        "kind": detail.kind,
+        "rel_path": detail.rel_path,
+        "section_path": detail.section_path,
+        "date": detail.date,
+        "title": detail.title,
+        "body": detail.body,
     }
 
 
