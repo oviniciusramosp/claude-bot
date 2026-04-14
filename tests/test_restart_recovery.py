@@ -169,14 +169,19 @@ class FindRoutineFileTests(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory()
         self.home = Path(self._td.name) / "home"
         self.home.mkdir()
-        self.bot = load_bot_module(tmp_home=self.home)
-        self.vault = self.bot.VAULT_DIR
-        # Create a routine file
-        routines_dir = self.vault / "main" / "Routines"
-        routines_dir.mkdir(parents=True, exist_ok=True)
-        (routines_dir / "test-routine.md").write_text("---\ntitle: Test\n---\nbody\n")
-        # agent-info so main counts as an agent
-        (self.vault / "main" / "agent-info.md").write_text("---\nname: Main\n---\n")
+        # IMPORTANT: pass vault_dir=... so the harness repoints VAULT_DIR
+        # into the tmpdir. Omitting it used to leave VAULT_DIR pointing at
+        # the real repo vault and this setUp would silently write fixtures
+        # into ~/claude-bot/vault/main/Routines/.
+        self.vault = Path(self._td.name) / "vault"
+        self.vault.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        # The harness already calls ensure_agent_layout("main") which creates
+        # vault/main/{Routines,Skills,...}/ and agent-main.md (the hub
+        # iter_agent_ids() looks for). All we add here is the one test fixture.
+        (self.vault / "main" / "Routines" / "test-routine.md").write_text(
+            "---\ntitle: Test\n---\nbody\n"
+        )
 
     def tearDown(self):
         self._td.cleanup()
@@ -203,10 +208,12 @@ class ParsePipelineTaskTests(unittest.TestCase):
         self._td = tempfile.TemporaryDirectory()
         self.home = Path(self._td.name) / "home"
         self.home.mkdir()
-        self.bot = load_bot_module(tmp_home=self.home)
-        self.vault = self.bot.VAULT_DIR
-        (self.vault / "main").mkdir(parents=True, exist_ok=True)
-        (self.vault / "main" / "agent-info.md").write_text("---\nname: Main\n---\n")
+        # Pass vault_dir=... so the harness repoints VAULT_DIR into the
+        # tmpdir; otherwise the fixture writes below would land in the real
+        # repo vault. The harness creates the main/ agent skeleton for us.
+        self.vault = Path(self._td.name) / "vault"
+        self.vault.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
 
     def tearDown(self):
         self._td.cleanup()

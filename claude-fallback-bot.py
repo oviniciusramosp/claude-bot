@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.15.1"  # fix: retry-without-parse_mode strips MDv2 escapes so users don't see literal backslashes
+BOT_VERSION = "3.16.0"  # perf: preserve system-prompt prefix cache by moving Active Memory to user prompt; drop duplicate "Available Skills" block; align manual /compact with auto-compact; use structured Session Snapshot in frozen context
 
 import hmac
 import hashlib
@@ -6202,7 +6202,44 @@ class ClaudeTelegramBot:
             self.send_message("❌ Nenhuma sessão ativa.")
 
     def cmd_compact(self) -> None:
-        self._run_claude_prompt("/compact")
+        """Manual /compact — mirrors the auto-compact flow (snapshot + /compact
+        + hot cache refresh) so the manual and automatic paths stay consistent.
+
+        Runs synchronously (not in a background thread) because the user
+        explicitly asked for it and is waiting on the result.
+        """
+        session = self._get_session()
+        if session is None or not session.session_id:
+            # No active session with a Claude session_id yet — fall back to
+            # sending /compact into whatever context exists. This mirrors the
+            # old behavior for fresh sessions.
+            self._run_claude_prompt("/compact")
+            return
+
+        self.send_message("🔄 _Compactando sessão..._")
+        try:
+            # 1. Snapshot to journal before compacting (preserves episodic memory)
+            self._snapshot_session_to_journal(session)
+            # 2. Compact
+            runner = ClaudeRunner()
+            runner.run(
+                prompt="/compact",
+                model=session.model,
+                session_id=session.session_id,
+                workspace=session.workspace,
+                system_prompt=None,
+                agent_id=session.agent or MAIN_AGENT_ID,
+            )
+            if runner.captured_session_id:
+                session.session_id = runner.captured_session_id
+                self.sessions.save()
+            # 3. Refresh agent hot cache for cross-session continuity
+            if session.agent:
+                self._update_agent_hot_cache(session)
+            self.send_message("✅ _Compactação concluída._")
+        except Exception as exc:
+            logger.error("Manual /compact failed: %s", exc)
+            self.send_message(f"❌ Falha ao compactar: `{exc}`")
 
     def _build_frozen_context(self, session: Session) -> tuple:
         """Build a compact context snapshot to inject once on the first message of a session.
@@ -6232,20 +6269,45 @@ class ClaudeTelegramBot:
                     f"do not repeat back unless asked._\n\n{hot_cache_body}"
                 )
 
-        # Recent journal entries (last 1500 chars of today's journal)
+        # Recent journal entries — prefer the last structured `## Session
+        # Snapshot —` block (appended by `_snapshot_session_to_journal` at
+        # auto-compact time) since it's a targeted handoff. Fall back to the
+        # raw tail if no snapshot marker is present yet.
         journal_path = Path(self._get_journal_path())
         if journal_path.is_file():
             try:
                 journal_mtime = journal_path.stat().st_mtime
                 journal_text = journal_path.read_text(encoding="utf-8")
                 if journal_text.strip():
-                    excerpt = journal_text[-1500:].strip()
+                    excerpt = (
+                        self._extract_last_snapshot(journal_text)
+                        or journal_text[-1500:].strip()
+                    )
                     parts.append(f"# Journal — Today's Context\n\n{excerpt}")
             except OSError:
                 pass
 
         context_str = "\n\n---\n\n".join(parts) if parts else ""
         return context_str, journal_mtime
+
+    @staticmethod
+    def _extract_last_snapshot(journal_text: str) -> str | None:
+        """Extract the last `## Session Snapshot — ...` block from the journal.
+
+        Returns the block (header + body) or None if no snapshot marker is
+        found. Used to prime frozen context with a structured handoff instead
+        of a raw tail slice.
+        """
+        marker = "## Session Snapshot —"
+        idx = journal_text.rfind(marker)
+        if idx == -1:
+            return None
+        # Read from marker to end of file — snapshots are always appended last.
+        snapshot = journal_text[idx:].strip()
+        # Cap to 2000 chars so frozen context stays lean.
+        if len(snapshot) > 2000:
+            snapshot = snapshot[:2000]
+        return snapshot
 
     @staticmethod
     def _normalize_text(text: str) -> str:
@@ -7777,27 +7839,17 @@ class ClaudeTelegramBot:
             except OSError:
                 pass
 
-        # Inject relevant skills metadata for every interactive message (zero LLM cost).
-        # Keyword match helps the agent discover and invoke skills proactively.
-        if not _retry and not routine_mode and system_prompt is not None:
-            relevant_skills = self._find_relevant_skills(prompt)
-            if relevant_skills:
-                skills_block = "\n\n## Available Skills (consider invoking if relevant):\n"
-                for s in relevant_skills:
-                    skills_block += f"- **{s['name']}**: {s['description']} (`{s['path']}`)\n"
-                    body = s.get("body")
-                    if body:
-                        # Indent body lines so the live-state snapshot is
-                        # visually grouped under the skill bullet.
-                        indented = "\n".join("  " + line for line in body.splitlines())
-                        skills_block += f"{indented}\n"
-                effective_sp = (effective_sp + skills_block) if effective_sp else skills_block
-
         # Active Memory (inspired by OpenClaw v2026.4.10) — proactive vault
         # context injection. Skipped for routines/pipelines (their `context:
         # minimal` already sets system_prompt=None), retries, and sessions
         # where the user ran /active-memory off. Fail-open: any error returns
         # None and this injection is simply skipped.
+        #
+        # IMPORTANT: this block is prepended to the USER PROMPT (not the
+        # system prompt) because `_active_memory_lookup` returns a different
+        # string per prompt — appending it to `effective_sp` would invalidate
+        # the Anthropic prefix cache on every turn. Same rationale as the
+        # graph-based skill hint below and the journal nudge above.
         if (not _retry
                 and not routine_mode
                 and system_prompt is not None
@@ -7808,9 +7860,7 @@ class ClaudeTelegramBot:
                 logger.warning("Active Memory lookup raised: %s", exc)
                 am_block = None
             if am_block:
-                effective_sp = (
-                    (effective_sp + "\n\n" + am_block) if effective_sp else am_block
-                )
+                prompt = am_block + "\n\n" + prompt
 
         # Graph-based skill hint (user-prompt prefix) — lightweight nudge sourced
         # from vault/.graphs/graph.json. Filters to the current agent's skills

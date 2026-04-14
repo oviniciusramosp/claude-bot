@@ -30,17 +30,28 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     Each call loads a fresh module instance so tests cannot bleed module-level
     state into each other. The caller is responsible for cleaning up any
     side effects (files written under tmp_home/vault_dir).
+
+    If ``vault_dir`` is not supplied, the harness defaults it to
+    ``tmp_home / "vault"`` so ``module.VAULT_DIR`` NEVER resolves to the real
+    repo vault. This guards against test fixtures accidentally writing into
+    ``~/claude-bot/vault/...`` when a test only reaches for ``self.bot.VAULT_DIR``.
     """
     if tmp_home is None:
         tmp_home = Path(tempfile.mkdtemp(prefix="claude-bot-test-"))
+
+    # Default vault_dir to a tmp subdir so VAULT_DIR never points at the real
+    # repo vault (see docstring). Tests that don't touch the vault are
+    # unaffected; tests that *do* touch it now land in a disposable tree.
+    if vault_dir is None:
+        vault_dir = tmp_home / "vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
 
     # Force credentials BEFORE import so .env loader skips real values
     os.environ["TELEGRAM_BOT_TOKEN"] = "test-token"
     os.environ["TELEGRAM_CHAT_ID"] = "123456789"
     os.environ["HOME"] = str(tmp_home)
     # Point CLAUDE_WORKSPACE somewhere safe so the bot doesn't pick the real vault
-    if vault_dir is not None:
-        os.environ["CLAUDE_WORKSPACE"] = str(vault_dir)
+    os.environ["CLAUDE_WORKSPACE"] = str(vault_dir)
 
     spec = importlib.util.spec_from_file_location("bot_under_test", str(BOT_FILE))
     if spec is None or spec.loader is None:
@@ -78,25 +89,37 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     module.CONTROL_TOKEN_FILE = data_dir / ".control-token"
     module.PIPELINE_ACTIVITY_FILE = data_dir / "pipeline-activity.json"
     module.REACTION_SECRETS_FILE = data_dir / "reaction-secrets.json"
-    if vault_dir is not None:
-        module.VAULT_DIR = vault_dir
-        # Default workspace points at <vault>/main/ — in v3.1 every agent
-        # (including Main) lives directly at the vault root.
-        module.CLAUDE_WORKSPACE = str(vault_dir / "main")
-        ensure_agent_layout(vault_dir, "main")
-        # Test-only shims: legacy tests wrote fixtures to ``bot.ROUTINES_DIR``,
-        # ``bot.LESSONS_DIR``, etc. Those module-level constants were removed
-        # in v3.0 (replaced by per-agent helper functions); keeping the shims
-        # here lets the existing test suite drop files into Main's folders
-        # without rewriting every fixture. New tests should use the per-agent
-        # helper functions directly.
-        main_base = vault_dir / "main"
-        module.ROUTINES_DIR = main_base / "Routines"
-        module.LESSONS_DIR = main_base / "Lessons"
-        module.REACTIONS_DIR = main_base / "Reactions"
-        module.ACTIVITY_LOG_DIR = main_base / "Journal" / ".activity"
+    # VAULT_DIR is always repointed now — vault_dir is never None at this
+    # point (we default it above).
+    module.VAULT_DIR = vault_dir
+    # Default workspace points at <vault>/main/ — in v3.1 every agent
+    # (including Main) lives directly at the vault root.
+    module.CLAUDE_WORKSPACE = str(vault_dir / "main")
+    ensure_agent_layout(vault_dir, "main")
+    # Test-only shims: legacy tests wrote fixtures to ``bot.ROUTINES_DIR``,
+    # ``bot.LESSONS_DIR``, etc. Those module-level constants were removed
+    # in v3.0 (replaced by per-agent helper functions); keeping the shims
+    # here lets the existing test suite drop files into Main's folders
+    # without rewriting every fixture. New tests should use the per-agent
+    # helper functions directly.
+    main_base = vault_dir / "main"
+    module.ROUTINES_DIR = main_base / "Routines"
+    module.LESSONS_DIR = main_base / "Lessons"
+    module.REACTIONS_DIR = main_base / "Reactions"
+    module.ACTIVITY_LOG_DIR = main_base / "Journal" / ".activity"
     for d in (data_dir, data_dir / "routines-state"):
         d.mkdir(parents=True, exist_ok=True)
+
+    # Belt-and-suspenders: refuse to return a module whose VAULT_DIR still
+    # resolves to the real repo vault. This catches any future regression
+    # where a test bypasses the default (e.g. sets VAULT_DIR by hand).
+    _real_vault = (REPO_ROOT / "vault").resolve()
+    if Path(module.VAULT_DIR).resolve() == _real_vault:
+        raise RuntimeError(
+            f"load_bot_module(): refusing to return a module whose VAULT_DIR "
+            f"points at the real repo vault ({_real_vault}). Pass a tmp "
+            f"vault_dir=... to load_bot_module() instead."
+        )
     return module
 
 
