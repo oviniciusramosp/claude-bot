@@ -1,6 +1,6 @@
 ---
-title: "Vault Nightly"
-description: "Nightly maintenance: rebuilds the knowledge graph, FTS full-text index, and MOC index files. Silent on success."
+title: "Vault Rebuild"
+description: "Nightly rebuild: knowledge graph, FTS full-text index, and MOC index files. Silent on success."
 type: routine
 schedule:
   times: ["04:00"]

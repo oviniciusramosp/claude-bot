@@ -1,6 +1,6 @@
 ---
-title: "Vault Lint"
-description: "Daily vault hygiene check. Runs scripts/vault_lint.py and notifies on Telegram only when issues are found. Otherwise stays silent (NO_REPLY)."
+title: "Vault Health"
+description: "Daily vault health check: broken wikilinks, missing frontmatter, orphan files, stale routines. Notifies only when issues are found."
 type: routine
 created: 2026-04-11
 updated: 2026-04-11

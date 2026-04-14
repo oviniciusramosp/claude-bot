@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.23.0"  # chore: consolidate vault-graph-update + vault-index-update + vault-indexes-update into vault-nightly
+BOT_VERSION = "3.23.2"  # chore: rename vault-nightly → vault-rebuild, vault-lint → vault-health
 
 import hmac
 import hashlib
@@ -669,7 +669,7 @@ ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget =>
 
 # Built-in routines shipped with the repo — cannot be deleted via Telegram
 BUILTIN_ROUTINE_IDS: frozenset = frozenset({
-    "update-check", "vault-nightly", "vault-lint",
+    "update-check", "vault-rebuild", "vault-health",
     "journal-audit", "journal-weekly-rollup",
 })
 # Node types EXCLUDED from Active Memory: "skill" is already handled by
@@ -1377,12 +1377,25 @@ class RoutineStateManager:
 
     # -- Startup recovery helpers -------------------------------------------
 
+    # Step-level states that count as terminal — any pipeline whose steps are
+    # ALL in one of these states has already finished and must not be treated
+    # as "interrupted" on restart.
+    _STEP_TERMINAL_STATES = frozenset({"completed", "failed", "skipped"})
+
     def _collect_interrupted_tasks(self) -> tuple:
         """Scan today's (and yesterday's) state for 'running' entries.
 
         Returns (interrupted_pipelines, interrupted_routines) — two lists of
-        dicts with enough info to resume each task.  Does NOT mutate state;
-        the caller decides whether to resume or mark-as-failed.
+        dicts with enough info to resume each task.
+
+        **Self-heals false-positive pipelines.**  A pipeline can be persisted
+        with pipeline-level status='running' even though every step is already
+        in a terminal state — this happens when the bot process is killed
+        between the last step transitioning to its terminal state and the
+        pipeline-level status being flipped to completed/failed.  On restart,
+        this function detects that inconsistency, rewrites the state file to
+        reconcile the pipeline-level status with the step outcomes, and does
+        NOT add it to the recovery list (nothing left to do).
         """
         pipelines: list = []
         routines: list = []
@@ -1412,12 +1425,82 @@ class RoutineStateManager:
                         "workspace": entry.get("workspace"),
                     }
                     if entry.get("type") == "pipeline":
-                        info["steps"] = entry.get("steps", {})
+                        steps_dict = entry.get("steps") or {}
+                        # Reconcile the false-positive case: pipeline-level is
+                        # "running" but every step is already terminal.  This
+                        # is persistent state drift from a kill between last
+                        # step completion and pipeline-level status update.
+                        if isinstance(steps_dict, dict) and steps_dict:
+                            all_terminal = all(
+                                (s.get("status") or "").lower() in self._STEP_TERMINAL_STATES
+                                for s in steps_dict.values()
+                            )
+                            if all_terminal:
+                                logger.info(
+                                    "Pipeline %s@%s (%s): pipeline-level 'running' but all steps terminal — "
+                                    "reconciling state and skipping recovery",
+                                    routine_name, slot, day_str,
+                                )
+                                self._heal_terminated_pipeline(routine_name, slot, day_str)
+                                continue
+                        info["steps"] = steps_dict
                         pipelines.append(info)
                     else:
                         routines.append(info)
 
         return pipelines, routines
+
+    def _heal_terminated_pipeline(self, name: str, slot: str, day_str: str) -> None:
+        """Fix persistent state drift: pipeline-level status='running' with all
+        steps in terminal states.
+
+        Rewrites the pipeline-level status in the day's state file based on
+        step outcomes — 'failed' if ANY step failed, otherwise 'completed'.
+        Idempotent: re-reads the file under the lock and only writes if the
+        state is still drifted.  Silently no-ops if the file has disappeared
+        or the state has already been healed by another concurrent writer.
+        """
+        sf = ROUTINES_STATE_DIR / f"{day_str}.json"
+        if not sf.exists():
+            return
+        with self._lock:
+            try:
+                data = json.loads(sf.read_text(encoding="utf-8"))
+            except Exception:
+                return
+            entry = data.get(name, {}).get(slot)
+            if not isinstance(entry, dict):
+                return
+            if entry.get("status") != "running":
+                return  # already healed or changed by another code path
+            steps = entry.get("steps")
+            if not isinstance(steps, dict) or not steps:
+                return  # empty — nothing to reconcile from
+            # Re-verify the terminal condition under the lock (defensive)
+            if not all(
+                (s.get("status") or "").lower() in self._STEP_TERMINAL_STATES
+                for s in steps.values()
+            ):
+                return
+            any_failed = any(
+                (s.get("status") or "").lower() == "failed" for s in steps.values()
+            )
+            new_status = "failed" if any_failed else "completed"
+            entry["status"] = new_status
+            entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            if new_status == "failed" and not entry.get("error"):
+                entry["error"] = (
+                    "Reconciled on restart — step outcomes were terminal but "
+                    "pipeline-level status was left as 'running'"
+                )
+            data.setdefault(name, {})[slot] = entry
+            sf.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        logger.info(
+            "Reconciled pipeline %s@%s (%s): pipeline-level → %s",
+            name, slot, day_str, new_status,
+        )
 
     def mark_interrupted_as_failed(self, name: str, time_slot: str, is_pipeline: bool = False,
                                     error: str = "Bot restarted — process killed before completion") -> None:

@@ -81,7 +81,7 @@ struct Routine: Identifiable, Hashable, Sendable {
 
     /// Built-in routines shipped with the repo — can be disabled but not deleted
     static let builtInIds: Set<String> = [
-        "update-check", "vault-nightly", "vault-lint",
+        "update-check", "vault-rebuild", "vault-health",
         "journal-audit", "journal-weekly-rollup",
     ]
     var isBuiltIn: Bool { Self.builtInIds.contains(id) }
