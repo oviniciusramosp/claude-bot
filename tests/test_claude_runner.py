@@ -177,6 +177,54 @@ class AccumulatedThinking(unittest.TestCase):
         self.assertEqual(self.runner.accumulated_thinking, "")
 
 
+class AgentIdInjection(unittest.TestCase):
+    """Verify ClaudeRunner.run() injects AGENT_ID into the subprocess env."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    @patch("subprocess.Popen")
+    def test_agent_id_injected_into_env(self, mock_popen):
+        """When agent_id is provided, AGENT_ID must be in the env dict."""
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.stderr = MagicMock(read=MagicMock(return_value=""))
+        mock_proc.wait.return_value = 0
+        mock_proc.poll.return_value = 0
+        mock_proc.stdin = MagicMock()
+        mock_popen.return_value = mock_proc
+
+        runner = self.bot.ClaudeRunner()
+        runner.run(prompt="test", agent_id="crypto-bro")
+
+        # Popen should have been called with env containing AGENT_ID
+        call_kwargs = mock_popen.call_args
+        env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
+        self.assertIsNotNone(env, "Popen must be called with env=")
+        self.assertEqual(env.get("AGENT_ID"), "crypto-bro")
+
+    @patch("subprocess.Popen")
+    def test_agent_id_not_injected_when_none(self, mock_popen):
+        """When agent_id is None, AGENT_ID should not be added to env."""
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.stderr = MagicMock(read=MagicMock(return_value=""))
+        mock_proc.wait.return_value = 0
+        mock_proc.poll.return_value = 0
+        mock_proc.stdin = MagicMock()
+        mock_popen.return_value = mock_proc
+
+        runner = self.bot.ClaudeRunner()
+        # Ensure AGENT_ID isn't already in os.environ
+        os.environ.pop("AGENT_ID", None)
+        runner.run(prompt="test", agent_id=None)
+
+        call_kwargs = mock_popen.call_args
+        env = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env")
+        self.assertNotIn("AGENT_ID", env)
+
+
 class GetSnapshot(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

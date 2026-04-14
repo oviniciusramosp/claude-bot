@@ -606,7 +606,7 @@ class PipelineLoopExecution(unittest.TestCase):
         outputs = iter(["partial work step 1", "still working", "finished: ALL_DONE"])
         calls = []
 
-        def fake_invoke(s, prompt, ws):
+        def fake_invoke(s, prompt, ws, **kwargs):
             out = next(outputs)
             calls.append(prompt)
             return out
@@ -629,7 +629,7 @@ class PipelineLoopExecution(unittest.TestCase):
         step = self._make_step(loop_until="NEVER", loop_max_iterations=3)
         executor, fake_bot = self._build_executor(step)
         counter = {"n": 0}
-        def fake_invoke(s, p, w):
+        def fake_invoke(s, p, w, **kwargs):
             counter["n"] += 1
             return f"iteration {counter['n']} output without marker"
         executor._run_step_invocation = fake_invoke
@@ -649,7 +649,7 @@ class PipelineLoopExecution(unittest.TestCase):
         )
         executor, _ = self._build_executor(step)
         # Same output every call -> should abort on iter 2
-        executor._run_step_invocation = lambda s, p, w: "same exact output"
+        executor._run_step_invocation = lambda s, p, w, **kw: "same exact output"
         data_dir = executor.workspace / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
         executor._execute_loop_step(step, data_dir)
@@ -664,7 +664,7 @@ class PipelineLoopExecution(unittest.TestCase):
         )
         executor, _ = self._build_executor(step)
         calls = []
-        def fake_invoke(s, p, w):
+        def fake_invoke(s, p, w, **kwargs):
             calls.append(p)
             return "same exact output"
         executor._run_step_invocation = fake_invoke
@@ -681,7 +681,7 @@ class PipelineLoopExecution(unittest.TestCase):
         step = self._make_step(loop_until="NEVER", loop_max_iterations=500)
         executor, _ = self._build_executor(step)
         call_count = {"n": 0}
-        def fake_invoke(s, p, w):
+        def fake_invoke(s, p, w, **kwargs):
             call_count["n"] += 1
             return f"output {call_count['n']}"
         executor._run_step_invocation = fake_invoke

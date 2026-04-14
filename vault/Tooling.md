@@ -27,6 +27,23 @@ pinchtab click <ref> --port 9870     # click element
 pinchtab fill <ref> "text" --port 9870  # fill form field
 ```
 
+## Telegram notifications from pipelines/routines
+
+- **`scripts/telegram_notify.py`** — Send messages to the correct Telegram topic for any agent.
+- **Auto-detects the agent** from `AGENT_ID` env var (injected by the bot harness) or from CWD. No `--agent` flag needed in most cases.
+- Reads `chat_id`/`thread_id` from agent frontmatter — single source of truth for routing.
+- `TELEGRAM_BOT_TOKEN` is read from the project `.env`.
+
+```bash
+# Inside a pipeline/routine (agent auto-detected from AGENT_ID env var):
+python3 scripts/telegram_notify.py "Hello world"
+python3 scripts/telegram_notify.py "Hello" --parse-mode Markdown
+echo "message" | python3 scripts/telegram_notify.py --stdin
+
+# Explicit agent override (rare — for cross-agent messaging):
+python3 scripts/telegram_notify.py --agent parmeirense "Hello"
+```
+
 ## References
 
 External repositories and documents worth consulting when working on the bot.

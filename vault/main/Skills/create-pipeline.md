@@ -544,6 +544,19 @@ Append to today's journal with the applied changes.
 
 ---
 
+## Telegram notifications from pipeline steps
+
+To send additional Telegram messages from a step (beyond the harness's `output: telegram`), use:
+
+```bash
+python3 scripts/telegram_notify.py "message text"
+python3 scripts/telegram_notify.py "message" --parse-mode Markdown --silent
+```
+
+The script auto-detects the owning agent from the `AGENT_ID` env var (injected by the bot harness) and reads routing from agent frontmatter. No `--agent` flag needed.
+
+---
+
 ## Anti-patterns (quick reference)
 
 | Anti-pattern | Problem | Solution |
@@ -556,6 +569,7 @@ Append to today's journal with the applied changes.
 | Sequential cover | Cover generation waits for entire analysis | Parallelize if cover only depends on raw data |
 | Prompt with `data/` | Step mentions workspace | Remove — orchestrator injects automatically |
 | Wikilink in step file | `[[...]]` leaks to LLM, pollutes graph | Keep step prompts free of wikilinks; parent owns the `## Steps` section |
+| Raw curl to Telegram | Hardcoded env vars go stale, messages go to wrong topic | Use `scripts/telegram_notify.py "msg"` — auto-detects agent, reads routing from frontmatter |
 
 ---
 

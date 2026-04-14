@@ -291,3 +291,4 @@ Append to the day's journal with the applied changes.
 - The bot's scheduler checks routines every 60 seconds
 - Routines that fail appear with a red icon in the menu bar
 - **If the user wants a routine with multiple steps/agents/steps, use the `Skills/create-pipeline.md` skill instead of this one.** Pipelines have `type: pipeline` and allow orchestrating multiple sub-agents with dependencies, parallelism, and different models per step.
+- **Telegram notifications:** To send additional Telegram messages from a routine, use `python3 scripts/telegram_notify.py "message"`. The script auto-detects the agent from the `AGENT_ID` env var (injected by the harness). See `Tooling.md`.

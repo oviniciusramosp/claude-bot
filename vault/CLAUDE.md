@@ -295,6 +295,8 @@ Step prompt files live under `Routines/{pipeline}/steps/*.md` — they have **no
 
 **Optional `## Example Output` / `## Expected Output` sections.** When a routine or pipeline step produces structured output and the format matters for correctness or downstream parsing, include an inline example at the end of the prompt body. This is especially important for pipeline steps whose output feeds another step. See `Skills/create-routine.md` and `Skills/create-pipeline.md` for detailed guidance and examples.
 
+**Telegram notifications from steps.** To send additional Telegram messages from a pipeline step or routine, use `scripts/telegram_notify.py "message"`. The script auto-detects the owning agent from the `AGENT_ID` env var (injected by the bot harness) and reads `chat_id`/`thread_id` from the agent's frontmatter. The harness's `notify: final` and `output: telegram` handle the main pipeline output automatically.
+
 ### Agent
 ```yaml
 ---

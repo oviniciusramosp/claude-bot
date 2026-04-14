@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.13.0"  # refactor: slim SYSTEM_PROMPT (~87% dedup), gate advisor for routines, drop frozen CLAUDE.md double-load
+BOT_VERSION = "3.13.1"  # fix: inject AGENT_ID env var into subprocess, telegram_notify.py auto-detects agent
 
 import hmac
 import hashlib
@@ -3061,6 +3061,7 @@ class ClaudeRunner:
         effort: Optional[str] = None,
         system_prompt: Optional[str] = SYSTEM_PROMPT,
         lightweight: bool = False,  # unused, kept for API compat
+        agent_id: Optional[str] = None,
     ) -> None:
         global CLAUDE_PATH
         if not os.path.isfile(CLAUDE_PATH):
@@ -3103,6 +3104,11 @@ class ClaudeRunner:
         try:
             # Strip CLAUDECODE env var to prevent "nested session" errors.
             clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+            # Inject AGENT_ID so scripts (e.g. telegram_notify.py) can auto-detect
+            # which agent is running without requiring an explicit --agent flag.
+            if agent_id:
+                clean_env["AGENT_ID"] = agent_id
 
             # Provider routing: GLM models go through z.AI's Anthropic-compatible gateway.
             # Claude CLI validates model names client-side, so GLM names ("glm-5.1" etc.)
@@ -3878,7 +3884,8 @@ class PipelineExecutor:
                 target=runner.run,
                 kwargs={"prompt": prompt, "model": step.model, "workspace": ws,
                          "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT,
-                         "effort": step.effort or self.task.effort},
+                         "effort": step.effort or self.task.effort,
+                         "agent_id": agent_id_for_ws},
                 daemon=True, name=f"pipeline-runner-{step.id}")
             runner_thread.start()
 
@@ -4007,7 +4014,8 @@ class PipelineExecutor:
                     del self._output_file_locks[step.resolved_filename]
             self._remove_step_activity(step.id)
 
-    def _run_step_invocation(self, step: PipelineStep, prompt: str, ws: str) -> str:
+    def _run_step_invocation(self, step: PipelineStep, prompt: str, ws: str,
+                             agent_id: Optional[str] = None) -> str:
         """Run a single ClaudeRunner invocation for a step and return the raw output.
 
         Shared helper used by both the normal `_execute_step` path (indirectly via
@@ -4025,6 +4033,7 @@ class PipelineExecutor:
                     "prompt": prompt, "model": step.model, "workspace": ws,
                     "system_prompt": None if self.task.minimal_context else SYSTEM_PROMPT,
                     "effort": step.effort or self.task.effort,
+                    "agent_id": agent_id,
                 },
                 daemon=True, name=f"pipeline-loop-runner-{step.id}",
             )
@@ -4127,7 +4136,7 @@ class PipelineExecutor:
                         f"{previous_output or '(vazio)'}\n"
                     )
                 logger.info("Pipeline %s: step %s loop iter %d/%d", self.task.name, step.id, i, cap)
-                output = self._run_step_invocation(step, iter_prompt, ws)
+                output = self._run_step_invocation(step, iter_prompt, ws, agent_id=agent_id_for_ws)
 
                 # Persist the latest output every iteration so a crash mid-loop
                 # leaves the most recent result on disk for debugging.
@@ -4549,7 +4558,7 @@ class PipelineExecutor:
                     isolated = workspace_dir(agent_id_for_ws)
                     if isolated.is_dir():
                         ws = str(isolated)
-                    new_output = self._run_step_invocation(dep_step, augmented_prompt, ws)
+                    new_output = self._run_step_invocation(dep_step, augmented_prompt, ws, agent_id=agent_id_for_ws)
                     content_path.write_text(new_output, encoding="utf-8")
                     with self._lock:
                         self._step_outputs[dep_step_id] = new_output
@@ -6282,6 +6291,7 @@ class ClaudeTelegramBot:
                 session_id=session.session_id,
                 workspace=session.workspace,
                 system_prompt=None,
+                agent_id=session.agent or MAIN_AGENT_ID,
             )
             snapshot = (runner.result_text or runner.accumulated_text or "").strip()
             if not snapshot:
@@ -6326,6 +6336,7 @@ class ClaudeTelegramBot:
                     session_id=sid,
                     workspace=ws,
                     system_prompt=None,
+                    agent_id=session.agent or MAIN_AGENT_ID,
                 )
                 if runner.captured_session_id:
                     session.session_id = runner.captured_session_id
@@ -6380,6 +6391,7 @@ class ClaudeTelegramBot:
                 session_id=session.session_id,
                 workspace=session.workspace,
                 system_prompt=None,
+                agent_id=agent_id,
             )
             snapshot = (runner.result_text or runner.accumulated_text or "").strip()
             if not snapshot:
@@ -6622,6 +6634,7 @@ class ClaudeTelegramBot:
                         "session_id": None,        # fresh context
                         "workspace": session.workspace,
                         "system_prompt": None,     # minimal — no vault system prompt
+                        "agent_id": session.agent or MAIN_AGENT_ID,
                     },
                     daemon=True,
                 )
@@ -7714,6 +7727,7 @@ class ClaudeTelegramBot:
                 "workspace": session.workspace,
                 "effort": effective_effort,
                 "system_prompt": effective_sp,
+                "agent_id": session.agent or MAIN_AGENT_ID,
             },
             daemon=True,
         )
