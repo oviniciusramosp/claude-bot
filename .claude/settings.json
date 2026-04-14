@@ -1,5 +1,17 @@
 {
     "hooks": {
+        "SessionStart": [
+            {
+                "matcher": "startup",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/session-start-log.sh",
+                        "timeout": 10
+                    }
+                ]
+            }
+        ],
         "PreToolUse": [
             {
                 "matcher": "Glob|Grep",
@@ -7,6 +19,33 @@
                     {
                         "type": "command",
                         "command": "[ -f vault/.graphs/graph.json ] && echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"Knowledge graph exists at vault/.graphs/graph.json — consider consulting it for vault-related searches before scanning raw files.\"}}' || true"
+                    }
+                ]
+            },
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/warn-destructive-bash.sh",
+                        "timeout": 10
+                    }
+                ]
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Write|Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/remind-version-bump.sh",
+                        "timeout": 10
+                    },
+                    {
+                        "type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/py-compile-check.sh",
+                        "timeout": 30
                     }
                 ]
             }
