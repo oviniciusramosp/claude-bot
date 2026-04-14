@@ -182,6 +182,50 @@ class SanitizeMarkdownV2(unittest.TestCase):
         self.assertIn("https://example.com/x.y", out)
 
 
+class UnescapeMdv2(unittest.TestCase):
+    """`_unescape_mdv2` reverses the escaping applied by `_sanitize_markdown_v2`.
+
+    Used as the retry fallback when Telegram rejects a MarkdownV2 message.
+    Without the reverse step, users see raw backslashes in their chat (e.g.
+    `@foo\\_bar comentou\\.`) which looks like garbage.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+        cls.sanitize = staticmethod(cls.bot.ClaudeTelegramBot._sanitize_markdown_v2)
+        cls.unescape = staticmethod(cls.bot.ClaudeTelegramBot._unescape_mdv2)
+
+    def test_roundtrip_restores_plain_text(self):
+        original = "Hello world. How are you?"
+        sanitized = self.sanitize(original)
+        self.assertIn("\\.", sanitized)  # confirm the escape was added
+        self.assertEqual(self.unescape(sanitized), original)
+
+    def test_roundtrip_preserves_mentions(self):
+        original = "O @foo_bar disse algo interessante."
+        sanitized = self.sanitize(original)
+        self.assertEqual(self.unescape(sanitized), original)
+
+    def test_roundtrip_preserves_urls(self):
+        original = "Veja https://threads.com/@user_name/post/abc_def"
+        sanitized = self.sanitize(original)
+        self.assertEqual(self.unescape(sanitized), original)
+
+    def test_roundtrip_preserves_code_blocks(self):
+        original = "intro\n```python\nx = foo.bar(1.2)\n```\nend."
+        sanitized = self.sanitize(original)
+        unescaped = self.unescape(sanitized)
+        # Code block contents untouched; prose outside restored
+        self.assertIn("x = foo.bar(1.2)", unescaped)
+        self.assertIn("end.", unescaped)
+        self.assertNotIn("\\.", unescaped)
+
+    def test_does_not_touch_already_clean_text(self):
+        clean = "Nothing to escape here"
+        self.assertEqual(self.unescape(clean), clean)
+
+
 class SanitizeMarkdownV1(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

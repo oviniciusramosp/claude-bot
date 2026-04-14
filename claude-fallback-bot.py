@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.15.0"  # feat: update-check routine with changelog summary, urgency, and install buttons
+BOT_VERSION = "3.15.1"  # fix: retry-without-parse_mode strips MDv2 escapes so users don't see literal backslashes
 
 import hmac
 import hashlib
@@ -5561,6 +5561,9 @@ class ClaudeTelegramBot:
             else:
                 if parse_mode:
                     data.pop("parse_mode", None)
+                    # Strip MDv2 escapes so the user doesn't see literal
+                    # backslashes when parse_mode is removed.
+                    data["text"] = self._unescape_mdv2(chunk)
                     resp = self.tg_request("sendMessage", data)
                     if resp and resp.get("ok"):
                         last_msg_id = resp["result"]["message_id"]
@@ -5585,9 +5588,12 @@ class ClaudeTelegramBot:
         resp = self._tg_edit(data)
         if resp:
             return True
-        # Retry without parse_mode (markdown may be invalid)
+        # Retry without parse_mode (markdown may be invalid). Strip escape
+        # backslashes first — without parse_mode Telegram shows them literally,
+        # which makes the fallback look like garbage to the user.
         if parse_mode:
             data.pop("parse_mode", None)
+            data["text"] = self._unescape_mdv2(text)
             resp = self._tg_edit(data)
             if resp:
                 return True
@@ -5677,6 +5683,29 @@ class ClaudeTelegramBot:
             # Outside code blocks — escape special chars, preserving formatting
             parts[i] = ClaudeTelegramBot._escape_mdv2_segment(parts[i])
 
+        return "```".join(parts)
+
+    # Matches `\X` where X is any MDv2 special char (same set as _MDV2_ESCAPE_RE).
+    # Used when retrying a Telegram send without parse_mode — without the
+    # parse_mode, the backslashes render literally, so we undo our own escaping
+    # to give the user a readable (if unformatted) fallback instead of a text
+    # full of stray backslashes.
+    _MDV2_UNESCAPE_RE = re.compile(r'\\([_*\[\]()~>#+\-=|{}.!\\":])')
+
+    @staticmethod
+    def _unescape_mdv2(text: str) -> str:
+        """Reverse the escaping applied by `_sanitize_markdown_v2`.
+
+        This strips the backslashes the sanitizer added before MDv2 special
+        chars. Content inside fenced code blocks is left as-is (they were
+        never escaped in the first place). Use this when retrying a Telegram
+        send without parse_mode so the user sees clean text.
+        """
+        parts = text.split("```")
+        for i in range(len(parts)):
+            if i % 2 == 1:
+                continue  # inside fenced code block — leave as-is
+            parts[i] = ClaudeTelegramBot._MDV2_UNESCAPE_RE.sub(r"\1", parts[i])
         return "```".join(parts)
 
     @staticmethod
