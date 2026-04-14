@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.14.0"  # feat: dynamic shell substitution in skills (opt-in via allow_shell: true)
+BOT_VERSION = "3.15.0"  # feat: update-check routine with changelog summary, urgency, and install buttons
 
 import hmac
 import hashlib
@@ -8724,6 +8724,12 @@ class ClaudeTelegramBot:
             self.answer_callback(cb_id, "Cancelado")
             self.send_message("🚫 Comando cancelado.")
 
+        elif data.startswith("update:"):
+            update_target = data.split(":", 1)[1]
+            self.answer_callback(cb_id, f"Atualizando {update_target}...")
+            self._remove_keyboard(callback)
+            self._handle_update_install(update_target)
+
         elif data.startswith("manual_approve:"):
             review_id = data.split(":", 1)[1]
             entry = self._pending_manual_reviews.get(review_id)
@@ -8766,6 +8772,52 @@ class ClaudeTelegramBot:
 
         else:
             self.answer_callback(cb_id)
+
+    def _handle_update_install(self, target: str) -> None:
+        """Run update commands for Claude Code CLI or claude-bot repo."""
+        def _run() -> None:
+            try:
+                if target == "claude-code":
+                    self.send_message("⏳ Atualizando Claude Code via Homebrew\\.\\.\\.")
+                    result = subprocess.run(
+                        ["/opt/homebrew/bin/brew", "upgrade", "--cask", "claude-code"],
+                        capture_output=True, text=True, timeout=300,
+                    )
+                    output = (result.stdout or "") + (result.stderr or "")
+                    if result.returncode == 0:
+                        # Get new version
+                        ver_result = subprocess.run(
+                            [config["claude_path"], "--version"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        new_ver = ver_result.stdout.strip() if ver_result.returncode == 0 else "?"
+                        self.send_message(f"✅ Claude Code atualizado\\! Versão: `{self._sanitize_markdown_v2(new_ver)}`")
+                    else:
+                        safe = self._sanitize_markdown_v2(output[-500:] if len(output) > 500 else output)
+                        self.send_message(f"❌ Falha ao atualizar Claude Code:\n```\n{safe}\n```")
+                elif target == "repo":
+                    self.send_message("⏳ Atualizando claude\\-bot repo\\.\\.\\.")
+                    result = subprocess.run(
+                        ["git", "pull", "origin", "main"],
+                        capture_output=True, text=True, timeout=60,
+                        cwd=str(Path(__file__).resolve().parent),
+                    )
+                    output = (result.stdout or "") + (result.stderr or "")
+                    if result.returncode == 0:
+                        safe = self._sanitize_markdown_v2(output.strip()[-500:])
+                        self.send_message(f"✅ Repo atualizado\\!\n```\n{safe}\n```\n\n⚠️ Reinicie o bot para aplicar as mudanças\\.")
+                    else:
+                        safe = self._sanitize_markdown_v2(output[-500:] if len(output) > 500 else output)
+                        self.send_message(f"❌ Falha ao atualizar repo:\n```\n{safe}\n```")
+                else:
+                    self.send_message(f"❌ Target de update desconhecido: `{self._sanitize_markdown_v2(target)}`")
+            except subprocess.TimeoutExpired:
+                self.send_message("❌ Timeout ao executar a atualização\\.")
+            except Exception as exc:
+                logger.error("Update install failed for %s: %s", target, exc)
+                self.send_message(f"❌ Erro ao atualizar: `{self._sanitize_markdown_v2(str(exc))}`")
+
+        threading.Thread(target=_run, daemon=True, name=f"update-{target}").start()
 
     def _extract_reply_context(self, msg: Dict) -> str:
         """If msg is a reply, return a context prefix with the original message content."""
