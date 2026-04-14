@@ -72,4 +72,4 @@ The **Main Agent** is the bot's default agent (no own workspace). It counts as a
 1. `claude-fallback-bot.py`, `BOT_VERSION = "X.Y.Z"`
 2. `ClaudeBotManager/Sources/App/Info.plist`, `CFBundleShortVersionString`
 
-See the main CLAUDE.md "Versioning and Commits" section for the full rules.
+See `.claude/rules/versioning.md` for the full rules.
