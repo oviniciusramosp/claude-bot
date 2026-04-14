@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.18.1"  # fix: add missing Tuple to typing imports
+BOT_VERSION = "3.18.2"  # fix: replace str | None with Optional[str] for Python 3.9 compat
 
 import hmac
 import hashlib
@@ -666,6 +666,12 @@ ACTIVE_MEMORY_ENABLED = True            # global default; can be flipped per ses
 ACTIVE_MEMORY_MAX_NODES = 3             # how many graph nodes to include per turn
 ACTIVE_MEMORY_MAX_CHARS_PER_NODE = 400  # excerpt size from each matched file body
 ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget => None
+
+# Built-in routines shipped with the repo — cannot be deleted via Telegram
+BUILTIN_ROUTINE_IDS: frozenset = frozenset({
+    "update-check", "vault-graph-update", "journal-audit",
+    "vault-indexes-update", "vault-lint",
+})
 # Node types EXCLUDED from Active Memory: "skill" is already handled by
 # _select_relevant_skills (SKILL_HINTS_ENABLED); "history" is churn-y log data.
 ACTIVE_MEMORY_EXCLUDED_TYPES = frozenset({"skill", "history"})
@@ -6662,7 +6668,7 @@ class ClaudeTelegramBot:
         return context_str, journal_mtime
 
     @staticmethod
-    def _extract_last_snapshot(journal_text: str) -> str | None:
+    def _extract_last_snapshot(journal_text: str) -> Optional[str]:
         """Extract the last `## Session Snapshot — ...` block from the journal.
 
         Returns the block (header + body) or None if no snapshot marker is
