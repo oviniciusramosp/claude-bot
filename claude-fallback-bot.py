@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.18.2"  # fix: replace str | None with Optional[str] for Python 3.9 compat
+BOT_VERSION = "3.19.0"  # feat: update-check with changelog/buttons + OSS Radar pipeline + pipeline NO_REPLY support
 
 import hmac
 import hashlib
@@ -5011,6 +5011,11 @@ class PipelineExecutor:
                     output_text = self._step_outputs[step.id]
                     break
 
+        # NO_REPLY from the output step means nothing worth reporting — silent success
+        if output_text and output_text.strip() == "NO_REPLY":
+            logger.info("Pipeline %s: output step returned NO_REPLY — skipping notification", self.task.title)
+            return
+
         sent_text = None
         if self.task.notify == "summary" or not output_text:
             mins = elapsed // 60
@@ -7442,6 +7447,12 @@ class ClaudeTelegramBot:
             self.send_message(
                 "Uso: `/routine delete <nome>`\n\n"
                 "Exemplo: `/routine delete crypto-news`"
+            )
+            return
+        if name in BUILTIN_ROUTINE_IDS:
+            self.send_message(
+                f"⛔ `{name}` é uma rotina built-in do bot e não pode ser deletada.\n"
+                "Use `/routine list` para ver as suas rotinas."
             )
             return
         routine_path = _find_routine_file(name)
