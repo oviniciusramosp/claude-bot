@@ -47,14 +47,22 @@ pinchtab tabs close --port 9870
 - `TELEGRAM_BOT_TOKEN` is read from the project `.env`.
 
 ```bash
-# Inside a pipeline/routine (agent auto-detected from AGENT_ID env var):
-python3 scripts/telegram_notify.py "Hello world"
-python3 scripts/telegram_notify.py "Hello" --parse-mode Markdown
-echo "message" | python3 scripts/telegram_notify.py --stdin
-
-# Explicit agent override (rare — for cross-agent messaging):
-python3 scripts/telegram_notify.py --agent parmeirense "Hello"
+# Inside a pipeline/routine — use $TELEGRAM_NOTIFY (injected by harness, no hardcoded path):
+python3 $TELEGRAM_NOTIFY "Hello world"
+python3 $TELEGRAM_NOTIFY "Hello" --parse-mode Markdown
+echo "message" | python3 $TELEGRAM_NOTIFY --stdin
 ```
+
+```python
+# From Python code in a step:
+import subprocess, os
+subprocess.run(["python3", os.environ["TELEGRAM_NOTIFY"], "--text", text], check=True)
+```
+
+Three routing env vars are also injected for direct use in curl/urllib if needed:
+- `AGENT_CHAT_ID` — Telegram chat_id of the owning agent
+- `AGENT_THREAD_ID` — Telegram thread_id (empty string if none)
+- `AGENT_ID` — agent slug (e.g. `parmeirense`)
 
 ## References
 

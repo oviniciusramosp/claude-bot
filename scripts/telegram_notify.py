@@ -16,9 +16,12 @@ Usage:
     echo "message body" | python3 telegram_notify.py --stdin
     python3 telegram_notify.py --stdin --silent
 
-Environment:
-    TELEGRAM_BOT_TOKEN  — required (read from project .env if not set)
-    AGENT_ID            — optional (set by bot harness for auto-detection)
+Environment (all injected by bot harness into every subprocess):
+    TELEGRAM_NOTIFY     — absolute path to this script (use instead of hardcoded path)
+    AGENT_ID            — owning agent ID for auto-detection
+    AGENT_CHAT_ID       — Telegram chat_id for the owning agent
+    AGENT_THREAD_ID     — Telegram thread_id for the owning agent (empty if none)
+    TELEGRAM_BOT_TOKEN  — required (read from project .env if not set in env)
 """
 
 import argparse

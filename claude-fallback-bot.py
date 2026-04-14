@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.16.0"  # perf: preserve system-prompt prefix cache by moving Active Memory to user prompt; drop duplicate "Available Skills" block; align manual /compact with auto-compact; use structured Session Snapshot in frozen context
+BOT_VERSION = "3.16.1"  # fix: inject TELEGRAM_NOTIFY + AGENT_CHAT_ID/THREAD_ID into subprocess env; telegram_notify.py auto-detects agent
 
 import hmac
 import hashlib
@@ -3133,10 +3133,27 @@ class ClaudeRunner:
             # Strip CLAUDECODE env var to prevent "nested session" errors.
             clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
+            # Always inject TELEGRAM_NOTIFY so step prompts reference the script
+            # via $TELEGRAM_NOTIFY instead of a hardcoded absolute path.
+            clean_env["TELEGRAM_NOTIFY"] = str(
+                Path(__file__).resolve().parent / "scripts" / "telegram_notify.py"
+            )
+
             # Inject AGENT_ID so scripts (e.g. telegram_notify.py) can auto-detect
             # which agent is running without requiring an explicit --agent flag.
+            # Also inject AGENT_CHAT_ID / AGENT_THREAD_ID so even naive curl/urllib
+            # code in step prompts routes to the correct Telegram topic without
+            # parsing the agent frontmatter manually.
             if agent_id:
                 clean_env["AGENT_ID"] = agent_id
+                _agent_def = load_agent(agent_id)
+                if _agent_def:
+                    _cid = _agent_def.get("chat_id") or _agent_def.get("telegram_chat_id", "")
+                    _tid = _agent_def.get("thread_id") or _agent_def.get("telegram_thread_id", "")
+                    if _cid:
+                        clean_env["AGENT_CHAT_ID"] = str(_cid)
+                    if _tid:
+                        clean_env["AGENT_THREAD_ID"] = str(_tid)
 
             # Provider routing: GLM models go through z.AI's Anthropic-compatible gateway.
             # Claude CLI validates model names client-side, so GLM names ("glm-5.1" etc.)

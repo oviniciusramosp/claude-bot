@@ -546,14 +546,15 @@ Append to today's journal with the applied changes.
 
 ## Telegram notifications from pipeline steps
 
-To send additional Telegram messages from a step (beyond the harness's `output: telegram`), use:
+To send additional Telegram messages from a step (beyond the harness's `output: telegram`), use the `TELEGRAM_NOTIFY` env var (injected by the bot harness — no hardcoded paths):
 
-```bash
-python3 scripts/telegram_notify.py "message text"
-python3 scripts/telegram_notify.py "message" --parse-mode Markdown --silent
+```python
+import subprocess, os
+subprocess.run(["python3", os.environ["TELEGRAM_NOTIFY"], "--text", text], check=True)
+subprocess.run(["python3", os.environ["TELEGRAM_NOTIFY"], "--parse-mode", "Markdown", "--silent", "--text", text], check=True)
 ```
 
-The script auto-detects the owning agent from the `AGENT_ID` env var (injected by the bot harness) and reads routing from agent frontmatter. No `--agent` flag needed.
+Routing is fully automatic: `AGENT_ID`, `AGENT_CHAT_ID`, and `AGENT_THREAD_ID` are all injected by the harness. No `--agent` flag, no frontmatter parsing, no hardcoded IDs needed.
 
 ---
 
