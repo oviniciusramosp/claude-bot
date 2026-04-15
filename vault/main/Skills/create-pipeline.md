@@ -166,6 +166,7 @@ Design rules:
 - **For parallel collectors:** each collector that finds nothing returns `NO_REPLY`. The aggregator (depends_on all collectors) is skipped only when *every* collector returned `NO_REPLY`. If one has data, the aggregator runs with whatever was collected.
 - **The step itself completes normally** (status: `completed`); only its dependents are skipped. The pipeline ends silently with no Telegram notification.
 - **In the step prompt**, add an explicit conditional at the end: *"If [condition meaning nothing to process], respond with exactly `NO_REPLY` and stop."* Do not write a data file in that case.
+- **Optional: gate step notification.** If the pipeline owner wants a Telegram notification explaining WHY the pipeline exited early, the gate step itself can send a custom message via `telegram_notify.py --silent` BEFORE returning `NO_REPLY`. The pipeline still counts as a successful silent finish (status=completed, green in macOS app). Example: `subprocess.run(["python3", os.environ["TELEGRAM_NOTIFY"], "--silent", "--text", "Check 14h — Nada para publicar."])`. This is per-pipeline by nature — only the steps that include the notify call will send it.
 
 Example — serial gate:
 ```

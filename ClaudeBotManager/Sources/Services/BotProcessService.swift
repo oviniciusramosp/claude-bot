@@ -2,6 +2,7 @@ import Foundation
 
 actor BotProcessService {
     private let plistLabel = "com.claudebot.bot"
+    private let webPlistLabel = "com.claudebot.web"
     private let claudePath: String
 
     init(claudePath: String = "/opt/homebrew/bin/claude") {
@@ -37,13 +38,13 @@ actor BotProcessService {
     }
 
     func start() {
-        let plistPath = plistPath()
-        _ = shell("launchctl", "load", plistPath)
+        _ = shell("launchctl", "load", plistPath(for: plistLabel))
+        _ = shell("launchctl", "load", plistPath(for: webPlistLabel))
     }
 
     func stop() {
-        let plistPath = plistPath()
-        _ = shell("launchctl", "unload", plistPath)
+        _ = shell("launchctl", "unload", plistPath(for: plistLabel))
+        _ = shell("launchctl", "unload", plistPath(for: webPlistLabel))
     }
 
     func restart() {
@@ -66,9 +67,9 @@ actor BotProcessService {
 
     // MARK: - Private
 
-    private func plistPath() -> String {
+    private func plistPath(for label: String) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/Library/LaunchAgents/\(plistLabel).plist"
+        return "\(home)/Library/LaunchAgents/\(label).plist"
     }
 
     private struct ShellResult {

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.24.0"  # feat: execution reports — pipeline/routine results written to agent journal for session context
+BOT_VERSION = "3.24.2"  # fix: savings summary fires even with notify=none, counts cascade skips correctly
 
 import hmac
 import hashlib
@@ -4407,9 +4407,12 @@ class PipelineExecutor:
         all_soft = not any_failed and all(
             s in ("completed", "skipped") for s in self._step_status.values()
         )
-        # Check if ALL skips are NO_REPLY-based (soft) rather than failure-based (hard)
+        # A skip is "hard" only when it originates from a genuinely FAILED
+        # upstream step.  Cascade-skips from a NO_REPLY gate (reason starts
+        # with "upstream returned NO_REPLY" or "upstream skipped (NO_REPLY
+        # cascade)") are soft — the pipeline intentionally exited early.
         has_hard_skip = any(
-            s == "skipped" and not self._skip_reasons.get(sid, "").startswith("upstream returned NO_REPLY")
+            s == "skipped" and self._skip_reasons.get(sid, "").startswith("upstream failed")
             for sid, s in self._step_status.items()
         )
         soft_success = all_soft and not has_hard_skip and not all_completed
@@ -4600,15 +4603,28 @@ class PipelineExecutor:
                     )
                     reason: Optional[str] = None
                     if any_dep_non_completed:
-                        failed_or_skipped = [
+                        failed_deps = [
                             d for d in deps
-                            if self._step_status.get(d) in ("failed", "skipped")
+                            if self._step_status.get(d) == "failed"
                         ]
-                        reason = (
-                            f"upstream skipped/failed: {', '.join(failed_or_skipped)}"
-                            if failed_or_skipped
-                            else "upstream skipped/failed"
-                        )
+                        skipped_deps = [
+                            d for d in deps
+                            if self._step_status.get(d) == "skipped"
+                        ]
+                        if failed_deps:
+                            # Hard cascade — an upstream step genuinely failed.
+                            reason = f"upstream failed: {', '.join(failed_deps)}"
+                        elif skipped_deps:
+                            # Soft cascade — upstream was skipped (itself from
+                            # NO_REPLY or from a prior soft cascade).  The
+                            # root cause is still "nothing to process", not a
+                            # real error.
+                            reason = (
+                                f"upstream skipped (NO_REPLY cascade): "
+                                f"{', '.join(skipped_deps)}"
+                            )
+                        else:
+                            reason = "upstream skipped/failed"
                     elif all_deps_no_reply and step.skip_on_no_reply:
                         reason = (
                             f"upstream returned NO_REPLY: {', '.join(deps)}"
@@ -5146,16 +5162,16 @@ class PipelineExecutor:
         via the NO_REPLY early-exit and which models that saved, or None when
         nothing was skipped for token-saving reasons.
 
-        Only counts steps whose skip reason starts with 'upstream returned
-        NO_REPLY' — the token-savings case.  Steps skipped because of upstream
-        failures don't count as savings (they're forced skips).
+        Counts both direct NO_REPLY skips AND cascade skips that originate
+        from a NO_REPLY gate (not from a genuine failure).
         """
         saved_steps: List[PipelineStep] = []
         for step in self.task.steps:
             if self._step_status.get(step.id) != "skipped":
                 continue
             reason = self._skip_reasons.get(step.id, "")
-            if reason.startswith("upstream returned NO_REPLY"):
+            if (reason.startswith("upstream returned NO_REPLY")
+                    or reason.startswith("upstream skipped (NO_REPLY cascade)")):
                 saved_steps.append(step)
         if not saved_steps:
             return None
@@ -5503,6 +5519,12 @@ class PipelineExecutor:
 
     def _notify_success(self, elapsed: int) -> None:
         """Send final success notification based on notify mode."""
+        # Savings summary — always emitted for soft-success regardless of the
+        # notify setting.  This is operational visibility ("how many tokens did
+        # the early-exit save?"), not pipeline output.  Noop when there were no
+        # NO_REPLY-based skips.
+        self._maybe_send_savings_summary(elapsed)
+
         if self.task.notify == "none":
             return
 
@@ -5522,9 +5544,7 @@ class PipelineExecutor:
         # NO_REPLY from the output step means nothing worth reporting — silent success
         if _is_no_reply_output(output_text):
             logger.info("Pipeline %s: output step returned NO_REPLY — skipping notification", self.task.title)
-            # Still emit the savings summary (silent, no notification sound)
-            self._maybe_send_savings_summary(elapsed)
-            return
+            return  # savings summary already sent above
 
         sent_text = None
         if self.task.notify == "summary" or not output_text:
@@ -5551,9 +5571,7 @@ class PipelineExecutor:
             except Exception as exc:
                 logger.warning("Pipeline TTS failed: %s", exc)
 
-        # Savings summary — only sent if at least one step was auto-skipped
-        # via the NO_REPLY cascade (token savings case).  Noop otherwise.
-        self._maybe_send_savings_summary(elapsed)
+        # (savings summary already sent at the top of this method)
 
         # Activity log
         _log_activity({

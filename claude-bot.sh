@@ -18,6 +18,7 @@ set -euo pipefail
 
 LABEL="com.claudebot.bot"
 LABEL_MENUBAR="com.claudebot.menubar"
+LABEL_WEB="com.claudebot.web"
 # Legacy labels (used to detect and migrate old installations)
 LEGACY_LABEL="com.vr.claude-bot"
 LEGACY_LABEL_MENUBAR="com.vr.claude-bot-menubar"
@@ -26,11 +27,16 @@ PLIST_SRC="${SCRIPT_DIR}/com.claudebot.bot.plist"
 PLIST_DST="${HOME}/Library/LaunchAgents/${LABEL}.plist"
 PLIST_MENUBAR_SRC="${SCRIPT_DIR}/com.claudebot.menubar.plist"
 PLIST_MENUBAR_DST="${HOME}/Library/LaunchAgents/${LABEL_MENUBAR}.plist"
+PLIST_WEB_SRC="${SCRIPT_DIR}/com.claudebot.web.plist"
+PLIST_WEB_DST="${HOME}/Library/LaunchAgents/${LABEL_WEB}.plist"
 BOT_SCRIPT="${SCRIPT_DIR}/claude-fallback-bot.py"
+WEB_SCRIPT="${SCRIPT_DIR}/claude-bot-web.py"
 LOG_DIR="${HOME}/.claude-bot"
 LOG_FILE="${LOG_DIR}/bot.log"
 STDOUT_LOG="${LOG_DIR}/launchd-stdout.log"
 STDERR_LOG="${LOG_DIR}/launchd-stderr.log"
+WEB_STDOUT_LOG="${LOG_DIR}/web-stdout.log"
+WEB_STDERR_LOG="${LOG_DIR}/web-stderr.log"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -47,6 +53,42 @@ mkdir -p "${LOG_DIR}/bin"
 
 is_loaded() {
     launchctl list 2>/dev/null | grep -q "$LABEL"
+}
+
+is_web_loaded() {
+    launchctl list "$LABEL_WEB" 2>/dev/null | grep -q "PID"
+}
+
+_install_web() {
+    if [[ ! -f "$PLIST_WEB_SRC" ]]; then
+        echo -e "  web dashboard: ${YELLOW}plist not found at ${PLIST_WEB_SRC} — skipping${NC}"
+        return
+    fi
+    if [[ ! -f "$WEB_SCRIPT" ]]; then
+        echo -e "  web dashboard: ${YELLOW}script not found at ${WEB_SCRIPT} — skipping${NC}"
+        return
+    fi
+    if is_web_loaded; then
+        launchctl unload "$PLIST_WEB_DST" 2>/dev/null || true
+    fi
+    sed -e "s|__HOME__|${HOME}|g" -e "s|__SCRIPT_DIR__|${SCRIPT_DIR}|g" "$PLIST_WEB_SRC" > "$PLIST_WEB_DST"
+    launchctl load "$PLIST_WEB_DST"
+    if is_web_loaded; then
+        echo -e "  web dashboard: ${GREEN}started${NC} (http://localhost:27184)"
+    else
+        echo -e "  web dashboard: ${RED}failed to start — check ${WEB_STDERR_LOG}${NC}"
+    fi
+}
+
+_stop_web() {
+    if is_web_loaded; then
+        launchctl unload "$PLIST_WEB_DST" 2>/dev/null || true
+    fi
+}
+
+_uninstall_web() {
+    _stop_web
+    rm -f "$PLIST_WEB_DST"
 }
 
 get_pid() {
@@ -245,27 +287,33 @@ case "${1:-help}" in
         sleep 1
 
         if is_loaded; then
-            echo -e "${GREEN}Service installed and running.${NC}"
-            echo ""
-            echo "The bot will:"
-            echo "  - Start automatically on login"
-            echo "  - Restart automatically if it crashes"
-            echo "  - Log to ${LOG_DIR}/"
-            echo ""
-            echo "Use './claude-bot.sh status' to check."
+            echo -e "${GREEN}Bot service installed and running.${NC}"
         else
-            echo -e "${RED}Service loaded but may not be running. Check logs:${NC}"
+            echo -e "${RED}Bot service loaded but may not be running. Check logs:${NC}"
             echo "  tail -f ${STDERR_LOG}"
         fi
+
+        # Install web dashboard
+        echo "Installing web dashboard..."
+        _install_web
+
+        echo ""
+        echo "Both services will:"
+        echo "  - Start automatically on login"
+        echo "  - Restart automatically if they crash"
+        echo "  - Log to ${LOG_DIR}/"
+        echo ""
+        echo "Use './claude-bot.sh status' to check."
         ;;
 
     uninstall)
-        echo -e "${CYAN}Uninstalling Claude Bot service...${NC}"
+        echo -e "${CYAN}Uninstalling Claude Bot services...${NC}"
         if is_loaded; then
             launchctl unload "$PLIST_DST" 2>/dev/null || true
         fi
         rm -f "$PLIST_DST"
-        echo -e "${GREEN}Service uninstalled.${NC}"
+        _uninstall_web
+        echo -e "${GREEN}All services uninstalled.${NC}"
         ;;
 
     start)
@@ -288,6 +336,9 @@ case "${1:-help}" in
         else
             echo -e "${RED}Failed to start. Check: tail -f ${STDERR_LOG}${NC}"
         fi
+
+        # Also start web dashboard
+        _install_web
         ;;
 
     stop)
@@ -297,6 +348,8 @@ case "${1:-help}" in
         else
             echo -e "${YELLOW}Bot is not running.${NC}"
         fi
+        _stop_web
+        echo -e "${GREEN}Web dashboard stopped.${NC}"
         ;;
 
     restart)
@@ -315,31 +368,33 @@ case "${1:-help}" in
         else
             echo -e "${RED}Failed to restart. Check: tail -f ${STDERR_LOG}${NC}"
         fi
+
+        # Also restart web dashboard
+        _stop_web
+        sleep 1
+        _install_web
         ;;
 
     status)
         echo -e "${CYAN}Claude Bot Status${NC}"
         echo "────────────────────────────"
 
+        # Bot
         if is_loaded; then
-            echo -e "Service:  ${GREEN}LOADED${NC}"
+            echo -e "Bot service:  ${GREEN}LOADED${NC}"
         else
-            echo -e "Service:  ${RED}NOT LOADED${NC}"
+            echo -e "Bot service:  ${RED}NOT LOADED${NC}"
         fi
 
         PID=$(pgrep -f "claude-fallback-bot.py" 2>/dev/null | head -1 || true)
         if [[ -n "$PID" ]]; then
-            echo -e "Process:  ${GREEN}RUNNING${NC} (PID: ${PID})"
-
-            # Memory usage
+            echo -e "Bot process:  ${GREEN}RUNNING${NC} (PID: ${PID})"
             MEM=$(ps -o rss= -p "$PID" 2>/dev/null | awk '{printf "%.1f", $1/1024}' || echo "?")
-            echo "Memory:   ${MEM} MB"
-
-            # Uptime
+            echo "Memory:       ${MEM} MB"
             ELAPSED=$(ps -o etime= -p "$PID" 2>/dev/null | xargs || echo "?")
-            echo "Uptime:   ${ELAPSED}"
+            echo "Uptime:       ${ELAPSED}"
         else
-            echo -e "Process:  ${RED}NOT RUNNING${NC}"
+            echo -e "Bot process:  ${RED}NOT RUNNING${NC}"
         fi
 
         # Session info
@@ -354,8 +409,25 @@ print(f\"Sessions: {len(d.get('sessions', {}))}  |  Active: {d.get('active_sessi
             echo "$SESSIONS"
         fi
 
+        echo ""
+
+        # Web dashboard
+        if is_web_loaded; then
+            echo -e "Web service:  ${GREEN}LOADED${NC}"
+        else
+            echo -e "Web service:  ${RED}NOT LOADED${NC}"
+        fi
+
+        WEB_PID=$(pgrep -f "claude-bot-web.py" 2>/dev/null | head -1 || true)
+        if [[ -n "$WEB_PID" ]]; then
+            echo -e "Web process:  ${GREEN}RUNNING${NC} (PID: ${WEB_PID}) — http://localhost:27184"
+        else
+            echo -e "Web process:  ${RED}NOT RUNNING${NC}"
+        fi
+
         echo "────────────────────────────"
         echo "Logs: ${LOG_FILE}"
+        echo "Web:  ${WEB_STDOUT_LOG}"
         echo ""
 
         # Last few log lines
@@ -425,13 +497,13 @@ print(f\"Sessions: {len(d.get('sessions', {}))}  |  Active: {d.get('active_sessi
         echo "Usage: $(basename "$0") <command>"
         echo ""
         echo "Commands:"
-        echo "  install          Install bot as launchd service (auto-start on login)"
+        echo "  install          Install bot + web dashboard as launchd services (auto-start on login)"
         echo "  install-deps     Install/check voice transcription dependencies"
-        echo "  uninstall        Remove bot launchd service"
-        echo "  start            Start the bot"
-        echo "  stop             Stop the bot"
-        echo "  restart          Restart the bot"
-        echo "  status           Check status (process, memory, sessions)"
+        echo "  uninstall        Remove all launchd services"
+        echo "  start            Start bot + web dashboard"
+        echo "  stop             Stop bot + web dashboard"
+        echo "  restart          Restart bot + web dashboard"
+        echo "  status           Check status (process, memory, sessions, web)"
         echo "  logs             Tail all logs"
         echo "  errors           Tail error logs"
         echo "  pid              Show process ID"
