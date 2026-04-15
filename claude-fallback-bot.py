@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.24.2"  # fix: savings summary fires even with notify=none, counts cascade skips correctly
+BOT_VERSION = "3.26.0"  # feat: instant reasoning toggle + inline Stop button during streaming
 
 import hmac
 import hashlib
@@ -9207,7 +9207,8 @@ class ClaudeTelegramBot:
         if not _retry and not routine_mode:
             if ctx:
                 reasoning_markup = {"inline_keyboard": [[
-                    {"text": "🧠 Reasoning", "callback_data": "reasoning:toggle"}
+                    {"text": "🧠 Reasoning", "callback_data": "reasoning:toggle"},
+                    {"text": "🛑 Stop", "callback_data": "reasoning:stop"},
                 ]]}
                 ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
                                                        reply_to_message_id=ctx.user_msg_id,
@@ -9374,7 +9375,8 @@ class ClaudeTelegramBot:
         is_on = self._reasoning_toggles.get(stream_msg_id, False)
         label = "🧠 Reasoning ✓" if is_on else "🧠 Reasoning"
         return {"inline_keyboard": [[
-            {"text": label, "callback_data": "reasoning:toggle"}
+            {"text": label, "callback_data": "reasoning:toggle"},
+            {"text": "🛑 Stop", "callback_data": "reasoning:stop"},
         ]]}
 
     def _build_stream_display(self, snapshot: str, runner: "ClaudeRunner",
@@ -9986,7 +9988,7 @@ class ClaudeTelegramBot:
                 self.answer_callback(cb_id)
             return
 
-        # Reasoning toggle: flip visibility without removing keyboard
+        # Reasoning toggle: flip visibility and immediately rebuild display
         if data == "reasoning:toggle":
             msg = callback.get("message", {})
             msg_id = msg.get("message_id")
@@ -9994,22 +9996,41 @@ class ClaudeTelegramBot:
                 new_state = not self._reasoning_toggles[msg_id]
                 self._reasoning_toggles[msg_id] = new_state
                 self.answer_callback(cb_id, "🧠 ON" if new_state else "🧠 OFF")
-                # Re-render button immediately with updated label
-                new_label = "🧠 Reasoning ✓" if new_state else "🧠 Reasoning"
-                new_markup = {"inline_keyboard": [[
-                    {"text": new_label, "callback_data": "reasoning:toggle"}
-                ]]}
-                msg_text = msg.get("text", "")
-                if msg_id and msg_text:
-                    self.tg_request("editMessageText", {
-                        "chat_id": self._chat_id,
-                        "message_id": msg_id,
-                        "text": self._sanitize_markdown_v2(msg_text),
-                        "parse_mode": "MarkdownV2",
-                        "reply_markup": new_markup,
-                    })
+                markup = self._reasoning_button_markup(msg_id)
+                runner = self.runner
+                if runner and runner.running:
+                    # Rebuild display immediately with/without reasoning
+                    snapshot = runner.get_snapshot()
+                    elapsed = int(time.time() - runner.start_time)
+                    display = self._build_stream_display(
+                        snapshot, runner, msg_id, elapsed, new_state)
+                    self.edit_message(msg_id, display, reply_markup=markup)
+                    # Sync tracking so stream loop doesn't fight
+                    ctx = self._ctx
+                    if ctx:
+                        ctx.last_edit_time = time.time()
+                        ctx.last_snapshot_len = len(snapshot)
+                        ctx._last_thinking_len = (
+                            len(runner.accumulated_thinking) if new_state else 0)
+                else:
+                    # Runner finished — just update the button label
+                    msg_text = msg.get("text", "")
+                    if msg_text:
+                        self.edit_message(msg_id, msg_text, reply_markup=markup)
             else:
                 self.answer_callback(cb_id, "Expirado")
+            return
+
+        # Stop button during streaming: cancel the running task
+        if data == "reasoning:stop":
+            msg = callback.get("message", {})
+            msg_id = msg.get("message_id")
+            runner = self.runner
+            if runner and runner.running:
+                runner.cancel()
+                self.answer_callback(cb_id, "🛑 Cancelado")
+            else:
+                self.answer_callback(cb_id, "Nenhum processo")
             return
 
         self._remove_keyboard(callback)
