@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.23.3"  # feat: skip_on_no_reply UI toggle in RoutineFormSheet + oss-radar schedule/flow fixes
+BOT_VERSION = "3.24.0"  # feat: execution reports — pipeline/routine results written to agent journal for session context
 
 import hmac
 import hashlib
@@ -1450,6 +1450,41 @@ class RoutineStateManager:
 
         return pipelines, routines
 
+    def _heal_resume_target(
+        self, name: str, slot: str, day_str: str, status: str, error: str,
+    ) -> None:
+        """Mark a pipeline as finished when the resume path discovers it's
+        unresumable — source file gone, parse failed, step structure drifted.
+
+        This is the emergency brake that stops the 'every restart re-notifies
+        the same fake failure' loop.  Idempotent, lock-protected, silent if
+        the file is already healed or missing.
+        """
+        sf = ROUTINES_STATE_DIR / f"{day_str}.json"
+        if not sf.exists():
+            return
+        with self._lock:
+            try:
+                data = json.loads(sf.read_text(encoding="utf-8"))
+            except Exception:
+                return
+            entry = data.get(name, {}).get(slot)
+            if not isinstance(entry, dict):
+                return
+            if entry.get("status") not in (None, "running"):
+                return  # already healed or changed
+            entry["status"] = status
+            entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            entry["error"] = error
+            data.setdefault(name, {})[slot] = entry
+            sf.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        logger.warning(
+            "Healed resume target %s@%s (%s): status=%s reason=%s",
+            name, slot, day_str, status, error,
+        )
+
     def _heal_terminated_pipeline(self, name: str, slot: str, day_str: str) -> None:
         """Fix persistent state drift: pipeline-level status='running' with all
         steps in terminal states.
@@ -1911,9 +1946,16 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             prompt_text = str(s.get("prompt", ""))
         is_manual = bool(s.get("manual", False))
         if not prompt_text and not is_manual:
-            logger.error("Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt)",
-                         routine_name, step_id)
-            continue
+            logger.error(
+                "Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt) — "
+                "aborting parse. Fix the vault file before re-running.",
+                routine_name, step_id,
+            )
+            # Hard-fail the entire pipeline parse so the caller surfaces a
+            # clean error instead of silently running a truncated task (the
+            # dropped step causes restart-recovery to infinite-loop with
+            # false-positive failure notifications — see v3.23.2 fix).
+            return None
 
         depends = s.get("depends_on", [])
         if isinstance(depends, str):
@@ -2797,6 +2839,115 @@ def _vault_index_upsert(
             conn.close()
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# Execution reports — pipeline/routine results written to agent journal
+# ---------------------------------------------------------------------------
+
+# Module-level dict consumed by the journal nudge (line ~8923) to produce
+# specific hints like 'a pipeline "oss-radar" falhou no step "analyze"'
+# instead of the generic "o journal foi atualizado".  Thread-safe enough
+# under CPython GIL (single-key dict writes are atomic).
+_journal_update_hints: Dict[str, str] = {}
+
+
+def _append_execution_report(
+    *,
+    agent: str,
+    kind: str,
+    name: str,
+    status: str,
+    elapsed: int,
+    steps: Optional[List[Tuple[str, str]]] = None,
+    error: Optional[str] = None,
+    failed_step: Optional[str] = None,
+    data_dir: Optional[str] = None,
+) -> Optional[Path]:
+    """Append a structured execution report to the agent's daily journal.
+
+    Called after every pipeline/routine completion (success AND failure) so
+    that interactive sessions automatically see what happened via frozen
+    context, journal nudge, and FTS/Active Memory.
+
+    Fail-open: errors are logged, never block execution or notifications.
+    """
+    try:
+        agent_id = agent or MAIN_AGENT_ID
+        journal_d = get_agent_journal_dir(agent_id, create=True)
+        today = time.strftime("%Y-%m-%d")
+        path = journal_d / f"{today}.md"
+        now = time.strftime("%H:%M")
+        m, s = divmod(elapsed, 60)
+
+        kind_label = "Pipeline" if kind == "pipeline" else "Routine"
+        lines = [f"\n---\n\n## {kind_label} Report — {name} ({now})"]
+
+        # Status line
+        if kind == "pipeline" and steps:
+            total = len(steps)
+            if status == "completed":
+                lines.append(f"**Status:** completed ({total}/{total})")
+            elif failed_step:
+                idx = next((i + 1 for i, (sn, _) in enumerate(steps) if sn == failed_step), "?")
+                lines.append(f"**Status:** {status} at step {idx}/{total} ({failed_step})")
+            else:
+                lines.append(f"**Status:** {status}")
+        else:
+            lines.append(f"**Status:** {status}")
+
+        lines.append(f"**Duration:** {m}m {s:02d}s")
+
+        # Step details for pipelines
+        if kind == "pipeline" and steps:
+            icons = {"completed": "✅", "failed": "❌", "skipped": "⏭",
+                     "running": "🔄", "pending": "⏰"}
+            step_parts = [f"{icons.get(st, '⏰')} {sn}" for sn, st in steps]
+            lines.append(f"**Steps:** {' → '.join(step_parts)}")
+
+        if error:
+            lines.append(f"**Error:** {error[:150]}")
+
+        if data_dir:
+            lines.append(f"**Outputs:** `{data_dir}`")
+
+        entry = "\n".join(lines) + "\n"
+
+        # Create journal file with frontmatter if it doesn't exist
+        if not path.exists():
+            fm_header = f"---\ndate: {today}\ntype: journal\nagent: {agent_id}\n---\n"
+            path.write_text(fm_header + entry, encoding="utf-8")
+        else:
+            with path.open("a", encoding="utf-8") as f:
+                f.write(entry)
+
+        # FTS write-through so Active Memory picks it up immediately
+        try:
+            rel = path.relative_to(VAULT_DIR).as_posix()
+            _vault_index_upsert(agent_id, rel, journal_section=(now, "\n".join(lines)))
+        except Exception as fts_exc:
+            logger.debug("Execution report FTS write-through failed: %s", fts_exc)
+
+        # Populate hint for the enhanced journal nudge
+        if status == "completed":
+            _journal_update_hints[agent_id] = (
+                f'{kind} "{name}" completou ({m}m{s:02d}s)'
+            )
+        elif failed_step:
+            _journal_update_hints[agent_id] = (
+                f'{kind} "{name}" falhou no step "{failed_step}"'
+            )
+        else:
+            _journal_update_hints[agent_id] = (
+                f'{kind} "{name}" {status}'
+            )
+
+        logger.info("Execution report appended to %s for %s %s (%s)", path, kind, name, status)
+        return path
+
+    except Exception as exc:
+        logger.warning("_append_execution_report failed for %s/%s (non-fatal): %s", agent, name, exc)
+        return None
 
 
 def _vault_index_bootstrap_agent(agent_id: str) -> None:
@@ -4236,19 +4387,49 @@ class PipelineExecutor:
                 vault_checkpoint_restore(checkpoint_ref)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=str(exc)[:200])
             self._finalize_progress(success=False, error=str(exc), elapsed=int(time.time() - start_time))
+            _append_execution_report(
+                agent=self.task.agent, kind="pipeline", name=self.task.name,
+                status="failed", elapsed=int(time.time() - start_time),
+                steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
+                error=str(exc)[:150],
+                data_dir=f"workspace/data/{self.task.name}/",
+            )
             return False
 
         # Determine final status
         all_completed = all(s == "completed" for s in self._step_status.values())
         elapsed = int(time.time() - start_time)
 
-        if all_completed:
+        # Soft success: all steps either completed or were soft-skipped due to
+        # upstream NO_REPLY (token-saving early-exit).  Only hard failures
+        # (failed steps or skips caused by upstream failures) are real errors.
+        any_failed = any(s == "failed" for s in self._step_status.values())
+        all_soft = not any_failed and all(
+            s in ("completed", "skipped") for s in self._step_status.values()
+        )
+        # Check if ALL skips are NO_REPLY-based (soft) rather than failure-based (hard)
+        has_hard_skip = any(
+            s == "skipped" and not self._skip_reasons.get(sid, "").startswith("upstream returned NO_REPLY")
+            for sid, s in self._step_status.items()
+        )
+        soft_success = all_soft and not has_hard_skip and not all_completed
+
+        if all_completed or soft_success:
             if checkpoint_ref:
                 vault_checkpoint_drop(checkpoint_ref)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "completed")
             self._finalize_progress(success=True, elapsed=elapsed)
             self._notify_success(elapsed)
-            logger.info("Pipeline %s completed in %ds", self.task.name, elapsed)
+            _append_execution_report(
+                agent=self.task.agent, kind="pipeline", name=self.task.name,
+                status="completed", elapsed=elapsed,
+                steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
+                data_dir=f"workspace/data/{self.task.name}/",
+            )
+            if soft_success:
+                logger.info("Pipeline %s soft-completed (NO_REPLY cascade) in %ds", self.task.name, elapsed)
+            else:
+                logger.info("Pipeline %s completed in %ds", self.task.name, elapsed)
         else:
             failed_steps = [sid for sid, st in self._step_status.items() if st == "failed"]
             skipped_steps = [sid for sid, st in self._step_status.items() if st == "skipped"]
@@ -4265,6 +4446,17 @@ class PipelineExecutor:
                 vault_checkpoint_drop(checkpoint_ref)
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, status, error=err)
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
+            failed_step_name = None
+            if failed_steps:
+                by_id = {s.id: s for s in self.task.steps}
+                failed_step_name = by_id[failed_steps[0]].name if failed_steps[0] in by_id else None
+            _append_execution_report(
+                agent=self.task.agent, kind="pipeline", name=self.task.name,
+                status=status, elapsed=elapsed,
+                steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
+                error=err[:150], failed_step=failed_step_name,
+                data_dir=f"workspace/data/{self.task.name}/",
+            )
             logger.warning("Pipeline %s %s: %s", self.task.name, status, err)
 
         # Workspace kept for 24h (cleaned by _cleanup_stale_pipeline_workspaces on next startup)
@@ -5851,22 +6043,66 @@ class ClaudeTelegramBot:
     def _resume_pipeline(self, pinfo: Dict) -> None:
         """Re-parse a pipeline source file and resume from last checkpoint."""
         name = pinfo["name"]
+        slot = pinfo["time_slot"]
+        day_str = pinfo.get("day", time.strftime("%Y-%m-%d"))
+        persisted_steps = pinfo.get("steps") or {}
+
         md_file = _find_routine_file(name, pinfo.get("source_file"))
         if not md_file:
-            raise FileNotFoundError(f"Source file not found for pipeline {name}")
+            # Source file has been moved/deleted. Don't re-enqueue — that would
+            # just make the recovery loop re-trigger on every restart. Heal
+            # the state to 'failed' and walk away.
+            self.routine_state._heal_resume_target(
+                name, slot, day_str, "failed",
+                "Source file not found on resume — pipeline cannot be re-parsed",
+            )
+            return
 
         fm, body = get_frontmatter_and_body(md_file)
         if not fm or not body:
-            raise ValueError(f"Cannot parse frontmatter/body from {md_file}")
+            self.routine_state._heal_resume_target(
+                name, slot, day_str, "failed",
+                f"Cannot parse frontmatter/body from {md_file} on resume",
+            )
+            return
 
         model = str(fm.get("model", "sonnet"))
-        task = _parse_pipeline_task(md_file, fm, body, name, model, pinfo["time_slot"])
+        task = _parse_pipeline_task(md_file, fm, body, name, model, slot)
         if task is None:
-            raise ValueError(f"Failed to parse pipeline task from {md_file}")
+            # _parse_pipeline_task already logged the exact reason (missing
+            # prompt_file, cycle, etc.). Heal instead of raising so the
+            # recovery loop doesn't re-trigger this every restart.
+            self.routine_state._heal_resume_target(
+                name, slot, day_str, "failed",
+                f"Pipeline failed to parse on resume — check bot.log for details",
+            )
+            return
+
+        # Detect structural mismatch — persisted state has step ids that no
+        # longer exist in the parsed task. Common causes: a step's prompt_file
+        # went missing/empty (silently dropped pre-v3.23.2), or the user
+        # renamed/removed a step after the failed run. Either way, resuming
+        # would just emit a fake 0m00s failure because the DAG loop exits
+        # immediately on a truncated task whose remaining steps are all
+        # terminal. Heal and walk away.
+        parsed_step_ids = {s.id for s in task.steps}
+        persisted_step_ids = set(persisted_steps.keys())
+        missing_from_parse = persisted_step_ids - parsed_step_ids
+        if missing_from_parse:
+            logger.warning(
+                "Pipeline %s@%s (%s): structural mismatch on resume — persisted has %d "
+                "steps, parsed has %d. Missing from parse: %s",
+                name, slot, day_str, len(persisted_step_ids), len(parsed_step_ids),
+                sorted(missing_from_parse),
+            )
+            self.routine_state._heal_resume_target(
+                name, slot, day_str, "failed",
+                f"Pipeline structure changed on resume — missing steps: {', '.join(sorted(missing_from_parse))}",
+            )
+            return
 
         # Build resume_state by cross-referencing persisted step states with
         # output files on disk.
-        persisted_steps = pinfo.get("steps", {})
         step_status: Dict[str, str] = {}
         step_outputs: Dict[str, str] = {}
         step_attempts: Dict[str, int] = {}
@@ -8826,10 +9062,19 @@ class ClaudeTelegramBot:
                 recorded_mtime = self._journal_mtimes.get(session.name, 0.0)
                 if current_mtime > recorded_mtime + 1:  # >1s tolerance for fs precision
                     self._journal_mtimes[session.name] = current_mtime
-                    prompt = (
-                        f"[Nota: o journal de hoje foi atualizado desde o início desta sessão. "
-                        f"Se precisar de contexto recente, consulte {journal_path}]\n\n{prompt}"
-                    )
+                    # Use specific hint from execution reports when available
+                    agent_id = session.agent or MAIN_AGENT_ID
+                    exec_hint = _journal_update_hints.pop(agent_id, None)
+                    if exec_hint:
+                        prompt = (
+                            f"[Nota: {exec_hint}. "
+                            f"Detalhes no journal de hoje.]\n\n{prompt}"
+                        )
+                    else:
+                        prompt = (
+                            f"[Nota: o journal de hoje foi atualizado desde o início desta sessão. "
+                            f"Se precisar de contexto recente, consulte {journal_path}]\n\n{prompt}"
+                        )
             except OSError:
                 pass
 
@@ -9432,6 +9677,7 @@ class ClaudeTelegramBot:
         saved_effort = self.effort
         if task.effort:
             self.effort = task.effort
+        routine_start_time = time.time()
         try:
             self._run_claude_prompt(prompt, no_output_timeout=300, max_total_timeout=3600,
                                     inactivity_timeout=300,
@@ -9463,6 +9709,11 @@ class ClaudeTelegramBot:
                 self.routine_state.set_status(task.name, task.time_slot, "failed", effective_error[:200])
                 if progress_msg_id:
                     self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {effective_error[:200]}")
+                _append_execution_report(
+                    agent=task.agent, kind="routine", name=task.name,
+                    status="failed", elapsed=int(time.time() - routine_start_time),
+                    error=effective_error[:150],
+                )
                 # Compound engineering: draft a lesson from this failure
                 lesson_path = record_lesson_draft(
                     task.name, effective_error, kind="routine",
@@ -9485,6 +9736,10 @@ class ClaudeTelegramBot:
                 if checkpoint_ref:
                     vault_checkpoint_drop(checkpoint_ref)
                 self.routine_state.set_status(task.name, task.time_slot, "completed")
+                _append_execution_report(
+                    agent=task.agent, kind="routine", name=task.name,
+                    status="completed", elapsed=int(time.time() - routine_start_time),
+                )
                 # Success: delete progress message (output was already sent by _finalize_response)
                 if progress_msg_id:
                     self.delete_message(progress_msg_id)
@@ -9493,6 +9748,11 @@ class ClaudeTelegramBot:
             if checkpoint_ref:
                 vault_checkpoint_restore(checkpoint_ref)
             self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
+            _append_execution_report(
+                agent=task.agent, kind="routine", name=task.name,
+                status="failed", elapsed=int(time.time() - routine_start_time),
+                error=str(exc)[:150],
+            )
             if progress_msg_id:
                 self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
             else:
