@@ -494,9 +494,21 @@ struct TodayRoutinesCard: View {
             .filter { $0.timeSlot != "dry-run" }
     }
 
+    private var todayWeekdayAbbr: String {
+        let cal = Calendar.current
+        switch cal.component(.weekday, from: Date()) {
+        case 1: return "sun"; case 2: return "mon"; case 3: return "tue"
+        case 4: return "wed"; case 5: return "thu"; case 6: return "fri"
+        case 7: return "sat"; default: return ""
+        }
+    }
+
     private var timeline: [(routine: Routine, time: String, execution: RoutineExecution?)] {
         var entries: [(routine: Routine, time: String, execution: RoutineExecution?)] = []
+        let todayAbbr = todayWeekdayAbbr
         for routine in appState.routines where routine.enabled {
+            let allDays = routine.schedule.days.contains("*") || routine.schedule.days.isEmpty
+            guard allDays || routine.schedule.days.contains(todayAbbr) else { continue }
             for time in routine.schedule.times {
                 let exec = routine.todayExecutions.first { $0.timeSlot == time }
                 entries.append((routine: routine, time: time, execution: exec))
