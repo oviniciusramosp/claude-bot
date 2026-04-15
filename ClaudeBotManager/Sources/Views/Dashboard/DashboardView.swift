@@ -541,6 +541,11 @@ struct TodayRoutinesCard: View {
                     HStack(alignment: .top, spacing: Spacing.xl) {
                         // Left: Summary stats — always show all 3
                         VStack(spacing: 5) {
+                            RoutineStatCard(
+                                label: "Scheduled", count: scheduledCount,
+                                iconColor: Color(red: 0.447, green: 0.447, blue: 0.447),
+                                symbol: "clock"
+                            )
                             if runningCount > 0 {
                                 RoutineStatCard(
                                     label: "Running", count: runningCount,
@@ -552,11 +557,6 @@ struct TodayRoutinesCard: View {
                                 label: "Done", count: completedCount,
                                 iconColor: Color(red: 0.204, green: 0.780, blue: 0.349),
                                 symbol: "checkmark.circle.fill"
-                            )
-                            RoutineStatCard(
-                                label: "Scheduled", count: scheduledCount,
-                                iconColor: Color(red: 0.447, green: 0.447, blue: 0.447),
-                                symbol: "clock"
                             )
                             RoutineStatCard(
                                 label: "Failed", count: failedCount,
