@@ -54,4 +54,32 @@ Category names:
 - 7: Index drift
 - 8: Schedule sanity
 
-Do not perform any fixes — only report. Fixing vault drift is a manual decision.
+5. **Auto-fix broken wikilinks** (before reporting): for each broken wikilink issue, attempt to fix it automatically using the rules below. Then re-run the linter to get the final count for the report.
+
+### Auto-fix rules for broken wikilinks
+
+These are safe, mechanical fixes — apply them without asking:
+
+| Broken link | Correct link | Condition |
+|---|---|---|
+| `[[Routines]]` | `[[agent-routines]]` | file is inside any `*/Routines/` folder |
+| `[[Notes]]` | `[[agent-notes]]` | file is inside any `*/Notes/` folder |
+| `[[Skills]]` | `[[agent-skills]]` | file is inside any `*/Skills/` folder |
+| `[[Journal]]` | `[[agent-journal]]` | file is inside any `*/Journal/` folder |
+| `[[Lessons]]` | `[[agent-lessons]]` | file is inside any `*/Lessons/` folder |
+
+For each broken-wikilink issue returned by the linter:
+1. Check if the broken link matches one of the patterns above and the file is in the expected folder.
+2. If yes: read the file, replace the broken wikilink with the correct one, write back. Do NOT change any other content.
+3. If no: leave it for the report — it's a non-trivial broken link that needs manual review.
+
+After fixing, re-run the linter:
+
+```bash
+cd /Users/viniciusramos/claude-bot
+python3 scripts/vault_lint.py --json
+```
+
+Use the fresh output for the final report. If all issues were auto-fixed and the new count is 0, respond `NO_REPLY`.
+
+If fixes were applied, prepend a brief line to the Telegram message: `🔧 Auto-fixed N wikilink(s).`
