@@ -8,6 +8,7 @@ struct SidebarView: View {
         List(selection: $selection) {
             Section("Overview") {
                 sidebarLabel(.dashboard)
+                sidebarLabel(.web)
             }
             Section("Manage") {
                 sidebarLabel(.agents)
@@ -89,6 +90,8 @@ struct SidebarView: View {
         case .changelog:
             let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
             return v.map { "v\($0)" }
+        case .web:
+            return appState.webRunning ? "Running" : nil
         default:
             return nil
         }

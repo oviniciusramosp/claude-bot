@@ -11,6 +11,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case logs = "Logs"
     case settings = "Settings"
     case changelog = "Changelog"
+    case web = "Web"
 
     var id: String { rawValue }
 
@@ -26,6 +27,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         case .logs: "info.triangle"
         case .settings: "gear"
         case .changelog: "cloud"
+        case .web: "globe"
         }
     }
 }
@@ -51,6 +53,7 @@ struct ContentView: View {
                 case .logs: LogViewerView()
                 case .settings: SettingsView()
                 case .changelog: ChangelogPageView()
+                case .web: WebDashboardView()
                 }
             }
             .navigationSplitViewStyle(.prominentDetail)

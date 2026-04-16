@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.28.1"  # fix: tool hint shows last 2 path components instead of truncating at 60 chars
+BOT_VERSION = "3.30.1"  # fix: idle compact fires only once per idle period (idle_compact_done flag)
 
 import hmac
 import hashlib
@@ -2729,10 +2729,11 @@ def _select_relevant_skills(prompt: str, agent_id: Optional[str] = None,
         if not name and source_file:
             name = Path(source_file).stem
         description = str(node.get("description", ""))
+        trigger = str(node.get("trigger", ""))
         tags = node.get("tags", []) or []
         if not isinstance(tags, list):
             tags = []
-        haystack = " ".join([name, description, " ".join(str(t) for t in tags)]).lower()
+        haystack = " ".join([name, description, trigger, " ".join(str(t) for t in tags)]).lower()
         haystack_tokens = set(re.findall(r"[\w-]+", haystack))
         score = 0
         for w in prompt_words:
@@ -2854,6 +2855,28 @@ def _vault_index_upsert(
 _journal_update_hints: Dict[str, str] = {}
 
 
+def _regenerate_journal_index() -> None:
+    """Regenerate all agent-journal.md index marker blocks in the background.
+
+    Spawns vault_indexes.py as a daemon thread so new Journal entries are
+    immediately reflected in agent-journal.md without blocking the caller.
+    Fail-open: errors are logged at DEBUG, never raised.
+    """
+    def _run() -> None:
+        try:
+            script = Path(__file__).resolve().parent / "scripts" / "vault_indexes.py"
+            subprocess.run(
+                [sys.executable, str(script)],
+                timeout=30,
+                capture_output=True,
+                check=False,
+            )
+        except Exception as exc:
+            logger.debug("_regenerate_journal_index failed: %s", exc)
+
+    threading.Thread(target=_run, daemon=True, name="journal-index-regen").start()
+
+
 def _append_execution_report(
     *,
     agent: str,
@@ -2919,6 +2942,7 @@ def _append_execution_report(
         if not path.exists():
             fm_header = f"---\ndate: {today}\ntype: journal\nagent: {agent_id}\n---\n"
             path.write_text(fm_header + entry, encoding="utf-8")
+            _regenerate_journal_index()
         else:
             with path.open("a", encoding="utf-8") as f:
                 f.write(entry)
@@ -3455,6 +3479,10 @@ class Session:
     # Defaults to creation time so old sessions.json without this field are
     # treated as "just active" on first load (conservative backcompat).
     last_activity: float = field(default_factory=time.time)
+    # Set to True after an idle compact fires; cleared on real user interaction.
+    # Prevents the watchdog from re-firing compact every IDLE_COMPACT_HOURS while
+    # the user remains idle.
+    idle_compact_done: bool = False
 
 
 class SessionManager:
@@ -3742,7 +3770,10 @@ def classify_error(raw: str) -> ErrorKind:
         return ErrorKind.CLI_CRASH
     if "no conversation found" in sl:
         return ErrorKind.CLI_CRASH
-    if "invalid signature in thinking block" in sl:
+    # Match both plain and backtick-quoted variants from the Anthropic API:
+    # "invalid signature in thinking block"
+    # "invalid `signature` in `thinking` block"
+    if "signature" in sl and "thinking" in sl and "block" in sl:
         return ErrorKind.STALE_SESSION
     return ErrorKind.UNKNOWN
 
@@ -6410,13 +6441,14 @@ class ClaudeTelegramBot:
                     f"Próxima mensagem inicia contexto novo._",
                 )
 
-            elif idle_hours >= IDLE_COMPACT_HOURS:
+            elif idle_hours >= IDLE_COMPACT_HOURS and not session.idle_compact_done:
                 logger.info(
                     "Idle compact: session %s idle for %.1fh (threshold=%dh)",
                     name, idle_hours, IDLE_COMPACT_HOURS,
                 )
-                # Reset idle clock before launching the background compact so the
-                # next 10-minute check won't re-trigger while the compact is still running.
+                # Mark done so the watchdog won't re-fire every IDLE_COMPACT_HOURS
+                # while the user stays idle. Cleared when real user activity arrives.
+                session.idle_compact_done = True
                 session.last_activity = now
                 self.sessions.save()
                 self._auto_compact(session)
@@ -8002,6 +8034,7 @@ class ClaudeTelegramBot:
                     f"---\ndate: {today}\ntype: journal\nagent: {owner}\n---\n"
                 )
                 path.write_text(fm_header + entry, encoding="utf-8")
+                _regenerate_journal_index()
             else:
                 with path.open("a", encoding="utf-8") as f:
                     f.write(entry)
@@ -8568,12 +8601,15 @@ class ClaudeTelegramBot:
         if not arg:
             markup = {"inline_keyboard": [
                 [{"text": "📋 Listar", "callback_data": "skill:list"},
+                 {"text": "▶️ Executar", "callback_data": "skill:run"},
                  {"text": "✏️ Editar", "callback_data": "skill:edit"}],
             ]}
             self.send_message("⚡ *Skills* — o que deseja fazer?", reply_markup=markup)
             return
         if arg_lower == "list":
             self._skill_list()
+        elif arg_lower.startswith("run"):
+            self._skill_run(arg[3:].strip())
         elif arg_lower.startswith("edit"):
             self._skill_edit(arg[4:].strip())
         else:
@@ -8610,6 +8646,54 @@ class ClaudeTelegramBot:
         )
         if name:
             prompt += f"\n\nO usuario quer editar: {name}"
+        self._run_claude_prompt(prompt)
+
+    def _skill_run(self, name: str) -> None:
+        """Load a skill by name and inject its body as a prompt for Claude."""
+        session = self._get_session()
+        current_agent = session.agent if session else None
+        sdir = skills_dir(current_agent)
+        if not name:
+            # Show picker keyboard with available skills
+            if not sdir.is_dir():
+                self.send_message("⚡ Nenhuma skill encontrada.")
+                return
+            rows = []
+            for f in sorted(sdir.glob("*.md")):
+                if f.name in SUB_INDEX_FILENAMES_SET:
+                    continue
+                fm, _ = get_frontmatter_and_body(f)
+                title = fm.get("title", f.stem)
+                rows.append([{"text": title, "callback_data": f"skill:run:{f.stem}"}])
+            if not rows:
+                self.send_message("⚡ Nenhuma skill encontrada.")
+                return
+            markup = {"inline_keyboard": rows}
+            self.send_message("⚡ Qual skill deseja executar?", reply_markup=markup)
+            return
+        # Find the skill file
+        slug = name.lower().replace(" ", "-")
+        skill_file = sdir / f"{slug}.md"
+        if not skill_file.is_file():
+            # Fuzzy match: try partial stem match
+            candidates = [f for f in sdir.glob("*.md")
+                          if f.name not in SUB_INDEX_FILENAMES_SET and slug in f.stem.lower()]
+            if len(candidates) == 1:
+                skill_file = candidates[0]
+            else:
+                self.send_message(f"⚡ Skill `{name}` nao encontrada.")
+                return
+        fm, body = get_frontmatter_and_body(skill_file)
+        title = fm.get("title", skill_file.stem)
+        if not body.strip():
+            self.send_message(f"⚡ Skill `{title}` esta vazia.")
+            return
+        self.send_message(f"⚡ Executando skill *{title}*...")
+        prompt = (
+            f"Execute a skill abaixo. Leia as instrucoes e siga-as completamente. "
+            f"Pergunte ao usuario o que for necessario.\n\n"
+            f"--- SKILL: {title} ---\n\n{body}"
+        )
         self._run_claude_prompt(prompt)
 
     # -- Agent commands --
@@ -9688,8 +9772,10 @@ class ClaudeTelegramBot:
 
         # Auto session management (interactive sessions only)
         if not routine_mode and session.session_id and runner.exit_code in (None, 0):
-            # Refresh idle clock on every successful interactive turn
+            # Refresh idle clock on every successful interactive turn and clear
+            # the idle-compact flag so the watchdog can fire again next idle period.
             session.last_activity = time.time()
+            session.idle_compact_done = False
             if session.message_count >= AUTO_ROTATE_THRESHOLD:
                 logger.info("Auto-rotate: session %s reached %d turns, starting fresh",
                             session.name, session.message_count)
@@ -10315,6 +10401,10 @@ class ClaudeTelegramBot:
             self.answer_callback(cb_id)
             if action == "list":
                 self._skill_list()
+            elif action == "run":
+                self._skill_run("")
+            elif action.startswith("run:"):
+                self._skill_run(action[4:])
             elif action == "edit":
                 self._skill_edit("")
         elif data.startswith("approve:"):

@@ -208,6 +208,7 @@ def build_graph(vault_dir):
             "source_file": rel_path,
             "type": fm.get("type", "unknown"),
             "description": fm.get("description", ""),
+            "trigger": fm.get("trigger", ""),
             "tags": fm.get("tags", []),
             "created": fm.get("created", ""),
             "updated": fm.get("updated", ""),

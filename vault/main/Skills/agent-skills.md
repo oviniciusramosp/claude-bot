@@ -11,9 +11,9 @@ tags: [index, skills]
 
 <!-- vault-query:start filter="type=skill" scope="main/Skills" sort="title" format="- [[{link}|{stem}]] — {description}" -->
 - [[main/Skills/audit-insecure-defaults|audit-insecure-defaults]] — Detect fail-open insecure defaults (hardcoded secrets, fallback tokens, weak auth, permissive config) in the bot codebase. Use when auditing .env handling, reviewing new config paths, or hardening for distribution.
-- [[main/Skills/create-agent|create-agent]] — Consultative skill for creating specialized agents or reviewing existing ones. Helps decide whether a case requires a dedicated agent or if the Main Agent is sufficient. Generates the v3.5 flat per-agent structure (`<id>/agent-<id>.md` + `CLAUDE.md` + sub-indexes + `.workspace/`).
-- [[main/Skills/create-pipeline|create-pipeline]] — Skill for creating or reviewing pipelines with multiple parallel steps. Proactively analyzes parallelism opportunities and anti-patterns in existing pipelines.
-- [[main/Skills/create-routine|create-routine]] — Skill for creating scheduled routines or reviewing existing ones. Proactively analyzes whether the user's use case would work better as a parallel pipeline.
+- [[main/Skills/create-agent|create-agent]] — Consultative skill for creating specialized agents. Helps decide whether a case requires a dedicated agent or if the Main Agent is sufficient. Generates the v3.5 flat per-agent structure.
+- [[main/Skills/create-pipeline|create-pipeline]] — Skill for creating new pipelines with multiple parallel steps. Guides through objective, DAG decomposition, parallelism rules, step prompts, and scheduling.
+- [[main/Skills/create-routine|create-routine]] — Skill for creating scheduled routines. Proactively analyzes whether the user's use case would work better as a parallel pipeline and triages accordingly.
 - [[main/Skills/extract-knowledge|extract-knowledge]] — Extracts durable concepts from pipeline outputs or conversations and creates/updates notes in Notes/. Automates knowledge base population.
 - [[main/Skills/fetch-web|fetch-web]] — Standard procedure for fetching and parsing web content. Covers tool selection (PinchTab vs curl), RSS parsing, HTML extraction, retries, and rate limiting.
 - [[main/Skills/generate-image|generate-image]] — Standard procedure for generating images for publications. Covers Gemini nano-banana, local scripts, hosting via catbox.moe, and dimension conventions per use case.
@@ -22,6 +22,9 @@ tags: [index, skills]
 - [[main/Skills/publish-threads|publish-threads]] — Standard procedure for posting to Threads (Meta) via PinchTab. Handles single posts, carousels of images, and character limits.
 - [[main/Skills/publish-x|publish-x]] — Standard procedure for posting to X via PinchTab (preferred) or cookie-based API. Handles threads, media, character limits, and rate limiting.
 - [[main/Skills/repo-state-snapshot|repo-state-snapshot]] — Live snapshot of the claude-bot repo state — working tree, recent commits, branch status. Use when evaluating whether something is ready to commit, to build a PR summary, or before running verification commands.
+- [[main/Skills/review-agent|review-agent]] — Skill for reviewing, improving, and evaluating existing agents. Checks model assignment, personality quality, usage frequency, and merge opportunities.
+- [[main/Skills/review-pipeline|review-pipeline]] — Skill for reviewing, improving, and optimizing existing pipelines. Analyzes parallelism, model assignment, resilience, prompt quality, and execution history.
+- [[main/Skills/review-routine|review-routine]] — Skill for reviewing, improving, and optimizing existing routines. Checks model assignment, context mode, prompt quality, schedule appropriateness, and pipeline conversion opportunities.
 - [[main/Skills/review-calendar|review-calendar]] — Standard procedure for checking upcoming relevant dates and events (economic calendar, sports fixtures, macro events) to enrich routine context with time-sensitive information.
 - [[main/Skills/systematic-debugging|systematic-debugging]] — Four-phase root cause methodology for any bug, test failure, or unexpected behavior. Enforces investigation before fixes. Use when debugging the bot, a routine, or a pipeline step.
 - [[main/Skills/test-driven-development|test-driven-development]] — Red-Green-Refactor cycle for any feature or bugfix that touches bot code. Write the test first, watch it fail, then write minimal code to pass. Enforces the project's test contracts.

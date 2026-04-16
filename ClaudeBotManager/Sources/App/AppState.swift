@@ -9,6 +9,8 @@ final class AppState: ObservableObject {
     @Published var claudeUsage: ClaudeUsage = .unavailable
     @Published var zaiUsage: ZAIUsage = .empty
     @Published var activeRunners: Int = 0
+    /// Whether the web dashboard service (port 27184) is reachable.
+    @Published var webRunning: Bool = false
 
     // This week's total cost from ~/.claude-bot/costs.json — displayed as
     // the sidebar badge on the Usage row. Zero when the file is missing or
@@ -291,11 +293,14 @@ final class AppState: ObservableObject {
     func refreshBotStatus() async {
         guard let bs = botProcessService else { return }
         botStatus = await bs.status()
-        // Fetch active runners from health endpoint
-        await fetchHealthStatus()
+        // Fetch active runners from bot health endpoint + web health
+        await withTaskGroup(of: Void.self) { group in
+            group.addTask { await self.fetchBotHealthStatus() }
+            group.addTask { await self.fetchWebHealthStatus() }
+        }
     }
 
-    private func fetchHealthStatus() async {
+    private func fetchBotHealthStatus() async {
         guard isRunning else { activeRunners = 0; return }
         let url = URL(string: "http://127.0.0.1:27182/health")!
         var req = URLRequest(url: url)
@@ -307,6 +312,18 @@ final class AppState: ObservableObject {
             }
         } catch {
             activeRunners = 0
+        }
+    }
+
+    private func fetchWebHealthStatus() async {
+        guard let url = URL(string: "http://127.0.0.1:27184/health") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 2
+        do {
+            let (_, resp) = try await URLSession.shared.data(for: req)
+            webRunning = (resp as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            webRunning = false
         }
     }
 
@@ -331,6 +348,66 @@ final class AppState: ObservableObject {
         let z = await zaiResult
         if let c = c { self.claudeUsage = c }
         if let z = z { self.zaiUsage = z }
+        writeUsageCache()
+    }
+
+    /// Write current usage snapshot to ~/.claude-bot/usage-cache.json so the
+    /// web dashboard can read fresh data without making its own API calls.
+    private func writeUsageCache() {
+        let c = claudeUsage
+        let z = zaiUsage
+        let iso = ISO8601DateFormatter()
+        let payload: [String: Any] = [
+            "claude": [
+                "available":      c.isAvailable,
+                "weeklyPercent":  c.weeklyPercent * 100,
+                "sessionPercent": c.sessionPercent * 100,
+                "hasTokenData":   c.hasTokenData,
+                "weeklyTokenPercent": c.weeklyTokenPercent * 100,
+                "weeklyResetsAt": c.weeklyResetsAt.map { iso.string(from: $0) } as Any,
+                "planName":       c.planName as Any,
+                "rateTier":       c.rateTier as Any,
+            ],
+            "zai": [
+                "configured":     z.isConfigured,
+                "available":      z.isAvailable,
+                "weeklyPercent":  z.weeklyPercent * 100,
+                "sessionPercent": z.sessionPercent * 100,
+                "weeklyResetsAt": z.weeklyResetsAt.map { iso.string(from: $0) } as Any,
+                "weeklyCostUSD":  z.weeklyCostUSD,
+                "todayCostUSD":   z.todayCostUSD,
+                "planLevel":      z.planLevel as Any,
+                "planName":       z.planName,
+                "hasCostData":    z.hasCostData,
+                "weeklyLabel":    z.weeklyLabel,
+                "glmAgentCount":   glmAgentCount,
+                "glmRoutineCount": glmRoutineCount,
+                "glmStepCount":    glmStepCount,
+            ],
+            "counts": [
+                "agents":   agents.count + 1,
+                "routines": routines.count,
+                "skills":   skills.count,
+            ],
+            "updatedAt": iso.string(from: Date()),
+        ]
+        guard let json = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted]) else { return }
+        let path = URL(fileURLWithPath: "\(dataDir)/usage-cache.json")
+        try? json.write(to: path)
+    }
+
+    private var glmAgentCount: Int {
+        agents.filter { $0.model.hasPrefix("glm") }.count
+    }
+    private var glmRoutineCount: Int {
+        routines.filter { r in
+            r.model.hasPrefix("glm") || r.pipelineStepDefs.contains(where: { $0.model.hasPrefix("glm") })
+        }.count
+    }
+    private var glmStepCount: Int {
+        routines.reduce(0) { acc, r in
+            acc + r.pipelineStepDefs.filter { $0.model.hasPrefix("glm") }.count
+        }
     }
 
     func startBot() async {

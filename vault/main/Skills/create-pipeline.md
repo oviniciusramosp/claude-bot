@@ -1,27 +1,14 @@
 ---
-title: Create or Review Multi-Agent Pipeline
-description: Skill for creating or reviewing pipelines with multiple parallel steps. Proactively analyzes parallelism opportunities and anti-patterns in existing pipelines.
+title: Create Multi-Agent Pipeline
+description: Skill for creating new pipelines with multiple parallel steps. Guides through objective, DAG decomposition, parallelism rules, step prompts, and scheduling.
 type: skill
 created: 2026-04-08
-updated: 2026-04-12
-trigger: "when the user wants to create, review, improve, or optimize a pipeline, routine with multiple steps, routine with sub-agents, or multi-step workflow"
-tags: [skill, pipeline, routine, automation, multi-agent, review, parallelism]
+updated: 2026-04-16
+trigger: "when the user wants to create a new pipeline, build a multi-step workflow, design a routine with sub-agents, or set up a pipeline from scratch"
+tags: [skill, pipeline, routine, automation, multi-agent, parallelism, create]
 ---
 
-## Modes of operation
-
-This skill operates in two modes:
-
-1. **Creation** — when the user wants to create a new pipeline
-2. **Review** — when the user wants to review, improve, or optimize existing pipelines
-
-Detect the mode from the conversation context. If ambiguous, ask.
-
----
-
-## Creation Mode
-
-### What is a pipeline
+## What is a pipeline
 
 A pipeline is a routine of type `type: pipeline` that orchestrates multiple steps (sub-agents). Unlike a simple routine (one prompt → one Claude → one output), a pipeline:
 
@@ -477,103 +464,6 @@ The review step will check structure, tone, and factual accuracy of each highlig
 ```
 
 Note that the prompt does NOT mention `data/`, input file paths, or instruct about the workspace — all of that is injected automatically by the orchestrator. The `## Expected Output` section is optional but recommended for steps whose output feeds a downstream step — it acts as a contract that prevents parsing failures.
-
----
-
-## Review Mode
-
-Triggered when the user asks to review, improve, or optimize existing pipelines.
-
-### Step 1 — Identify scope
-
-- If the user mentioned a specific pipeline → review only that one
-- If they asked for a general review → iterate every `vault/<agent>/Routines/*.md` across all agent folders and filter to `type: pipeline`
-
-### Step 2 — Analyze each pipeline
-
-For each pipeline, read the main file and all step prompts. Evaluate using the checklist below.
-
-**Review checklist:**
-
-#### A. Parallelism
-
-- [ ] **Monolithic collector?** — Does one step collect data from 3+ sources? Suggest splitting into parallel sub-collectors.
-- [ ] **100% sequential chain?** — Do all steps depend on the previous one? Check if any could run in parallel (e.g., cover in parallel with analysis).
-- [ ] **Excessive dependencies?** — Does any step depend on another without using its output? Remove the dependency.
-- [ ] **Assets in series?** — Does image/cover/chart generation wait for analysis to finish? If it doesn't need the analysis output, parallelize.
-
-#### B. Models
-
-- [ ] **Haiku for collection?** — Steps that only do curl/API calls should use `haiku`, never `opus`.
-- [ ] **Opus for analysis/writing?** — Steps that require deep reasoning or creativity should use `opus`.
-- [ ] **Expensive model on a simple task?** — Mechanical steps (publish, send, format) don't need `opus`.
-
-#### C. Resilience
-
-- [ ] **Retry on collectors?** — Steps with external calls should have `retry: 1` at minimum.
-- [ ] **Adequate timeout?** — Is >300s excessive for collectors? Is <300s insufficient for opus steps?
-- [ ] **Inactivity timeout?** — Steps without explicit `inactivity_timeout` use the default (300s). Collectors should have 120s. Publishing 60s.
-
-#### D. Prompts
-
-- [ ] **Step prompt mentions `data/`?** — Remove it. The orchestrator injects this automatically.
-- [ ] **Too generic a prompt?** — Vague instructions like "analyze the data" without specifying WHAT to analyze.
-- [ ] **Prompt too long?** — If >500 words, consider whether everything is necessary.
-- [ ] **Missing output contract?** — Does a non-final step lack an `## Expected Output` section? If downstream steps parse its output, add one.
-
-#### E. Execution history
-
-- Read `~/.claude-bot/routines-state/YYYY-MM-DD.json` (last 2-3 days)
-- Check for recurring failures, which steps fail, and with what error
-- Actual timeouts vs configured — if the step is being killed by the timeout, adjust it
-- If a collector is taking too long, it's a candidate for parallel split
-
-### Step 3 — Present recommendations
-
-For each analyzed pipeline, present:
-
-```
-### {pipeline-name}
-
-**Current structure:**
-[step1] → [step2] → [step3] → [step4]
-Estimated time: ~Xmin (sequential)
-
-**Suggested improvements:**
-
-1. ⚡ **Parallelize collection** — split [step1] into 3 parallel sub-collectors
-   Gain: collection from ~5min to ~1min
-
-2. 🔄 **Add retry** — [step1] and [step3] make external calls without retry
-   Gain: resilience against transient failures
-
-3. 🧠 **Adjust model** — [step3] uses opus but only formats text (sonnet is enough)
-   Gain: ~40% faster and cheaper
-
-**Proposed structure:**
-[sub-collect-a] ──┐
-[sub-collect-b] ──┼→ [analyst] → [writer] → [publisher]
-[sub-collect-c] ──┘
-Estimated time: ~Ymin (Zx faster)
-```
-
-### Step 4 — Apply approved improvements
-
-Ask which improvements the user wants to apply. For each approved one:
-
-- **Collector split** → create new step files, update pipeline definition, remove old step
-- **Model/timeout/retry change** → edit the pipeline definition
-- **Prompt rewrite** → edit the step file, show diff to the user
-- **DAG reorganization** → update `depends_on` on the affected steps
-
-When modifying a pipeline:
-1. Update the `updated` field in frontmatter
-2. Keep old step files until confirming the new ones work (or delete if the user approves)
-3. Record changes in the Journal
-
-### Step 5 — Record in the Journal
-
-Append to today's journal with the applied changes.
 
 ---
 

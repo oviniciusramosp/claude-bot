@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="theme-color" content="#1c1c1e">
+    <title>Claude Bot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <link rel="stylesheet" href="/css/app.css">
+</head>
+<body class="h-full overscroll-none" x-data="app" x-cloak style="background:var(--bg);color:var(--text)">
+
+    <!-- Loading check -->
+    <template x-if="checking">
+        <div class="flex items-center justify-center h-full">
+            <div class="spinner"></div>
+        </div>
+    </template>
+
+    <!-- ============================================================ -->
+    <!-- LOGIN PAGE                                                    -->
+    <!-- ============================================================ -->
+    <template x-if="!checking && !authenticated">
+        <div x-data="loginPage" class="flex items-center justify-center h-full px-4 fade-in">
+            <div class="glass-card w-full max-w-sm text-center">
+                <div class="text-4xl mb-2">&#x1F916;</div>
+                <h1 class="text-xl font-semibold mb-1">Claude Bot</h1>
+                <p class="text-slate-400 text-sm mb-6">Enter PIN to access dashboard</p>
+
+                <input
+                    type="password"
+                    inputmode="numeric"
+                    pattern="[0-9]*"
+                    maxlength="8"
+                    x-model="pin"
+                    @keydown="handleKey"
+                    class="pin-input mb-4"
+                    placeholder="------"
+                    autofocus
+                >
+
+                <template x-if="error">
+                    <p class="text-red-400 text-sm mb-3" x-text="error"></p>
+                </template>
+
+                <button
+                    @click="submit"
+                    :disabled="loading || !pin"
+                    class="w-full bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white font-medium py-3 rounded-xl transition"
+                >
+                    <span x-show="!loading">Unlock</span>
+                    <span x-show="loading" class="flex items-center justify-center gap-2">
+                        <span class="spinner" style="width:16px;height:16px;border-width:2px"></span>
+                        Checking...
+                    </span>
+                </button>
+            </div>
+        </div>
+    </template>
+
+    <!-- ============================================================ -->
+    <!-- MAIN APP (authenticated)                                      -->
+    <!-- ============================================================ -->
+    <template x-if="!checking && authenticated">
+        <div style="display:flex;flex-direction:column;min-height:100%">
+
+            <!-- Page content area — pb clears the floating pill nav -->
+            <main class="flex-1 overflow-y-auto px-4 pt-4 max-w-2xl mx-auto w-full"
+                  style="padding-bottom: calc(88px + env(safe-area-inset-bottom, 0px))">
+
+                <!-- DASHBOARD -->
+                <template x-if="page === 'dashboard'">
+                    <div x-data="dashboardPage" class="space-y-4 fade-in">
+
+                        <!-- Loading -->
+                        <template x-if="loading">
+                            <div class="flex justify-center py-12"><div class="spinner"></div></div>
+                        </template>
+
+                        <template x-if="!loading">
+                            <div class="space-y-4">
+
+                                <!-- Bot Status Card -->
+                                <div class="glass-card">
+                                    <div class="card-header mb-3">
+                                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 3H5a2 2 0 0 0-2 2v4m6-6h10a2 2 0 0 1 2 2v4M9 3v18m0 0h10a2 2 0 0 0 2-2V9M9 21H5a2 2 0 0 1-2-2V9m0 0h18"/></svg>
+                                        Bot Status
+                                    </div>
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex items-center gap-3">
+                                            <span class="status-dot" :class="isRunning ? 'running' : 'stopped'"></span>
+                                            <div>
+                                                <div class="font-semibold text-sm" x-text="isRunning ? 'Running' : 'Stopped'"></div>
+                                                <div class="text-xs text-slate-500" x-show="isRunning">
+                                                    <span x-text="uptimeFormatted"></span>
+                                                    <template x-if="activeRunners > 0">
+                                                        <span class="ml-2 badge badge-running" x-text="activeRunners + ' active'"></span>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div class="flex gap-2">
+                                            <button x-show="!isRunning" @click="startBot()"
+                                                class="text-xs bg-green-600/20 text-green-400 border border-green-600/30 px-3 py-1.5 rounded-lg">Start</button>
+                                            <button x-show="isRunning" @click="restartBot()"
+                                                class="text-xs bg-slate-600/20 text-slate-400 border border-slate-600/30 px-3 py-1.5 rounded-lg">Restart</button>
+                                            <button x-show="isRunning" @click="stopBot()"
+                                                class="text-xs bg-red-600/20 text-red-400 border border-red-600/30 px-3 py-1.5 rounded-lg">Stop</button>
+                                        </div>
+                                    </div>
+                                    <template x-if="botStatus?.scheduler_alive === false && isRunning">
+                                        <div class="text-xs text-yellow-400 bg-yellow-900/20 rounded px-2 py-1 mt-2">Scheduler not alive</div>
+                                    </template>
+                                </div>
+
+                                <!-- Usage Row: Claude + ZAI -->
+                                <div class="grid grid-cols-2 gap-3">
+
+                                    <!-- Claude Usage Card -->
+                                    <div class="glass-card flex flex-col gap-3">
+                                        <div class="card-header">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>
+                                            Claude
+                                        </div>
+
+                                        <template x-if="claudeAvailable">
+                                            <div class="flex flex-col gap-2">
+                                                <div class="stat-big" x-text="Math.round(claudePercent) + '%'"></div>
+
+                                                <!-- Weekly segment bar -->
+                                                <div class="weekly-bar" x-data>
+                                                    <template x-for="i in 7" :key="i">
+                                                        <div class="seg"
+                                                            :style="(i-1)*100/7 < claudePercent && claudePercent <= claudeWeekProgress
+                                                                ? 'background:#0071e3'
+                                                                : (i-1)*100/7 < claudePercent
+                                                                ? 'background:#ff453a'
+                                                                : ''">
+                                                        </div>
+                                                    </template>
+                                                    <div class="weekly-now-marker" :style="'left:' + claudeWeekProgress + '%'"></div>
+                                                </div>
+
+                                                <div class="usage-meta" x-text="claudePaceLabel"></div>
+                                                <div class="usage-meta" x-show="claudeRenewLabel" x-text="claudeRenewLabel"></div>
+
+                                                <!-- Stat chips: agents / routines / skills -->
+                                                <div class="flex gap-1 mt-1">
+                                                    <div class="dash-chip">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                                                        <span x-text="counts.agents"></span>
+                                                    </div>
+                                                    <div class="dash-chip">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                        <span x-text="counts.routines"></span>
+                                                    </div>
+                                                    <div class="dash-chip">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                                                        <span x-text="counts.skills"></span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </template>
+
+                                        <template x-if="!claudeHasData">
+                                            <div class="usage-empty">
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                                                <span>No data</span>
+                                            </div>
+                                        </template>
+                                    </div>
+
+                                    <!-- ZAI Usage Card -->
+                                    <div class="glass-card flex flex-col gap-3">
+                                        <div class="card-header">
+                                            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                                            Z.AI
+                                        </div>
+
+                                        <!-- ZAI: available (live quota) -->
+                                        <template x-if="zaiConfigured && zaiAvailable">
+                                            <div class="flex flex-col gap-2">
+                                                <div class="stat-big" x-text="zaiWeeklyLabel"></div>
+                                                <div class="weekly-bar">
+                                                    <template x-for="i in 7" :key="i">
+                                                        <div class="seg"
+                                                            :style="(i-1)*100/7 < zaiPercent && zaiPercent <= zaiWeekProgress
+                                                                ? 'background:#f97316'
+                                                                : (i-1)*100/7 < zaiPercent
+                                                                ? 'background:#ff453a'
+                                                                : ''">
+                                                        </div>
+                                                    </template>
+                                                    <div class="weekly-now-marker" :style="'left:' + zaiWeekProgress + '%'"></div>
+                                                </div>
+                                                <div class="usage-meta" x-text="zaiPaceLabel"></div>
+                                                <div class="usage-meta" x-show="zaiRenewLabel" x-text="zaiRenewLabel"></div>
+                                                <div x-show="zaiWeeklyCost" class="usage-meta" x-text="'Week: ' + zaiWeeklyCost + ' · Today: ' + (zaiTodayCost || \'$0\')"></div>
+                                                <!-- GLM chips: glm agents / glm routines / glm steps -->
+                                                <div class="flex gap-1 mt-1">
+                                                    <div class="dash-chip">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+                                                        <span x-text="glmAgentCount"></span>
+                                                    </div>
+                                                    <div class="dash-chip">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                        <span x-text="glmRoutineCount"></span>
+                                                    </div>
+                                                    <div class="dash-chip">
+                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+                                                        <span x-text="glmStepCount"></span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </template>
+
+                                        <!-- ZAI: plan known but quota unavailable -->
+                                        <template x-if="zaiConfigured && !zaiAvailable && zaiHasPlanInfo">
+                                            <div class="flex flex-col gap-2">
+                                                <div class="stat-big" x-text="zaiPlanName"></div>
+                                                <div class="weekly-bar">
+                                                    <template x-for="i in 7" :key="i"><div class="seg"></div></template>
+                                                    <div class="weekly-now-marker" :style="'left:' + zaiWeekProgress + '%'"></div>
+                                                </div>
+                                                <div x-show="zaiWeeklyCost" class="usage-meta" x-text="'Week: ' + zaiWeeklyCost + ' · Today: ' + (zaiTodayCost || \'$0\')"></div>
+                                                <div class="flex gap-1 mt-1">
+                                                    <div class="dash-chip"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg><span x-text="glmAgentCount"></span></div>
+                                                    <div class="dash-chip"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span x-text="glmRoutineCount"></span></div>
+                                                    <div class="dash-chip"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg><span x-text="glmStepCount"></span></div>
+                                                </div>
+                                            </div>
+                                        </template>
+
+                                        <!-- ZAI: cost only (no plan info, no quota) -->
+                                        <template x-if="zaiConfigured && !zaiAvailable && !zaiHasPlanInfo && zaiHasCostData">
+                                            <div class="flex flex-col gap-2">
+                                                <div class="stat-big" x-text="zaiWeeklyLabel"></div>
+                                                <div class="weekly-bar">
+                                                    <template x-for="i in 7" :key="i"><div class="seg"></div></template>
+                                                    <div class="weekly-now-marker" :style="'left:' + zaiWeekProgress + '%'"></div>
+                                                </div>
+                                                <div class="usage-meta">Local tracking · API unavailable</div>
+                                                <div class="usage-meta" x-text="'Week: ' + (zaiWeeklyCost || \'$0\') + ' · Today: ' + (zaiTodayCost || \'$0\')"></div>
+                                                <div class="flex gap-1 mt-1">
+                                                    <div class="dash-chip"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg><span x-text="glmAgentCount"></span></div>
+                                                    <div class="dash-chip"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg><span x-text="glmRoutineCount"></span></div>
+                                                    <div class="dash-chip"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg><span x-text="glmStepCount"></span></div>
+                                                </div>
+                                            </div>
+                                        </template>
+
+                                        <!-- ZAI: not configured -->
+                                        <template x-if="!zaiConfigured">
+                                            <div class="usage-empty">
+                                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" opacity="0.4"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+                                                <span>Not connected</span>
+                                                <span style="font-size:0.625rem;opacity:0.6">Add ZAI_API_KEY in Settings</span>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+
+                                <!-- Today's Routines Card -->
+                                <div class="glass-card">
+                                    <div class="card-header mb-3">
+                                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                        Today's Routines
+                                    </div>
+
+                                    <template x-if="timeline.length === 0">
+                                        <div class="text-center text-slate-600 py-6 text-sm">No routines scheduled today</div>
+                                    </template>
+
+                                    <template x-if="timeline.length > 0">
+                                        <div class="flex flex-col sm:flex-row gap-3">
+
+                                            <!-- Stats: horizontal row on mobile, vertical column on desktop -->
+                                            <div class="flex sm:flex-col gap-1.5 sm:w-24 shrink-0">
+                                                <template x-if="runningCount > 0">
+                                                    <div class="routine-stat flex-1 sm:flex-none">
+                                                        <div class="flex items-center gap-1">
+                                                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#0071e3" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                                            <span class="stat-label">Running</span>
+                                                        </div>
+                                                        <span class="stat-count" style="color:#0071e3" x-text="runningCount"></span>
+                                                    </div>
+                                                </template>
+                                                <div class="routine-stat flex-1 sm:flex-none">
+                                                    <div class="flex items-center gap-1">
+                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#30d158" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+                                                        <span class="stat-label">Done</span>
+                                                    </div>
+                                                    <span class="stat-count" style="color:#30d158" x-text="completedCount"></span>
+                                                </div>
+                                                <div class="routine-stat flex-1 sm:flex-none">
+                                                    <div class="flex items-center gap-1">
+                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#ababab" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                        <span class="stat-label">Sched.</span>
+                                                    </div>
+                                                    <span class="stat-count" style="color:#ababab" x-text="scheduledCount"></span>
+                                                </div>
+                                                <div class="routine-stat flex-1 sm:flex-none">
+                                                    <div class="flex items-center gap-1">
+                                                        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#ff453a" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                                        <span class="stat-label">Failed</span>
+                                                    </div>
+                                                    <span class="stat-count" style="color:#ff453a" x-text="failedCount"></span>
+                                                </div>
+                                            </div>
+
+                                            <!-- Timeline -->
+                                            <div class="flex-1 flex flex-col gap-0.5 min-w-0">
+                                                <template x-for="entry in timeline" :key="entry.id">
+                                                    <div>
+                                                        <!-- "Now" separator -->
+                                                        <template x-if="entry._isNow">
+                                                            <div class="timeline-now">
+                                                                <div class="timeline-now-dot"></div>
+                                                                <div class="timeline-now-line"></div>
+                                                            </div>
+                                                        </template>
+
+                                                        <!-- Regular timeline row -->
+                                                        <template x-if="!entry._isNow">
+                                                            <div class="timeline-row" :class="entry.isPast && 'is-past'">
+                                                                <!-- Status icon -->
+                                                                <span class="tl-icon">
+                                                                    <template x-if="entry.status === 'completed'">
+                                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="#30d158" stroke="none"><path d="M12 2a10 10 0 1 0 0 20A10 10 0 0 0 12 2zm4.7-1.3a1 1 0 0 1 0 1.4l-6 6-3-3a1 1 0 1 1 1.4-1.4l1.6 1.6 4.6-4.6a1 1 0 0 1 1.4 0z" transform="translate(-1,-1) scale(1.08)"/><circle cx="12" cy="12" r="10" fill="none" stroke="#30d158" stroke-width="1.5"/><polyline points="7,12.5 10.5,16 17,9" fill="none" stroke="#30d158" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                                                    </template>
+                                                                    <template x-if="entry.status === 'running'">
+                                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#0071e3" stroke-width="2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                                                    </template>
+                                                                    <template x-if="entry.status === 'failed'">
+                                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#ff453a" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>
+                                                                    </template>
+                                                                    <template x-if="entry.status === 'pending' || entry.status === 'skipped'">
+                                                                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#48484a" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                                                                    </template>
+                                                                </span>
+                                                                <span class="tl-time" x-text="entry.time"></span>
+                                                                <span class="tl-name" x-text="(entry.agentIcon ? entry.agentIcon + ' ' : '') + entry.title"></span>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- AGENTS -->
+                <template x-if="page === 'agents'">
+                    <div x-data="agentsPage" x-init="load()" class="fade-in">
+                        <template x-if="loading">
+                            <div class="flex justify-center py-12"><div class="spinner"></div></div>
+                        </template>
+
+                        <template x-if="!loading && !selectedAgent && !creating">
+                            <!-- Agent List -->
+                            <div class="space-y-4">
+                                <div class="flex items-center justify-between">
+                                    <h2 class="text-sm font-medium text-slate-400 uppercase tracking-wide">Agents</h2>
+                                    <button @click="startCreate()" class="text-xs bg-blue-600/20 text-blue-400 px-3 py-1.5 rounded-lg">+ New</button>
+                                </div>
+
+                                <!-- Main agent card -->
+                                <template x-if="mainAgent">
+                                    <div @click="selectAgent(mainAgent)" class="glass-card cursor-pointer hover:border-slate-600 transition">
+                                        <div class="flex items-center gap-3">
+                                            <span class="agent-icon" x-text="mainAgent.icon || '&#x1F916;'"></span>
+                                            <div class="flex-1 min-w-0">
+                                                <div class="flex items-center gap-2">
+                                                    <span class="font-semibold" x-text="mainAgent.name"></span>
+                                                    <span class="text-xs bg-blue-600/20 text-blue-400 px-2 py-0.5 rounded-full">Main</span>
+                                                    <span class="badge" :class="modelBadgeClass(mainAgent.model)" x-text="modelLabel(mainAgent.model)"></span>
+                                                </div>
+                                                <div class="text-sm text-slate-400 truncate" x-text="mainAgent.description"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <!-- Custom agents grid -->
+                                <div class="grid grid-cols-2 gap-3">
+                                    <template x-for="agent in customAgents" :key="agent.id">
+                                        <div @click="selectAgent(agent)" class="glass-card cursor-pointer hover:border-slate-600 transition">
+                                            <div class="text-center mb-2">
+                                                <span class="agent-icon" x-text="agent.icon || '&#x1F916;'"></span>
+                                            </div>
+                                            <div class="text-sm font-medium text-center truncate" x-text="agent.name"></div>
+                                            <div class="flex justify-center mt-1">
+                                                <span class="badge" :class="modelBadgeClass(agent.model)" x-text="modelLabel(agent.model)"></span>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Agent Detail / Edit -->
+                        <template x-if="!loading && (selectedAgent || creating)">
+                            <div class="space-y-4">
+                                <button @click="backToList()" class="text-sm text-slate-400 hover:text-slate-200 flex items-center gap-1">
+                                    &#8592; Back
+                                </button>
+
+                                <template x-if="error">
+                                    <div class="bg-red-900/20 text-red-400 text-sm px-3 py-2 rounded-lg" x-text="error"></div>
+                                </template>
+
+                                <template x-if="!editing">
+                                    <!-- View mode -->
+                                    <div class="space-y-4">
+                                        <div class="glass-card">
+                                            <div class="flex items-center gap-3 mb-4">
+                                                <span class="text-4xl" x-text="selectedAgent.icon || '&#x1F916;'"></span>
+                                                <div>
+                                                    <h2 class="text-xl font-bold" x-text="selectedAgent.name"></h2>
+                                                    <span class="badge" :class="modelBadgeClass(selectedAgent.model)" x-text="modelLabel(selectedAgent.model)"></span>
+                                                </div>
+                                            </div>
+                                            <p class="text-slate-400 text-sm mb-3" x-text="selectedAgent.description"></p>
+                                            <div class="text-xs text-slate-500 space-y-1">
+                                                <div>ID: <span class="text-slate-400" x-text="selectedAgent.id"></span></div>
+                                                <div>Color: <span class="text-slate-400" x-text="selectedAgent.color"></span></div>
+                                                <template x-if="selectedAgent.tags?.length">
+                                                    <div>Tags: <span class="text-slate-400" x-text="selectedAgent.tags.join(', ')"></span></div>
+                                                </template>
+                                            </div>
+                                        </div>
+
+                                        <template x-if="selectedAgent.personality">
+                                            <div class="glass-card">
+                                                <h3 class="text-sm font-medium text-slate-400 mb-2">CLAUDE.md</h3>
+                                                <pre class="text-xs text-slate-300 whitespace-pre-wrap overflow-x-auto max-h-64 overflow-y-auto" x-text="selectedAgent.personality"></pre>
+                                            </div>
+                                        </template>
+
+                                        <div class="flex gap-2">
+                                            <button @click="startEdit()" class="flex-1 bg-blue-600/20 text-blue-400 py-2.5 rounded-xl text-sm font-medium">Edit</button>
+                                            <template x-if="selectedAgent.id !== 'main'">
+                                                <button @click="deleteAgent(selectedAgent)" class="bg-red-600/20 text-red-400 py-2.5 px-4 rounded-xl text-sm">Delete</button>
+                                            </template>
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <template x-if="editing">
+                                    <!-- Edit mode -->
+                                    <div class="space-y-3">
+                                        <div class="glass-card space-y-3">
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Name</label>
+                                                <input x-model="editData.name" class="input-field" placeholder="Agent name">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Icon (emoji)</label>
+                                                <input x-model="editData.icon" class="input-field" placeholder="Emoji icon">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Description</label>
+                                                <input x-model="editData.description" class="input-field" placeholder="Short description">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Model</label>
+                                                <select x-model="editData.model" class="select-field">
+                                                    <template x-for="m in models" :key="m.id">
+                                                        <option :value="m.id" x-text="m.label"></option>
+                                                    </template>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Color</label>
+                                                <select x-model="editData.color" class="select-field">
+                                                    <template x-for="c in colors" :key="c">
+                                                        <option :value="c" x-text="c"></option>
+                                                    </template>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Tags (comma separated)</label>
+                                                <input x-model="editData.tags" class="input-field" placeholder="tag1, tag2">
+                                            </div>
+                                        </div>
+
+                                        <div class="glass-card">
+                                            <label class="text-xs text-slate-500 mb-1 block">CLAUDE.md (Personality & Instructions)</label>
+                                            <textarea x-model="editData.personality" class="prompt-editor" rows="10"></textarea>
+                                        </div>
+
+                                        <div class="flex gap-2">
+                                            <button @click="saveAgent()" :disabled="saving" class="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white py-2.5 rounded-xl text-sm font-medium">
+                                                <span x-show="!saving" x-text="creating ? 'Create Agent' : 'Save Changes'"></span>
+                                                <span x-show="saving">Saving...</span>
+                                            </button>
+                                            <button @click="cancelEdit()" class="bg-slate-700 text-slate-300 py-2.5 px-4 rounded-xl text-sm">Cancel</button>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- ROUTINES -->
+                <template x-if="page === 'routines'">
+                    <div x-data="routinesPage" class="fade-in">
+                        <template x-if="loading">
+                            <div class="flex justify-center py-12"><div class="spinner"></div></div>
+                        </template>
+
+                        <template x-if="!loading && !selectedRoutine">
+                            <!-- Routine List -->
+                            <div class="space-y-4">
+                                <!-- Agent filter bar -->
+                                <div class="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+                                    <button
+                                        @click="filterAgent = '__all__'"
+                                        class="chip shrink-0"
+                                        :class="filterAgent === '__all__' && 'active'"
+                                    >All</button>
+                                    <template x-for="agent in agents" :key="agent.id">
+                                        <button
+                                            @click="filterAgent = agent.id"
+                                            class="chip shrink-0"
+                                            :class="filterAgent === agent.id && 'active'"
+                                        >
+                                            <span x-text="agent.icon" class="mr-1"></span>
+                                            <span x-text="agent.name"></span>
+                                        </button>
+                                    </template>
+                                </div>
+
+                                <!-- Routine cards -->
+                                <div class="space-y-2">
+                                    <template x-for="routine in filteredRoutines" :key="routine.ownerAgentId + '/' + routine.id">
+                                        <div @click="selectRoutine(routine)" class="glass-card cursor-pointer hover:border-slate-600 transition">
+                                            <div class="flex items-center gap-3">
+                                                <div class="flex-1 min-w-0">
+                                                    <div class="flex items-center gap-2 mb-1">
+                                                        <span class="font-medium text-sm truncate" x-text="routine.title"></span>
+                                                        <span class="badge" :class="routine.type === 'pipeline' ? 'badge-pipeline' : 'badge-routine'" x-text="routine.type"></span>
+                                                        <span class="badge" :class="modelBadgeClass(routine.model)" x-text="routine.model"></span>
+                                                    </div>
+                                                    <div class="text-xs text-slate-500 flex items-center gap-2">
+                                                        <span x-text="agentIcon(routine.ownerAgentId)"></span>
+                                                        <span x-text="scheduleText(routine)"></span>
+                                                        <template x-if="routine.stepCount > 0">
+                                                            <span class="badge badge-pipeline" x-text="routine.stepCount + ' steps'"></span>
+                                                        </template>
+                                                    </div>
+                                                </div>
+                                                <div class="flex items-center gap-2 shrink-0">
+                                                    <!-- Status badge -->
+                                                    <template x-if="statusOf(routine)">
+                                                        <span class="badge" :class="{
+                                                            'badge-completed': statusOf(routine) === 'completed',
+                                                            'badge-running': statusOf(routine) === 'running',
+                                                            'badge-failed': statusOf(routine) === 'failed',
+                                                        }" x-text="statusOf(routine)"></span>
+                                                    </template>
+                                                    <!-- Toggle -->
+                                                    <div
+                                                        @click.stop="toggleEnabled(routine)"
+                                                        class="toggle-switch"
+                                                        :class="routine.enabled && 'active'"
+                                                    ></div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </template>
+                                    <template x-if="filteredRoutines.length === 0">
+                                        <div class="text-center text-slate-500 py-8 text-sm">No routines</div>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- Routine Detail / Edit -->
+                        <template x-if="!loading && selectedRoutine">
+                            <div class="space-y-4">
+                                <button @click="backToList()" class="text-sm text-slate-400 hover:text-slate-200 flex items-center gap-1">
+                                    &#8592; Back
+                                </button>
+
+                                <template x-if="error">
+                                    <div class="bg-red-900/20 text-red-400 text-sm px-3 py-2 rounded-lg" x-text="error"></div>
+                                </template>
+
+                                <template x-if="!editing">
+                                    <!-- View mode -->
+                                    <div class="space-y-4">
+                                        <div class="glass-card">
+                                            <div class="flex items-center justify-between mb-3">
+                                                <div>
+                                                    <h2 class="text-lg font-bold" x-text="selectedRoutine.title"></h2>
+                                                    <div class="flex items-center gap-2 mt-1">
+                                                        <span class="badge" :class="selectedRoutine.type === 'pipeline' ? 'badge-pipeline' : 'badge-routine'" x-text="selectedRoutine.type"></span>
+                                                        <span class="badge" :class="modelBadgeClass(selectedRoutine.model)" x-text="modelLabel(selectedRoutine.model)"></span>
+                                                        <span class="badge" :class="selectedRoutine.enabled ? 'badge-completed' : 'badge-pending'" x-text="selectedRoutine.enabled ? 'Enabled' : 'Disabled'"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="flex gap-2">
+                                                    <template x-if="statusOf(selectedRoutine) === 'running'">
+                                                        <button @click="stopRoutine(selectedRoutine)" class="text-xs bg-red-600/20 text-red-400 px-3 py-1.5 rounded-lg">Stop</button>
+                                                    </template>
+                                                    <template x-if="statusOf(selectedRoutine) !== 'running'">
+                                                        <button @click="runRoutine(selectedRoutine)" class="text-xs bg-green-600/20 text-green-400 px-3 py-1.5 rounded-lg">Run</button>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                            <p class="text-sm text-slate-400 mb-3" x-text="selectedRoutine.description"></p>
+                                            <div class="text-xs text-slate-500 space-y-1">
+                                                <div>Schedule: <span class="text-slate-400" x-text="scheduleText(selectedRoutine)"></span></div>
+                                                <div>Agent: <span class="text-slate-400" x-text="agentIcon(selectedRoutine.ownerAgentId) + ' ' + agentName(selectedRoutine.ownerAgentId)"></span></div>
+                                                <template x-if="selectedRoutine.stepCount > 0">
+                                                    <div>Steps: <span class="text-slate-400" x-text="selectedRoutine.stepCount"></span></div>
+                                                </template>
+                                            </div>
+                                        </div>
+
+                                        <!-- Execution status -->
+                                        <template x-if="getExecution(selectedRoutine)">
+                                            <div class="glass-card">
+                                                <h3 class="text-sm font-medium text-slate-400 mb-2">Latest Execution</h3>
+                                                <div class="text-xs space-y-1">
+                                                    <div>Status: <span class="badge" :class="{
+                                                        'badge-completed': getExecution(selectedRoutine).status === 'completed',
+                                                        'badge-running': getExecution(selectedRoutine).status === 'running',
+                                                        'badge-failed': getExecution(selectedRoutine).status === 'failed',
+                                                    }" x-text="getExecution(selectedRoutine).status"></span></div>
+                                                    <div>Time slot: <span class="text-slate-400" x-text="getExecution(selectedRoutine).slot"></span></div>
+                                                    <template x-if="getExecution(selectedRoutine).error">
+                                                        <div class="bg-red-900/20 text-red-400 px-2 py-1 rounded mt-1" x-text="getExecution(selectedRoutine).error"></div>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </template>
+
+                                        <!-- Prompt body -->
+                                        <div class="glass-card">
+                                            <h3 class="text-sm font-medium text-slate-400 mb-2">Prompt</h3>
+                                            <pre class="text-xs text-slate-300 whitespace-pre-wrap overflow-x-auto max-h-96 overflow-y-auto" x-text="selectedRoutine.promptBody"></pre>
+                                        </div>
+
+                                        <div class="flex gap-2">
+                                            <button @click="startEdit()" class="flex-1 bg-blue-600/20 text-blue-400 py-2.5 rounded-xl text-sm font-medium">Edit</button>
+                                            <button @click="deleteRoutine(selectedRoutine)" class="bg-red-600/20 text-red-400 py-2.5 px-4 rounded-xl text-sm">Delete</button>
+                                        </div>
+                                    </div>
+                                </template>
+
+                                <template x-if="editing">
+                                    <!-- Edit mode -->
+                                    <div class="space-y-3">
+                                        <div class="glass-card space-y-3">
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Title</label>
+                                                <input x-model="editData.title" class="input-field">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Description</label>
+                                                <input x-model="editData.description" class="input-field">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Model</label>
+                                                <select x-model="editData.model" class="select-field">
+                                                    <template x-for="m in models" :key="m.id">
+                                                        <option :value="m.id" x-text="m.label"></option>
+                                                    </template>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Times (comma separated, e.g. 09:00, 14:00)</label>
+                                                <input x-model="editData.timesStr" class="input-field" placeholder="09:00, 14:00">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Days (* = daily, or mon, tue, wed...)</label>
+                                                <input x-model="editData.daysStr" class="input-field" placeholder="*">
+                                            </div>
+                                            <div>
+                                                <label class="text-xs text-slate-500 mb-1 block">Interval (e.g. 30m, 4h — overrides times)</label>
+                                                <input x-model="editData.schedule.interval" class="input-field" placeholder="Optional">
+                                            </div>
+                                            <div class="flex items-center gap-3">
+                                                <label class="text-xs text-slate-500">Enabled</label>
+                                                <div
+                                                    @click="editData.enabled = !editData.enabled"
+                                                    class="toggle-switch"
+                                                    :class="editData.enabled && 'active'"
+                                                ></div>
+                                            </div>
+                                        </div>
+
+                                        <div class="glass-card">
+                                            <label class="text-xs text-slate-500 mb-1 block">Prompt Body</label>
+                                            <textarea x-model="editData.promptBody" class="prompt-editor" rows="12"></textarea>
+                                        </div>
+
+                                        <div class="flex gap-2">
+                                            <button @click="saveRoutine()" :disabled="saving" class="flex-1 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white py-2.5 rounded-xl text-sm font-medium">
+                                                <span x-show="!saving">Save Changes</span>
+                                                <span x-show="saving">Saving...</span>
+                                            </button>
+                                            <button @click="cancelEdit()" class="bg-slate-700 text-slate-300 py-2.5 px-4 rounded-xl text-sm">Cancel</button>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- SETTINGS -->
+                <template x-if="page === 'settings'">
+                    <div x-data="settingsPage" x-init="load()" class="fade-in">
+                        <template x-if="loading">
+                            <div class="flex justify-center py-12"><div class="spinner"></div></div>
+                        </template>
+
+                        <template x-if="!loading">
+                            <div class="space-y-4">
+                                <!-- Alerts -->
+                                <template x-if="error">
+                                    <div class="bg-red-900/20 text-red-400 text-sm px-3 py-2 rounded-lg" x-text="error"></div>
+                                </template>
+                                <template x-if="success">
+                                    <div class="bg-green-900/20 text-green-400 text-sm px-3 py-2 rounded-lg" x-text="success"></div>
+                                </template>
+
+                                <!-- Bot Controls -->
+                                <div class="glass-card">
+                                    <h3 class="text-sm font-medium text-slate-400 mb-3 uppercase tracking-wide">Bot Controls</h3>
+                                    <div class="flex gap-2">
+                                        <button @click="startBot()" class="flex-1 bg-green-600/20 text-green-400 py-2.5 rounded-xl text-sm font-medium">Start</button>
+                                        <button @click="restartBot()" class="flex-1 bg-yellow-600/20 text-yellow-400 py-2.5 rounded-xl text-sm font-medium">Restart</button>
+                                        <button @click="stopBot()" class="flex-1 bg-red-600/20 text-red-400 py-2.5 rounded-xl text-sm font-medium">Stop</button>
+                                    </div>
+                                </div>
+
+                                <!-- Bot Config -->
+                                <div class="glass-card">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <h3 class="text-sm font-medium text-slate-400 uppercase tracking-wide">Bot Config (.env)</h3>
+                                        <template x-if="!editingBot">
+                                            <button @click="startEditBot()" class="text-xs text-blue-400">Edit</button>
+                                        </template>
+                                    </div>
+
+                                    <template x-if="!editingBot">
+                                        <div class="space-y-2">
+                                            <template x-for="entry in botEnvEntries" :key="entry.key">
+                                                <div class="flex items-center justify-between py-1.5 border-b border-slate-800/50 last:border-0">
+                                                    <div class="text-xs">
+                                                        <div class="text-slate-400" x-text="entry.label || entry.key"></div>
+                                                    </div>
+                                                    <div class="text-xs text-slate-300 font-mono max-w-[50%] truncate text-right" x-text="entry.value || '—'"></div>
+                                                </div>
+                                            </template>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="editingBot">
+                                        <div class="space-y-3">
+                                            <template x-for="entry in botEnvEntries" :key="entry.key">
+                                                <div>
+                                                    <label class="text-xs text-slate-500 mb-1 block" x-text="entry.label || entry.key"></label>
+                                                    <input
+                                                        x-model="botForm[entry.key]"
+                                                        :type="entry.sensitive ? 'password' : 'text'"
+                                                        class="input-field font-mono text-sm"
+                                                        :placeholder="entry.key"
+                                                    >
+                                                </div>
+                                            </template>
+                                            <div class="flex gap-2 pt-2">
+                                                <button @click="saveBotSettings()" :disabled="saving" class="flex-1 bg-blue-600 text-white py-2.5 rounded-xl text-sm font-medium">Save</button>
+                                                <button @click="cancelEdit()" class="bg-slate-700 text-slate-300 py-2.5 px-4 rounded-xl text-sm">Cancel</button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+
+                                <!-- Vault Config -->
+                                <div class="glass-card">
+                                    <div class="flex items-center justify-between mb-3">
+                                        <h3 class="text-sm font-medium text-slate-400 uppercase tracking-wide">Vault Keys (vault/.env)</h3>
+                                        <template x-if="!editingVault">
+                                            <button @click="startEditVault()" class="text-xs text-blue-400">Edit</button>
+                                        </template>
+                                    </div>
+
+                                    <template x-if="!editingVault">
+                                        <div class="space-y-2">
+                                            <template x-for="entry in vaultEnvEntries" :key="entry.key">
+                                                <div class="flex items-center justify-between py-1.5 border-b border-slate-800/50 last:border-0">
+                                                    <div class="text-xs text-slate-400" x-text="entry.key"></div>
+                                                    <div class="text-xs text-slate-300 font-mono max-w-[50%] truncate text-right" x-text="entry.value || '—'"></div>
+                                                </div>
+                                            </template>
+                                            <template x-if="vaultEnvEntries.length === 0">
+                                                <div class="text-xs text-slate-500 py-2">No vault keys configured</div>
+                                            </template>
+                                        </div>
+                                    </template>
+
+                                    <template x-if="editingVault">
+                                        <div class="space-y-3">
+                                            <template x-for="entry in vaultEnvEntries" :key="entry.key">
+                                                <div>
+                                                    <label class="text-xs text-slate-500 mb-1 block" x-text="entry.key"></label>
+                                                    <input
+                                                        x-model="vaultForm[entry.key]"
+                                                        class="input-field font-mono text-sm"
+                                                        :placeholder="entry.key"
+                                                    >
+                                                </div>
+                                            </template>
+                                            <div class="flex gap-2 pt-2">
+                                                <button @click="saveVaultSettings()" :disabled="saving" class="flex-1 bg-blue-600 text-white py-2.5 rounded-xl text-sm font-medium">Save</button>
+                                                <button @click="cancelEdit()" class="bg-slate-700 text-slate-300 py-2.5 px-4 rounded-xl text-sm">Cancel</button>
+                                            </div>
+                                        </div>
+                                    </template>
+                                </div>
+
+                                <!-- Logout -->
+                                <button @click="$dispatch('logout-request')"
+                                    class="w-full py-3 rounded-2xl text-sm font-medium"
+                                    style="background:rgba(255,69,58,0.1);color:#ff453a;border:1px solid rgba(255,69,58,0.2)">
+                                    Logout
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                </template>
+
+            </main>
+
+            <!-- ── Floating pill tab bar (all screen sizes, bottom) ── -->
+            <nav class="tab-bar tab-bar-bottom" style="display:flex">
+                <div class="tab-pill tab-pill-mobile flex">
+                    <button @click="navigate('dashboard')" class="tab-item tab-item-mobile" :class="page === 'dashboard' && 'active'">
+                        <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+                        <span class="tab-label">Home</span>
+                    </button>
+                    <button @click="navigate('agents')" class="tab-item tab-item-mobile" :class="page === 'agents' && 'active'">
+                        <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        <span class="tab-label">Agents</span>
+                    </button>
+                    <button @click="navigate('routines')" class="tab-item tab-item-mobile" :class="page === 'routines' && 'active'">
+                        <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        <span class="tab-label">Routines</span>
+                    </button>
+                    <button @click="navigate('settings')" class="tab-item tab-item-mobile" :class="page === 'settings' && 'active'">
+                        <svg width="22" height="22" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75"><path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+                        <span class="tab-label">Settings</span>
+                    </button>
+                </div>
+            </nav>
+        </div>
+    </template>
+
+    <!-- Scripts (order matters: api first, then pages, then app last) -->
+    <script src="/js/api.js"></script>
+    <script src="/js/pages/login.js"></script>
+    <script src="/js/pages/dashboard.js"></script>
+    <script src="/js/pages/agents.js"></script>
+    <script src="/js/pages/routines.js"></script>
+    <script src="/js/pages/settings.js"></script>
+    <script src="/js/app.js"></script>
+</body>
+</html>

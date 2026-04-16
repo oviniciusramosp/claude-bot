@@ -30,6 +30,7 @@ steps:
     depends_on: [collect]
     prompt_file: steps/analyze.md
     timeout: 600
+    retry: 1
     output: telegram
 
 ```
