@@ -66,3 +66,5 @@ python3 scripts/journal-audit.py
 The report should show "All sessions covered ✓" for every agent. If not, fix remaining gaps.
 
 ## Step 6: Respond NO_REPLY when done.
+
+When finished, respond with exactly the string `NO_REPLY` and nothing else — no summary, no confirmation, no "All sessions covered". Any extra text will be sent to Telegram unnecessarily.
