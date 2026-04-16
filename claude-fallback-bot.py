@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.27.0"  # feat: idle session watchdog — auto compact/clear after inactivity
+BOT_VERSION = "3.27.2"  # fix: STALE_SESSION error kind — clear session_id when thinking block signatures expire
 
 import hmac
 import hashlib
@@ -3689,6 +3689,7 @@ class ErrorKind(Enum):
     AUTH            = "auth"              # sem recovery
     NOT_FOUND       = "not_found"         # sem recovery
     CREDIT          = "credit"            # sem recovery
+    STALE_SESSION   = "stale_session"     # thinking block sig expired — clear session + retry
     UNKNOWN         = "unknown"           # sem recovery
 
 
@@ -3710,6 +3711,7 @@ _RECOVERY_MAP: Dict[ErrorKind, tuple] = {
     ErrorKind.AUTH:              (RecoveryAction.ABORT,                0, 0),
     ErrorKind.NOT_FOUND:         (RecoveryAction.ABORT,                0, 0),
     ErrorKind.CREDIT:            (RecoveryAction.ABORT,                0, 0),
+    ErrorKind.STALE_SESSION:     (RecoveryAction.RETRY,                0, 1),
     ErrorKind.UNKNOWN:           (RecoveryAction.ABORT,                0, 0),
 }
 
@@ -3738,6 +3740,10 @@ def classify_error(raw: str) -> ErrorKind:
         return ErrorKind.CONNECTION
     if "broken pipe" in sl or "killed" in sl or "segmentation fault" in sl:
         return ErrorKind.CLI_CRASH
+    if "no conversation found" in sl:
+        return ErrorKind.CLI_CRASH
+    if "invalid signature in thinking block" in sl:
+        return ErrorKind.STALE_SESSION
     return ErrorKind.UNKNOWN
 
 
@@ -4024,6 +4030,12 @@ class ClaudeRunner:
             if sid:
                 with self._lock:
                     self.captured_session_id = sid
+            # Capture errors from result events with is_error: true
+            if obj.get("is_error") and not self.error_text:
+                errors = obj.get("errors", [])
+                if errors:
+                    self.error_text = "❌ " + "; ".join(str(e) for e in errors)
+                    logger.error("Result error: %s", self.error_text[:300])
 
     def _cleanup(self) -> None:
         self.running = False
@@ -9345,6 +9357,19 @@ class ClaudeTelegramBot:
                 kind = classify_error(raw_error)
                 action, backoff, max_attempts = get_recovery_plan(kind)
 
+                # Session expired: clear stale session_id before retrying
+                if "no conversation found" in raw_error.lower() and session.session_id:
+                    logger.warning("Session %s expired — clearing for fresh retry", session.session_id)
+                    session.session_id = None
+                    self.sessions.save()
+
+                # Thinking block signature expired: clear session_id so retry starts fresh
+                # without the poisoned thinking blocks in the conversation history
+                if kind == ErrorKind.STALE_SESSION and session.session_id:
+                    logger.warning("Session %s has stale thinking block signatures — clearing for fresh retry", session.session_id)
+                    session.session_id = None
+                    self.sessions.save()
+
                 # Phase 1: retry same model
                 if action != RecoveryAction.ABORT and _retry < max_attempts:
                     scaled_backoff = backoff * (_retry + 1)
@@ -9377,13 +9402,22 @@ class ClaudeTelegramBot:
                     current_model = _fallback_model or session.model
                     next_model = get_fallback_model(current_model, kind)
                     if next_model:
-                        logger.info(
-                            "Model fallback: %s failed (%s), trying %s",
+                        logger.warning(
+                            "Model fallback: %s failed (%s), trying %s | "
+                            "exit=%s raw_error=%.300s result=%d chars accum=%d chars "
+                            "stderr=%d chars error_text=%.200s",
                             current_model, kind.value, next_model,
+                            runner.exit_code, raw_error,
+                            len(runner.result_text), len(runner.accumulated_text),
+                            len(runner.stderr_text),
+                            runner.error_text[:200] if runner.error_text else "none",
                         )
+                        excerpt = raw_error[:150].replace('\n', ' ')
+                        if len(raw_error) > 150:
+                            excerpt += "..."
                         self.send_message(
-                            f"⚠️ *Fallback:* `{current_model}` falhou ({kind.value}). "
-                            f"Tentando `{next_model}`..."
+                            f"⚠️ *Fallback:* `{current_model}` → `{next_model}` "
+                            f"(exit {runner.exit_code})\n`{excerpt}`"
                         )
                         self._run_claude_prompt(
                             prompt,
