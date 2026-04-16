@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.26.0"  # feat: instant reasoning toggle + inline Stop button during streaming
+BOT_VERSION = "3.27.0"  # feat: idle session watchdog — auto compact/clear after inactivity
 
 import hmac
 import hashlib
@@ -489,6 +489,8 @@ ACTIVE_MESSAGES_FILE = DATA_DIR / "active-messages.json"
 SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
+IDLE_COMPACT_HOURS = 4       # proactive compact after N hours without a message
+IDLE_CLEAR_HOURS = 12        # clear session (fresh start) after N hours without a message
 SKILL_HINTS_ENABLED = True   # inject top-N skill hints from vault/.graphs/graph.json
 MAX_LOOP_ITERATIONS = 10     # hard cap for pipeline step loop (Ralph technique)
 STREAM_EDIT_INTERVAL = 3.0
@@ -3448,6 +3450,11 @@ class Session:
     # the proactive vault context injection. Default True; users can disable
     # with /active-memory off when they want zero auto-injection.
     active_memory: bool = True
+    # Idle hygiene — tracks last interactive turn completion (epoch seconds).
+    # Used by the idle-session watchdog to proactively compact/clear stale context.
+    # Defaults to creation time so old sessions.json without this field are
+    # treated as "just active" on first load (conservative backcompat).
+    last_activity: float = field(default_factory=time.time)
 
 
 class SessionManager:
@@ -5696,6 +5703,8 @@ class ClaudeTelegramBot:
 
         # Stuck-message watchdog: edits orphaned "Processando…" messages
         self._start_stuck_message_watchdog()
+        # Idle session watchdog: proactively compact/clear stale session context
+        self._start_idle_session_watchdog()
 
         self._start_time = time.time()
         self._start_control_server()
@@ -6325,6 +6334,93 @@ class ClaudeTelegramBot:
                     logger.error("Stuck message watchdog error: %s", exc)
         threading.Thread(target=_loop, daemon=True, name="stuck-msg-watchdog").start()
 
+    # -- Idle session hygiene --
+
+    def _find_context_for_session(self, session_name: str) -> Optional["ThreadContext"]:
+        """Return the ThreadContext whose session_name matches, or None if not found."""
+        with self._contexts_lock:
+            for ctx in self._contexts.values():
+                if ctx.session_name == session_name:
+                    return ctx
+        return None
+
+    def _send_idle_notification(self, ctx: Optional["ThreadContext"], text: str) -> None:
+        """Send a silent Telegram notification for an idle action using the given context."""
+        if not ctx:
+            return  # orphan session — bot restarted before user sent a message
+        saved_ctx = getattr(self, "_ctx", None)
+        self._ctx = ctx
+        try:
+            self.send_message(text, disable_notification=True)
+        finally:
+            self._ctx = saved_ctx
+
+    def _check_idle_sessions(self) -> None:
+        """Check all sessions for inactivity and compact or clear them proactively.
+
+        Tier 1 (IDLE_COMPACT_HOURS): proactive /compact while context is still coherent.
+        Tier 2 (IDLE_CLEAR_HOURS):   clear session_id for a clean fresh start.
+        Tier 2 is checked first so a very-long-idle session is cleared, not compacted.
+        """
+        now = time.time()
+        for name, session in list(self.sessions.sessions.items()):
+            # Skip sessions with no Claude context to manage
+            if not session.session_id or session.message_count == 0:
+                continue
+            # Skip sessions where Claude is currently running
+            ctx = self._find_context_for_session(name)
+            if ctx and ctx.runner and ctx.runner.running:
+                continue
+
+            idle_hours = (now - session.last_activity) / 3600
+
+            if idle_hours >= IDLE_CLEAR_HOURS:
+                logger.info(
+                    "Idle clear: session %s idle for %.1fh (threshold=%dh)",
+                    name, idle_hours, IDLE_CLEAR_HOURS,
+                )
+                try:
+                    self._snapshot_session_to_journal(session)
+                except Exception as exc:
+                    logger.error("Idle clear snapshot failed for %s: %s", name, exc)
+                session.session_id = None
+                session.message_count = 0
+                session.last_activity = now
+                self.sessions.save()
+                self._send_idle_notification(
+                    ctx,
+                    f"🧹 _Sessão `{name}` limpa automaticamente (inativa {idle_hours:.0f}h). "
+                    f"Próxima mensagem inicia contexto novo._",
+                )
+
+            elif idle_hours >= IDLE_COMPACT_HOURS:
+                logger.info(
+                    "Idle compact: session %s idle for %.1fh (threshold=%dh)",
+                    name, idle_hours, IDLE_COMPACT_HOURS,
+                )
+                # Reset idle clock before launching the background compact so the
+                # next 10-minute check won't re-trigger while the compact is still running.
+                session.last_activity = now
+                self.sessions.save()
+                self._auto_compact(session)
+                self._send_idle_notification(
+                    ctx,
+                    f"🔄 _Auto-compact (sessão `{name}` inativa {idle_hours:.0f}h)_",
+                )
+
+    def _start_idle_session_watchdog(self) -> None:
+        """Start a background thread that checks for idle sessions every 10 minutes."""
+        def _loop() -> None:
+            while not self._stop_event.is_set():
+                self._stop_event.wait(600)
+                if self._stop_event.is_set():
+                    break
+                try:
+                    self._check_idle_sessions()
+                except Exception as exc:
+                    logger.error("Idle session watchdog error: %s", exc)
+        threading.Thread(target=_loop, daemon=True, name="idle-session-watchdog").start()
+
     # -- Telegram helpers --
 
     def tg_request(self, method: str, data: Optional[Dict] = None,
@@ -6891,6 +6987,9 @@ class ClaudeTelegramBot:
             lines.append(f"• Turns totais: {s.total_turns}")
             lines.append(f"• Session ID: `{s.session_id or 'nenhum'}`")
             lines.append(f"• Workspace: `{s.workspace}`")
+            idle_secs = time.time() - s.last_activity
+            idle_display = f"{idle_secs / 3600:.1f}h" if idle_secs >= 3600 else f"{idle_secs / 60:.0f}m"
+            lines.append(f"• Idle: {idle_display} (compact >{IDLE_COMPACT_HOURS}h, clear >{IDLE_CLEAR_HOURS}h)")
         else:
             lines.append("• Nenhuma sessão ativa")
         lines.append(f"• Inactivity timeout: {self.timeout_seconds}s")
@@ -7047,7 +7146,8 @@ class ClaudeTelegramBot:
         # Inherit model from current session (respects agent frontmatter or manual /model switch)
         if current:
             s.model = current.model
-            self.sessions.save()
+        s.last_activity = time.time()
+        self.sessions.save()
         agent_label = s.agent if s.agent != "main" else ""
         model_label = f" · modelo: `{s.model}`" if s.model else ""
         agent_suffix = f" · agente: *{agent_label}*" if agent_label else ""
@@ -7154,6 +7254,7 @@ class ClaudeTelegramBot:
         s = self._get_session()
         if s:
             s.session_id = None
+            s.last_activity = time.time()
             self.sessions.save()
             self.send_message(f"🔄 Sessão `{s.name}` resetada (session\\_id removido).")
         else:
@@ -7190,7 +7291,8 @@ class ClaudeTelegramBot:
             )
             if runner.captured_session_id:
                 session.session_id = runner.captured_session_id
-                self.sessions.save()
+            session.last_activity = time.time()
+            self.sessions.save()
             # 3. Refresh agent hot cache for cross-session continuity
             if session.agent:
                 self._update_agent_hot_cache(session)
@@ -7516,7 +7618,9 @@ class ClaudeTelegramBot:
                 )
                 if runner.captured_session_id:
                     session.session_id = runner.captured_session_id
-                    self.sessions.save()
+                # Reset idle clock after compact so the watchdog doesn't re-trigger
+                session.last_activity = time.time()
+                self.sessions.save()
                 logger.info("Auto-compact completed for session %s", session.name)
                 # 3. Refresh agent hot cache for cross-session continuity
                 if session.agent:
@@ -9479,6 +9583,8 @@ class ClaudeTelegramBot:
 
         # Auto session management (interactive sessions only)
         if not routine_mode and session.session_id and runner.exit_code in (None, 0):
+            # Refresh idle clock on every successful interactive turn
+            session.last_activity = time.time()
             if session.message_count >= AUTO_ROTATE_THRESHOLD:
                 logger.info("Auto-rotate: session %s reached %d turns, starting fresh",
                             session.name, session.message_count)
