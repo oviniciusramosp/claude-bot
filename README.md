@@ -26,14 +26,17 @@ Phone (Telegram) --> claude-fallback-bot.py --> Claude Code CLI (subprocess)
 - **Model switching** -- switch between Sonnet, Opus, and Haiku mid-conversation
 - **Per-agent vault** (v3.1) -- Obsidian-compatible vault where every agent owns its own Skills, Routines, Journal, Reactions, Lessons, and Notes under `<agent>/` (flat layout at vault root). Isolamento total — no inheritance across agents.
 - **Knowledge graph** -- lightweight deterministic graph (`vault/.graphs/graph.json`) rebuilt daily; powers skill hints and Active Memory fallback
-- **Full-text vault index** (v3.18+) -- stdlib SQLite + FTS5 index over every agent's journals, lessons, notes, and weekly rollups at `~/.claude-bot/vault-index.sqlite`. Zero new dependencies, built nightly by the `vault-index-update` routine, kept fresh by write-through from every journal writer. Per-agent isolation is baked into the query helper so cross-agent leakage is impossible.
+- **Full-text vault index** (v3.27+) -- stdlib SQLite + FTS5 index over every agent's journals, lessons, notes, and weekly rollups at `~/.claude-bot/vault-index.sqlite`. Zero new dependencies, rebuilt inside the nightly `vault-nightly` routine and kept fresh by a **read-time lazy refresh** (~2–5 ms per FTS query — detects file changes on every read, so Obsidian edits appear immediately). Per-agent isolation is baked into the query helper so cross-agent leakage is impossible.
 - **Active Memory v2** -- before every interactive message, the bot searches the FTS index for matches to your prompt and injects a compact `## Active Memory` block with short excerpts (falls back to the graph scoring if the index isn't built yet). Deterministic, ~50ms, no LLM cost.
-- **SessionStart auto-recall** (v3.18+) -- on the very first turn of a new session, the bot FTS-searches prior journals, weekly rollups, and lessons for the current agent and injects a `## Recent Context` block so you pick up where the last conversation left off — no `/find` required.
+- **SessionStart auto-recall** (v3.27+) -- on the very first turn of a new session, the bot FTS-searches prior journals, weekly rollups, and lessons for the current agent and injects a `## Recent Context` block so you pick up where the last conversation left off — no `/find` required.
 - **Compound engineering (Lessons)** -- `/lesson` captures hard-won knowledge so Claude scans past failures before similar tasks
-- **Scheduled routines & pipelines** -- cron-like system that runs prompts on a schedule, with multi-step pipelines and Ralph loops
+- **Scheduled routines & pipelines** -- cron-like system that runs prompts on a schedule, with multi-step pipelines and NO_REPLY cascade early-exit
+- **Execution reports** (v3.24+) -- every routine/pipeline run appends a structured result entry to the agent's daily journal (step-level breakdown, savings summary); failure nudges name the specific failing step
+- **Idle session watchdog** (v3.27+) -- sessions auto-compact after 4 h of inactivity and auto-clear their `session_id` after 12 h, keeping context lean without manual intervention
 - **Isolated sub-agents** -- `/delegate` spawns a fresh Claude with its own context and 10-minute hard limit, result is injected back into the parent session
 - **Image analysis** -- send photos from Telegram for Claude to analyze
 - **Voice input & output** -- send voice messages (transcribed via macOS speech recognition), add `#voice` to any message or `/voice on` to get audio responses for the whole session
+- **Inline controls during streaming** (v3.26+) -- a 🛑 Stop button appears while Claude is running; reasoning mode can be toggled instantly without interrupting the session
 - **Vault hygiene commands** -- `/lint`, `/find`, `/indexes` to audit and query the vault from Telegram
 - **Auto session management** -- auto-compact every 25 turns, auto-rotate sessions at 80 turns
 - **macOS native app** -- SwiftUI manager app with dashboard, agent/routine/skill management, logs, and settings
@@ -294,11 +297,13 @@ vault/
 - Journal is append-only -- sessions auto-consolidate on `/new`, `/switch`, or `/important`
 - Notes use `[[wikilinks]]` to form a navigable knowledge graph
 - Open the vault in Obsidian to explore connections via Graph View
-- A daily routine (`vault-graph-update`) rebuilds a lightweight deterministic graph at `vault/.graphs/graph.json` from frontmatter and wikilinks — no LLM cost
-- A second daily routine (`vault-index-update`, 04:05) rebuilds a SQLite FTS5 full-text index at `~/.claude-bot/vault-index.sqlite` so Active Memory v2 and SessionStart auto-recall can query journal bodies by keyword in <10ms
+- A daily routine (`vault-nightly`, 04:00) rebuilds the lightweight deterministic graph at `vault/.graphs/graph.json`, the SQLite FTS5 index at `~/.claude-bot/vault-index.sqlite`, and triggers the weekly rollup — a single consolidated job, no LLM cost
+- The FTS index is also kept fresh by a **read-time lazy refresh**: each FTS query checks file mtimes (~2–5 ms overhead) so changes made in Obsidian appear on the next bot turn, not the next day
+- A companion routine (`vault-health`) audits the vault for broken wikilinks and auto-corrects common patterns before reporting — replaces the former `vault-lint`
 - A weekly routine (`journal-weekly-rollup`, Mondays 05:00) produces `<agent>/Journal/weekly/YYYY-Www.md` summaries for every agent automatically — new agents are covered without any config change
-- **Active Memory v2** (v3.18+): before every interactive message, the bot runs an FTS search for matches to your prompt and injects a compact `## Active Memory` block with short excerpts. Falls back to the graph-based scoring if the index hasn't been built yet. Zero LLM cost, ~50ms, fail-open. Toggle per session with `/active-memory on|off|status`.
-- **SessionStart auto-recall** (v3.18+): on the first turn of a fresh session (`message_count == 0` and no resumed `session_id`), the bot FTS-searches journals, weekly rollups, and lessons for the current agent and prepends a `## Recent Context` block to the prompt — scoped strictly to `session.agent`, respects the per-session `/active-memory off` toggle.
+- Every routine and pipeline execution appends a structured report to the agent's daily journal — step-level pass/fail, savings summary, and a failure nudge naming the specific step that failed
+- **Active Memory v2** (v3.27+): before every interactive message, the bot runs an FTS search for matches to your prompt and injects a compact `## Active Memory` block with short excerpts. Falls back to the graph-based scoring if the index hasn't been built yet. Zero LLM cost, ~50ms, fail-open. Toggle per session with `/active-memory on|off|status`.
+- **SessionStart auto-recall** (v3.27+): on the first turn of a fresh session (`message_count == 0` and no resumed `session_id`), the bot FTS-searches journals, weekly rollups, and lessons for the current agent and prepends a `## Recent Context` block to the prompt — scoped strictly to `session.agent`, respects the per-session `/active-memory off` toggle.
 - **Future-proof across agents**: the daily rebuild discovers agents via `iter_agent_ids()` (contract C1), every query helper builds `WHERE agent = ?` internally (contract C3), and new agents get an eager bootstrap immediately after `/agent new` (contract C6) so auto-recall works from turn 1 — no edits required to any routine or config when you add an agent.
 
 ### Private journal content (`<private>...</private>`)
@@ -382,13 +387,19 @@ enabled: true
 ---
 ```
 
-Steps are separate `.md` files in a `Steps/` subdirectory. The `notify` field controls Telegram notifications: `final` (default), `all`, `summary`, or `none`.
+Steps are separate `.md` files in a `Steps/` subdirectory. The `notify` field controls Telegram notifications: `final` (default), `all`, `summary` (savings-style digest), or `none`.
+
+### NO_REPLY cascade (pipeline early-exit)
+
+A step can return `NO_REPLY` to signal "nothing to do". When that happens, any downstream step that depends on it is automatically skipped — the pipeline short-circuits instead of wasting context on follow-up work.
+
+Per-step opt-in: set `skip_on_no_reply: true` in a step's frontmatter (or toggle it in the ClaudeBotManager → Routine form) to gate that step on upstream output.
 
 ### Common features
 
 - The scheduler checks every 60 seconds
 - Routines and pipelines run without blocking user messages
-- Every execution is logged to the Journal
+- Every execution appends a structured report to the agent's daily Journal (step-level result, savings summary, failure nudge)
 - Use `/routine` in Telegram to create routines interactively, or `/run <name>` to trigger manually
 - Optional fields: `agent`, `context` (`full`/`minimal`), `voice` (TTS response), `schedule.until` (expiry date)
 
@@ -528,11 +539,10 @@ claude-bot/
 |-- ClaudeBotManager/                 macOS native manager app (SwiftUI)
 |-- scripts/
 |   |-- vault_index.py                SQLite FTS5 library (stdlib)
-|   |-- vault-index-update.py         Daily rebuild CLI (04:05 routine)
 |   |-- journal-weekly-rollup.py      Weekly per-agent summary driver (Mondays 05:00)
 |   |-- vault-graph-builder.py        Lightweight graph builder
 |   |-- vault_query.py                Frontmatter query engine
-|   |-- vault_lint.py                 Vault hygiene linter
+|   |-- vault_lint.py                 Vault hygiene linter (used by vault-health routine)
 |   '-- ...
 |-- mcp-server/                       Optional MCP sidecar (vault_search_text, vault_timeline, vault_get_excerpt, etc.)
 |-- tests/                            Python test suite (~610 tests, pure stdlib)
