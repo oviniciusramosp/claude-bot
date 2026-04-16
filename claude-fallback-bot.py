@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.27.2"  # fix: STALE_SESSION error kind — clear session_id when thinking block signatures expire
+BOT_VERSION = "3.28.1"  # fix: tool hint shows last 2 path components instead of truncating at 60 chars
 
 import hmac
 import hashlib
@@ -4010,7 +4010,12 @@ class ClaudeRunner:
                         for key in ("command", "path", "file_path", "query", "url", "pattern"):
                             val = inp.get(key)
                             if val and isinstance(val, str):
-                                hint = val[:60]
+                                if key in ("path", "file_path") and "/" in val:
+                                    # Show only last 2 path components to avoid long prefix noise
+                                    parts = val.rstrip("/").split("/")
+                                    hint = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+                                else:
+                                    hint = val[:60] + ("…" if len(val) > 60 else "")
                                 break
                     entry = f"🔧 {tool_name}" + (f": `{hint}`" if hint else "")
                     with self._lock:
@@ -7148,10 +7153,16 @@ class ClaudeTelegramBot:
         self.send_message(f"🔊 Resposta por voz: {status}\nEngine: `{engine}` | Voz: `{voice}`")
 
     def cmd_new(self, name: Optional[str]) -> None:
-        # Consolidate current session before creating a new one
-        self._consolidate_session()
         current = self._get_session()
         agent = current.agent if current else None
+
+        # Consolidate the outgoing session in the background so the user
+        # doesn't have to wait — the Journal entry is written asynchronously.
+        if self.runner.running:
+            logger.info("Skipping consolidation — Claude is busy")
+        else:
+            self._consolidate_session_background(current)
+
         if not name:
             name = _make_session_name(agent, self.sessions.sessions)
         s = self.sessions.create(name, agent=agent)
@@ -8027,6 +8038,66 @@ class ClaudeTelegramBot:
             "Append-only — nao sobrescreva conteudo existente. Depois confirme brevemente."
         )
         self._run_claude_prompt(prompt)
+
+    def _consolidate_session_background(self, session: "Session") -> None:
+        """Fire-and-forget consolidation of *session* into its agent's Journal.
+
+        Uses a fresh ClaudeRunner so the caller (cmd_new) can proceed without
+        waiting. No Telegram message is sent on success; on failure an error is
+        logged and the user receives a brief warning.
+        """
+        if not session or not session.session_id or session.message_count == 0:
+            return
+
+        old_session_id = session.session_id
+        old_model      = session.model
+        old_workspace  = session.workspace
+        old_agent      = session.agent
+
+        today = time.strftime("%Y-%m-%d")
+        journal_dir  = get_agent_journal_dir(old_agent)
+        journal_path = str(journal_dir / f"{today}.md")
+
+        prompt = (
+            f"Consolide esta sessao no Journal. Appende um resumo da conversa em "
+            f"{journal_path} com os topicos discutidos, decisoes e acoes. "
+            "Use o formato padrao do Journal com frontmatter YAML. "
+            "Append-only — nao sobrescreva conteudo existente."
+        )
+
+        def _worker() -> None:
+            try:
+                bg_runner = ClaudeRunner()
+                bg_runner.run(
+                    prompt=prompt,
+                    model=old_model,
+                    session_id=old_session_id,
+                    workspace=old_workspace,
+                    system_prompt=SYSTEM_PROMPT,
+                    agent_id=old_agent or MAIN_AGENT_ID,
+                )
+                if bg_runner.exit_code != 0 or bg_runner.error_text:
+                    logger.error(
+                        "Background consolidation failed (exit=%s): %s",
+                        bg_runner.exit_code,
+                        bg_runner.error_text or bg_runner.result_text[:200],
+                    )
+                    self.send_message(
+                        "⚠️ Falha ao salvar sessão anterior no Journal (segundo plano). "
+                        "Veja o log para detalhes."
+                    )
+                else:
+                    logger.info(
+                        "Background consolidation complete for session %s",
+                        old_session_id[:8],
+                    )
+            except Exception as exc:
+                logger.error("Background consolidation error: %s", exc)
+                self.send_message(
+                    f"⚠️ Erro ao consolidar sessão anterior no Journal: `{str(exc)[:150]}`"
+                )
+
+        threading.Thread(target=_worker, daemon=True, name="consolidate-bg").start()
 
     def cmd_routine(self, arg: str) -> None:
         arg = arg.strip()
