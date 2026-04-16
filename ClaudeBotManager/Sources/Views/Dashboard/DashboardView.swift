@@ -546,13 +546,11 @@ struct TodayRoutinesCard: View {
                                 iconColor: Color(red: 0.447, green: 0.447, blue: 0.447),
                                 symbol: "clock"
                             )
-                            if runningCount > 0 {
-                                RoutineStatCard(
-                                    label: "Running", count: runningCount,
-                                    iconColor: Color(red: 0.25, green: 0.56, blue: 0.98),
-                                    symbol: "arrow.trianglehead.2.clockwise"
-                                )
-                            }
+                            RoutineStatCard(
+                                label: "Running", count: runningCount,
+                                iconColor: Color(red: 0.25, green: 0.56, blue: 0.98),
+                                symbol: "arrow.trianglehead.2.clockwise"
+                            )
                             RoutineStatCard(
                                 label: "Done", count: completedCount,
                                 iconColor: Color(red: 0.204, green: 0.780, blue: 0.349),
