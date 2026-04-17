@@ -37,6 +37,7 @@ STDOUT_LOG="${LOG_DIR}/launchd-stdout.log"
 STDERR_LOG="${LOG_DIR}/launchd-stderr.log"
 WEB_STDOUT_LOG="${LOG_DIR}/web-stdout.log"
 WEB_STDERR_LOG="${LOG_DIR}/web-stderr.log"
+WEB_PORT=27184
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -71,10 +72,26 @@ _install_web() {
     if is_web_loaded; then
         launchctl unload "$PLIST_WEB_DST" 2>/dev/null || true
     fi
+    # Kill any orphan claude-bot-web.py process still bound to WEB_PORT —
+    # launchd can lose track of its managed process (PID shows as `-` in
+    # `launchctl list`) while the process itself is still alive and holding
+    # the port. Without this, `launchctl load` below silently fails because
+    # the new instance hits EADDRINUSE and the user only discovers it by
+    # reading web-stderr.log.
+    WEB_ORPHAN_PIDS=$(lsof -ti ":${WEB_PORT}" 2>/dev/null || true)
+    if [[ -n "$WEB_ORPHAN_PIDS" ]]; then
+        for pid in $WEB_ORPHAN_PIDS; do
+            if ps -p "$pid" -o command= 2>/dev/null | grep -q "claude-bot-web.py"; then
+                echo -e "  web dashboard: ${YELLOW}killing orphan PID $pid on port ${WEB_PORT}${NC}"
+                kill "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 1
+    fi
     sed -e "s|__HOME__|${HOME}|g" -e "s|__SCRIPT_DIR__|${SCRIPT_DIR}|g" "$PLIST_WEB_SRC" > "$PLIST_WEB_DST"
     launchctl load "$PLIST_WEB_DST"
     if is_web_loaded; then
-        echo -e "  web dashboard: ${GREEN}started${NC} (http://localhost:27184)"
+        echo -e "  web dashboard: ${GREEN}started${NC} (http://localhost:${WEB_PORT})"
     else
         echo -e "  web dashboard: ${RED}failed to start — check ${WEB_STDERR_LOG}${NC}"
     fi
