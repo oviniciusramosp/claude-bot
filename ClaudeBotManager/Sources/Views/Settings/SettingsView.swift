@@ -383,6 +383,19 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
         }
 
+        // Signature
+        SectionCard(title: "Signature", symbol: "pencil.and.outline") {
+            SettingRow("Show Signature") {
+                Toggle("", isOn: $config.showSignature)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+            }
+            Text("Append agent name and model ID to every response (e.g. _Main · claude-sonnet-4-6_)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, Spacing.xs)
+        }
+
         // Model Fallback
         SectionCard(title: "Model Fallback", symbol: "arrow.triangle.branch") {
             Text("When a model fails after retries, the bot tries the next one in this chain. GLM models require a z.AI API key.")

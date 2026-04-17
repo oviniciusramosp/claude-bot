@@ -9,6 +9,7 @@ struct BotConfig: Sendable {
     var zaiApiKey: String
     var zaiBaseUrl: String
     var modelFallbackChain: String  // comma-separated model IDs
+    var showSignature: Bool
 
     static var defaults: BotConfig {
         BotConfig(
@@ -19,7 +20,8 @@ struct BotConfig: Sendable {
             ttsEngine: "edge-tts",
             zaiApiKey: "",
             zaiBaseUrl: "https://api.z.ai/api/anthropic",
-            modelFallbackChain: "opus,glm-5.1,sonnet,glm-4.7,haiku"
+            modelFallbackChain: "opus,glm-5.1,sonnet,glm-4.7,haiku",
+            showSignature: true
         )
     }
 }

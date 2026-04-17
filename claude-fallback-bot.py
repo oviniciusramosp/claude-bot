@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.30.1"  # fix: idle compact fires only once per idle period (idle_compact_done flag)
+BOT_VERSION = "3.35.0"  # feat: agent+model signature at end of each response (/signature toggle)
 
 import hmac
 import hashlib
@@ -75,6 +75,8 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("ZAI_BASE_URL", _v)
             elif _k == "MODEL_FALLBACK_CHAIN":
                 os.environ.setdefault("MODEL_FALLBACK_CHAIN", _v)
+            elif _k == "SHOW_SIGNATURE":
+                os.environ.setdefault("SHOW_SIGNATURE", _v)
 # Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
 MODEL_FALLBACK_CHAIN = [
     m.strip() for m in
@@ -121,6 +123,7 @@ LOG_FILE = DATA_DIR / "bot.log"
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
+TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
 
 # ---------------------------------------------------------------------------
 # Per-agent path resolution (v3.1 layout)
@@ -341,6 +344,16 @@ MODEL_PROVIDERS = {
     "glm-4.7": "zai",
     "glm-4.5-air": "zai",
 }
+
+# Short alias → full API model ID, used in the response signature.
+MODEL_FULL_IDS: dict = {
+    "sonnet":      "claude-sonnet-4-6",
+    "opus":        "claude-opus-4-7",
+    "haiku":       "claude-haiku-4-5",
+    "glm-5.1":     "glm-5.1",
+    "glm-4.7":     "glm-4.7",
+    "glm-4.5-air": "glm-4.5-air",
+}
 DEFAULT_MODEL = "sonnet"
 
 # Model fallback chain — when a model fails after retries, try the next model.
@@ -351,6 +364,37 @@ MODEL_FALLBACK_CHAIN: List[str] = [
     os.environ.get("MODEL_FALLBACK_CHAIN", "opus,glm-5.1,sonnet,glm-4.7,haiku").split(",")
     if m.strip()
 ]
+
+SHOW_SIGNATURE: bool = os.environ.get("SHOW_SIGNATURE", "true").lower() not in ("false", "0", "off")
+
+
+def _save_env_key(key: str, value: str) -> None:
+    """Update or add KEY=value in the bot's .env file in-place."""
+    lines: List[str] = []
+    found = False
+    if _env_file.is_file():
+        for line in _env_file.read_text().splitlines():
+            if line.strip().startswith(f"{key}="):
+                lines.append(f"{key}={value}")
+                found = True
+            else:
+                lines.append(line)
+    if not found:
+        lines.append(f"{key}={value}")
+    _env_file.write_text("\n".join(lines) + "\n")
+
+
+def _agent_display_name(agent_id: str) -> str:
+    """Convert agent slug to title-cased display name: 'crypto-bro' → 'Crypto Bro'."""
+    return " ".join(w.capitalize() for w in agent_id.replace("-", " ").split())
+
+
+def _build_signature(session) -> str:
+    """Build italic response signature: '\\n\\n_Agent Name · model-id_'."""
+    agent_label = _agent_display_name(session.agent or MAIN_AGENT_ID)
+    model_id = MODEL_FULL_IDS.get(session.model, session.model)
+    return f"\n\n_{agent_label} · {model_id}_"
+
 
 def model_provider(model: str) -> str:
     """Returns 'zai' for GLM models, 'anthropic' otherwise. Prefix fallback
@@ -487,7 +531,7 @@ PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 ACTIVE_MESSAGES_FILE = DATA_DIR / "active-messages.json"
 SESSION_MAX_AGE_DAYS = 60
-AUTO_COMPACT_INTERVAL = 25   # auto-compact every N turns in a session
+AUTO_COMPACT_INTERVAL = 20   # auto-compact every N turns in a session (reduced from 25 — Opus 4.7 tokenizer uses ~35% more tokens)
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
 IDLE_COMPACT_HOURS = 4       # proactive compact after N hours without a message
 IDLE_CLEAR_HOURS = 12        # clear session (fresh start) after N hours without a message
@@ -738,17 +782,19 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/status` — Info da sessão e processo
 • `/timeout <seg>` — Alterar timeout (padrão 600s)
 • `/workspace <path>` — Alterar diretório de trabalho
-• `/effort <low|medium|high>` — Nível de esforço de raciocínio
+• `/effort <low|medium|high|max>` — Nível de esforço de raciocínio
 • `/btw <msg>` — Injetar mensagem ao Claude em execução (nativo)
 
 📓 *Journal & Memory*
 • `/important`, `/save` — Registrar pontos importantes da sessão no diário
 • `/lesson <texto>` — Registrar lição manual no agente atual (`<agente>/Lessons/`)
 • `/active-memory [on|off|status]` — Injeção proativa de contexto do vault (padrão: on)
+• `/signature [on|off]` — Exibir assinatura de agente e modelo ao final de cada resposta
 
 🔁 *Rotinas*
 • `/routine` — Gerenciar rotinas (listar, criar, editar)
 • `/routine delete <nome>` — Deletar rotina/pipeline (move arquivos para Lixeira)
+• `/review` — Inspecionar rotina/pipeline (etapas, modelo, agendamento)
 • `/run [nome]` — Executar rotina/pipeline manualmente
 • `/dry-run <pipeline> [step,...]` — Simular pipeline com steps retornando NO_REPLY (previsão de skip/economia, sem rodar Claude)
 
@@ -776,6 +822,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 ROUTINES_STATE_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+TEMP_FILES_DIR.mkdir(parents=True, exist_ok=True)
 TEMP_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 HEAR_BIN_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -2003,7 +2050,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             output_type=out_type,
             output_file=s.get("output_file") or None,
             engine=str(s.get("engine", "claude")),
-            effort=_step_effort if _step_effort in ("low", "medium", "high") else None,
+            effort=_step_effort if _step_effort in ("low", "medium", "high", "max") else None,
             loop_until=loop_until,
             loop_max_iterations=loop_max,
             loop_on_no_progress=loop_np,
@@ -2058,7 +2105,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         notify=str(fm.get("notify", "final")),
         minimal_context=bool(fm.get("context") == "minimal"),
         voice=bool(fm.get("voice", False)),
-        effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+        effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
     )
 
 
@@ -2302,7 +2349,7 @@ class RoutineScheduler:
                             agent=owning_agent,
                             minimal_context=bool(fm.get("context") == "minimal"),
                             voice=bool(fm.get("voice", False)),
-                            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                            effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
                         )
                         self._enqueue(task)
                 else:
@@ -2315,6 +2362,9 @@ class RoutineScheduler:
                             ["Campo `schedule.times` deve ser uma lista não-vazia (ou use `schedule.interval`)"],
                             agent_id=owning_agent,
                         )
+                        continue
+                    # Manual-only routines: skip silently (run on demand via /run or API)
+                    if schedule["times"] == ["manual"]:
                         continue
                     # Check day filter
                     days = schedule.get("days", ["*"])
@@ -2347,7 +2397,7 @@ class RoutineScheduler:
                                     agent=owning_agent,
                                     minimal_context=bool(fm.get("context") == "minimal"),
                                     voice=bool(fm.get("voice", False)),
-                                    effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                                    effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
                                 )
                                 self._enqueue(task)
             except Exception as exc:
@@ -5768,6 +5818,12 @@ class ClaudeTelegramBot:
         #     content_path: str, message_id: Optional[int], dep_step_id: str,
         #     chat_id, thread_id, awaiting_feedback: bool, ts: float}}
         self._pending_manual_reviews: Dict[str, dict] = {}
+        # Media group (album) buffering: collect multiple photos/files sent together
+        self._media_group_buffer: Dict[str, List[Dict]] = {}
+        self._media_group_timers: Dict[str, threading.Timer] = {}
+        self._media_group_ctx: Dict[str, tuple] = {}  # group_id → (chat_id, thread_id)
+        self._media_group_lock = threading.Lock()
+
         self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
         self._reasoning_toggles: Dict[int, bool] = {}  # stream_msg_id → show reasoning
         # Tracks mtime of today's journal at session start, per session name.
@@ -6279,7 +6335,7 @@ class ClaudeTelegramBot:
             agent=owning_agent,
             minimal_context=bool(fm.get("context") == "minimal"),
             voice=bool(fm.get("voice", False)),
-            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+            effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
         )
 
         self._send_to_all(f"🔄 Retomando rotina *{name}*\\.\\.\\.")
@@ -7184,6 +7240,20 @@ class ClaudeTelegramBot:
         status = "✅ ativado" if ctx.tts_enabled else "❌ desativado"
         self.send_message(f"🔊 Resposta por voz: {status}\nEngine: `{engine}` | Voz: `{voice}`")
 
+    def cmd_signature(self, arg: str = "") -> None:
+        """Toggle the agent·model signature appended to every response."""
+        global SHOW_SIGNATURE
+        arg_norm = arg.lower().strip()
+        if arg_norm in ("on", "1", "sim"):
+            SHOW_SIGNATURE = True
+        elif arg_norm in ("off", "0", "nao", "não"):
+            SHOW_SIGNATURE = False
+        else:
+            SHOW_SIGNATURE = not SHOW_SIGNATURE
+        _save_env_key("SHOW_SIGNATURE", "true" if SHOW_SIGNATURE else "false")
+        state = "✅ ativada" if SHOW_SIGNATURE else "❌ desativada"
+        self.send_message(f"✍️ Assinatura {state}")
+
     def cmd_new(self, name: Optional[str]) -> None:
         current = self._get_session()
         agent = current.agent if current else None
@@ -7924,11 +7994,11 @@ class ClaudeTelegramBot:
 
     def cmd_effort(self, val: str) -> None:
         val = val.lower().strip()
-        if val in ("low", "medium", "high"):
+        if val in ("low", "medium", "high", "max"):
             self.effort = val
             self.send_message(f"✅ Effort: `{val}`")
         else:
-            self.send_message("❌ Valores aceitos: `low`, `medium`, `high`")
+            self.send_message("❌ Valores aceitos: `low`, `medium`, `high`, `max`")
 
     def cmd_btw(self, text: str) -> None:
         ctx = self._ctx
@@ -7970,6 +8040,7 @@ class ClaudeTelegramBot:
                         "workspace": session.workspace,
                         "system_prompt": None,     # minimal — no vault system prompt
                         "agent_id": session.agent or MAIN_AGENT_ID,
+                        "max_budget": 2.00,        # cap spend per delegate call
                     },
                     daemon=True,
                 )
@@ -8548,7 +8619,7 @@ class ClaudeTelegramBot:
                 agent=owning_agent,
                 minimal_context=bool(fm.get("context") == "minimal"),
                 voice=bool(fm.get("voice", False)),
-                effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
             )
             self._enqueue_routine(task)
             self.send_message(f"🚀 Rotina `{name}` disparada manualmente.")
@@ -8592,6 +8663,133 @@ class ClaudeTelegramBot:
 
         markup = {"inline_keyboard": buttons}
         self.send_message(f"🚀 *Executar rotina/pipeline manualmente ({current_agent}):*", reply_markup=markup)
+
+    # -- Review command --
+
+    def cmd_review(self) -> None:
+        """Show inline keyboard to pick a routine/pipeline for inspection."""
+        session = self._get_session()
+        current_agent = (session.agent if session else None) or MAIN_AGENT_ID
+        rdir = routines_dir(current_agent)
+        if not rdir.is_dir():
+            self.send_message(f"❌ Nenhuma rotina disponível para `{current_agent}`.")
+            return
+        routine_files = sorted(
+            f for f in rdir.glob("*.md")
+            if f.name not in SUB_INDEX_FILENAMES_SET
+        )
+        buttons = []
+        for md_file in routine_files:
+            fm, body = get_frontmatter_and_body(md_file)
+            if not fm or not body:
+                continue
+            if str(fm.get("type", "")).lower() == "index":
+                continue
+            title = fm.get("title", md_file.stem)
+            rtype = str(fm.get("type", "routine"))
+            icon = "🔗" if rtype == "pipeline" else "🔁"
+            buttons.append([{"text": f"{icon} {title}", "callback_data": f"review:{md_file.stem}"}])
+
+        if not buttons:
+            self.send_message(f"❌ Nenhuma rotina disponível para `{current_agent}`.")
+            return
+        markup = {"inline_keyboard": buttons}
+        self.send_message(f"🔍 *Inspecionar rotina/pipeline ({current_agent}):*", reply_markup=markup)
+
+    def _review_detail(self, stem: str) -> None:
+        """Send a formatted detail card for a routine or pipeline."""
+        md_file = _find_routine_file(stem)
+        if not md_file:
+            self.send_message(f"❌ Rotina `{stem}` não encontrada.")
+            return
+        fm, body = get_frontmatter_and_body(md_file)
+        if not fm:
+            self.send_message(f"❌ Não foi possível ler `{stem}`.")
+            return
+
+        title = fm.get("title", stem)
+        rtype = str(fm.get("type", "routine"))
+        description = fm.get("description", "_sem descrição_")
+        model = str(fm.get("model", "sonnet"))
+        enabled = fm.get("enabled", True)
+        icon = "🔗" if rtype == "pipeline" else "🔁"
+        status_label = "✅ ativo" if enabled else "⏸ desativado"
+
+        lines = [
+            f"{icon} *{title}*  —  {status_label}",
+            f"_{description}_",
+            "",
+        ]
+
+        if rtype == "pipeline":
+            steps = parse_pipeline_body(body)
+            if steps:
+                lines.append("*Etapas:*")
+                for i, step in enumerate(steps, 1):
+                    step_name = step.get("name") or step.get("id", f"step-{i}")
+                    step_model = step.get("model", model)
+                    lines.append(f"  {i}\\. {step_name} `({step_model})`")
+            else:
+                lines.append("_Etapas não encontradas_")
+        else:
+            lines.append(f"*Modelo:* `{model}`")
+
+        lines.append("")
+        lines.append(f"*Agendamento:* {self._format_schedule(fm)}")
+
+        self.send_message("\n".join(lines))
+
+    def _format_schedule(self, fm: Dict) -> str:
+        """Format schedule frontmatter into a human-readable pt-BR string."""
+        sched = fm.get("schedule")
+        if not sched or not isinstance(sched, dict):
+            return "Sem agendamento"
+
+        day_names = {
+            "mon": "Seg", "tue": "Ter", "wed": "Qua", "thu": "Qui",
+            "fri": "Sex", "sat": "Sáb", "sun": "Dom",
+        }
+        parts: List[str] = []
+
+        interval = sched.get("interval")
+        if interval:
+            days = sched.get("days", ["*"])
+            if isinstance(days, str):
+                days = [days]
+            if days == ["*"]:
+                parts.append(f"A cada {interval}")
+            else:
+                day_str = ", ".join(day_names.get(str(d).lower(), d) for d in days)
+                parts.append(f"A cada {interval} ({day_str})")
+        else:
+            times = sched.get("times", [])
+            if isinstance(times, str):
+                times = [times]
+            days = sched.get("days", ["*"])
+            if isinstance(days, str):
+                days = [days]
+
+            all_days = {"mon", "tue", "wed", "thu", "fri", "sat", "sun"}
+            if days == ["*"] or set(str(d).lower() for d in days) == all_days:
+                day_str = "todos os dias"
+            else:
+                day_str = ", ".join(day_names.get(str(d).lower(), d) for d in days)
+
+            if times:
+                parts.append(f"{day_str.capitalize()} às {', '.join(times)}")
+            else:
+                parts.append(day_str.capitalize())
+
+        monthdays = sched.get("monthdays")
+        if monthdays:
+            md_list = monthdays if isinstance(monthdays, list) else [monthdays]
+            parts.append(f"dias do mês: {', '.join(str(d) for d in md_list)}")
+
+        until = sched.get("until")
+        if until:
+            parts.append(f"até {until}")
+
+        return " | ".join(parts) if parts else "Sem agendamento"
 
     # -- Skill commands --
 
@@ -8852,7 +9050,8 @@ class ClaudeTelegramBot:
 
     # -- Telegram file download --
 
-    def _download_telegram_file(self, file_id: str, save_dir: Path = TEMP_IMAGES_DIR) -> Optional[Path]:
+    def _download_telegram_file(self, file_id: str, save_dir: Path = TEMP_IMAGES_DIR,
+                                preferred_name: Optional[str] = None) -> Optional[Path]:
         """Download a file from Telegram and save to a directory."""
         try:
             resp = self.tg_request("getFile", {"file_id": file_id})
@@ -8862,8 +9061,14 @@ class ClaudeTelegramBot:
             file_path = resp["result"]["file_path"]
 
             url = f"https://api.telegram.org/file/bot{self.token}/{file_path}"
-            ext = Path(file_path).suffix or ".bin"
-            filename = f"{int(time.time())}_{Path(file_path).stem}{ext}"
+            if preferred_name:
+                # Sanitize: keep only safe characters
+                safe = "".join(c for c in preferred_name if c.isalnum() or c in "._- ")
+                filename = f"{int(time.time())}_{safe.strip()}" if safe.strip() else \
+                    f"{int(time.time())}{Path(file_path).suffix or '.bin'}"
+            else:
+                ext = Path(file_path).suffix or ".bin"
+                filename = f"{int(time.time())}_{Path(file_path).stem}{ext}"
             save_path = save_dir / filename
 
             with urllib.request.urlopen(url, timeout=30) as resp:
@@ -8873,6 +9078,64 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.error("Failed to download file %s: %s", file_id, exc)
             return None
+
+    # -- Media group (album) buffering --
+
+    def _buffer_media_group(self, msg: Dict, group_id: str) -> None:
+        """Buffer a message belonging to a Telegram album and schedule a flush."""
+        chat_id = str(msg.get("chat", {}).get("id", ""))
+        thread_id = msg.get("message_thread_id")
+        with self._media_group_lock:
+            if group_id not in self._media_group_buffer:
+                self._media_group_buffer[group_id] = []
+                self._media_group_ctx[group_id] = (chat_id, thread_id)
+            self._media_group_buffer[group_id].append(msg)
+            if group_id in self._media_group_timers:
+                self._media_group_timers[group_id].cancel()
+            t = threading.Timer(1.5, self._flush_media_group, args=(group_id,))
+            t.daemon = True
+            self._media_group_timers[group_id] = t
+            t.start()
+
+    def _flush_media_group(self, group_id: str) -> None:
+        """Process all buffered messages in a media group as a single Claude prompt."""
+        with self._media_group_lock:
+            messages = self._media_group_buffer.pop(group_id, [])
+            self._media_group_timers.pop(group_id, None)
+            chat_id, thread_id = self._media_group_ctx.pop(group_id, (None, None))
+        if not messages or not chat_id:
+            return
+        self._ctx = self._get_context(chat_id, thread_id)
+        reply_ctx = self._extract_reply_context(messages[0])
+        caption = next((m.get("caption", "") for m in messages if m.get("caption")), "")
+        user_msg_id = messages[0].get("message_id")
+        paths: List[str] = []
+        for msg in messages:
+            photos = msg.get("photo")
+            doc = msg.get("document")
+            if photos:
+                saved = self._download_telegram_file(photos[-1]["file_id"])
+                if saved:
+                    paths.append(str(saved))
+            elif doc:
+                mime = doc.get("mime_type", "")
+                orig = doc.get("file_name")
+                save_dir = TEMP_IMAGES_DIR if mime.startswith("image/") else TEMP_FILES_DIR
+                saved = self._download_telegram_file(doc["file_id"], save_dir=save_dir,
+                                                     preferred_name=orig)
+                if saved:
+                    paths.append(str(saved))
+        if not paths:
+            self.send_message("❌ Não consegui baixar os arquivos do álbum.")
+            return
+        if len(paths) == 1:
+            header = f"[Arquivo recebido: {paths[0]}]"
+        else:
+            file_list = "\n".join(f"- {p}" for p in paths)
+            header = f"[{len(paths)} arquivos recebidos:\n{file_list}]"
+        prompt = f"{header}\n\n{reply_ctx}{caption}" if caption else \
+            f"{header}\n\n{reply_ctx}Analise os arquivos."
+        self._handle_text(prompt, user_msg_id=user_msg_id)
 
     # -- Voice transcription --
 
@@ -9828,6 +10091,9 @@ class ClaudeTelegramBot:
             final_text += f"\n\n💰 Custo: ${runner.cost_usd:.4f} (total: ${runner.total_cost_usd:.4f})"
             _track_cost(runner.cost_usd, model=session.model)
 
+        if SHOW_SIGNATURE and not routine_mode and not suppress_text and (runner.result_text or runner.accumulated_text):
+            final_text += _build_signature(session)
+
         # Build copy-code button if response has a single dominant code block
         copy_markup = None
         copyable = self._extract_copyable_code(final_text)
@@ -9932,12 +10198,20 @@ class ClaudeTelegramBot:
             with ctx.pending_lock:
                 if not ctx.pending:
                     break
-                msg = ctx.pending.pop(0)
-            if isinstance(msg, RoutineTask):
-                self._execute_routine_task(msg)
+                if isinstance(ctx.pending[0], RoutineTask):
+                    item = ctx.pending.pop(0)
+                    n = 1
+                else:
+                    texts = []
+                    while ctx.pending and not isinstance(ctx.pending[0], RoutineTask):
+                        texts.append(ctx.pending.pop(0))
+                    item = "\n\n".join(texts)
+                    n = len(texts)
+            if isinstance(item, RoutineTask):
+                self._execute_routine_task(item)
             else:
-                logger.info("Processing queued message: %s", str(msg)[:80])
-                self._run_claude_prompt(msg)
+                logger.info("Processing %d queued message(s): %s", n, str(item)[:80])
+                self._run_claude_prompt(item)
 
     def _execute_routine_task(self, task: RoutineTask) -> None:
         """Execute a scheduled routine with model/agent/workspace override."""
@@ -10182,6 +10456,7 @@ class ClaudeTelegramBot:
                 "/important": lambda: self.cmd_important(),
                 "/save": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
+                "/review": lambda: self.cmd_review(),
                 "/run": lambda: self.cmd_run(arg),
                 "/dry-run": lambda: self.cmd_dry_run(arg),
                 "/dryrun": lambda: self.cmd_dry_run(arg),
@@ -10190,6 +10465,7 @@ class ClaudeTelegramBot:
                 "/audio": lambda: self.cmd_audio(),
                 "/voice": lambda: self.cmd_voice(arg),
                 "/active-memory": lambda: self.cmd_active_memory(arg),
+                "/signature": lambda: self.cmd_signature(arg),
             }
 
             fn = handler_map.get(cmd)
@@ -10385,6 +10661,10 @@ class ClaudeTelegramBot:
                 self._routine_delete_confirmed(owner, name)
             else:
                 self.answer_callback(cb_id, "Callback inválido")
+        elif data.startswith("review:"):
+            name = data.split(":", 1)[1]
+            self.answer_callback(cb_id)
+            self._review_detail(name)
         elif data.startswith("run:"):
             name = data.split(":", 1)[1]
             self.answer_callback(cb_id, f"Executando {name}...")
@@ -10574,6 +10854,13 @@ class ClaudeTelegramBot:
             self._handle_text(reply_ctx + text, user_msg_id=user_msg_id)
             return
 
+        # Buffer media groups (albums) — multiple photos/files sent together arrive as
+        # separate updates with the same media_group_id; collect them before dispatching.
+        media_group_id = msg.get("media_group_id")
+        if media_group_id and (msg.get("photo") or msg.get("document")):
+            self._buffer_media_group(msg, media_group_id)
+            return
+
         # Handle photos sent from Telegram
         photos = msg.get("photo")
         if photos:
@@ -10589,20 +10876,33 @@ class ClaudeTelegramBot:
                 self.send_message("❌ Não consegui baixar a imagem.")
             return
 
-        # Handle documents that are images
+        # Handle documents (images and all other file types)
         doc = msg.get("document")
         if doc:
             mime = doc.get("mime_type", "")
+            file_id = doc["file_id"]
+            orig_name = doc.get("file_name")
             if mime.startswith("image/"):
-                file_id = doc["file_id"]
-                saved = self._download_telegram_file(file_id)
+                saved = self._download_telegram_file(file_id, preferred_name=orig_name)
                 if saved:
                     caption = msg.get("caption", "Analise esta imagem.")
                     prompt = f"[Imagem recebida e salva em: {saved}]\n\n{reply_ctx}{caption}"
                     self._handle_text(prompt, user_msg_id=user_msg_id)
                 else:
                     self.send_message("❌ Não consegui baixar a imagem.")
-                return
+            else:
+                saved = self._download_telegram_file(file_id, save_dir=TEMP_FILES_DIR,
+                                                     preferred_name=orig_name)
+                if saved:
+                    caption = msg.get("caption", "").strip()
+                    label = orig_name or saved.name
+                    header = f"[Arquivo recebido: {saved} ({mime or 'application/octet-stream'})]"
+                    prompt = f"{header}\n\n{reply_ctx}{caption}" if caption else \
+                        f"{header}\n\n{reply_ctx}Analise o arquivo `{label}`."
+                    self._handle_text(prompt, user_msg_id=user_msg_id)
+                else:
+                    self.send_message("❌ Não consegui baixar o arquivo.")
+            return
 
         # Handle voice messages
         voice = msg.get("voice")
@@ -10614,6 +10914,21 @@ class ClaudeTelegramBot:
         audio = msg.get("audio")
         if audio:
             self._handle_voice(msg, user_msg_id=user_msg_id)
+            return
+
+        # Handle video and video notes
+        video = msg.get("video") or msg.get("video_note")
+        if video:
+            file_id = video["file_id"]
+            mime = video.get("mime_type", "video/mp4")
+            saved = self._download_telegram_file(file_id, save_dir=TEMP_FILES_DIR)
+            if saved:
+                caption = msg.get("caption", "").strip()
+                prompt = f"[Vídeo recebido: {saved} ({mime})]\n\n{reply_ctx}{caption}" if caption else \
+                    f"[Vídeo recebido: {saved} ({mime})]\n\n{reply_ctx}O usuário enviou um vídeo."
+                self._handle_text(prompt, user_msg_id=user_msg_id)
+            else:
+                self.send_message("❌ Não consegui baixar o vídeo.")
             return
 
     # -- Polling loop --
@@ -10656,7 +10971,7 @@ class ClaudeTelegramBot:
             {"command": "stop", "description": "Cancelar execucao"},
             {"command": "timeout", "description": "Alterar timeout"},
             {"command": "workspace", "description": "Alterar diretorio de trabalho"},
-            {"command": "effort", "description": "Nivel de esforco (low/medium/high)"},
+            {"command": "effort", "description": "Nivel de esforco (low/medium/high/max)"},
             {"command": "audio", "description": "Idioma de transcricao de audio"},
             {"command": "voice", "description": "Ativar/desativar resposta por voz (TTS)"},
             {"command": "clear", "description": "Resetar sessao atual"},
@@ -10755,7 +11070,7 @@ class ClaudeTelegramBot:
                             time_slot=time_slot,
                             agent=owning_agent,
                             minimal_context=bool(fm.get("context") == "minimal"),
-                            effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                            effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
                         )
                         bot.routine_state.set_status(name, time_slot, "running")
                         bot._enqueue_routine(task)
@@ -11077,7 +11392,7 @@ class ClaudeTelegramBot:
                                 agent=owning_agent,
                                 minimal_context=bool(r_fm.get("context") == "minimal"),
                                 voice=bool(r_fm.get("voice", False)),
-                                effort=_effort_raw if _effort_raw in ("low", "medium", "high") else None,
+                                effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
                                 webhook_payload=raw_body,
                             )
                             bot.routine_state.set_status(routine_name, time_slot, "running")
