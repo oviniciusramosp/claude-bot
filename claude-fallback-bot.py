@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.35.0"  # feat: agent+model signature at end of each response (/signature toggle)
+BOT_VERSION = "3.40.0"  # feat: instant model fallback on rate limit, sticky until reset + /restart-agent
 
 import hmac
 import hashlib
@@ -389,10 +389,15 @@ def _agent_display_name(agent_id: str) -> str:
     return " ".join(w.capitalize() for w in agent_id.replace("-", " ").split())
 
 
-def _build_signature(session) -> str:
-    """Build italic response signature: '\\n\\n_Agent Name · model-id_'."""
+def _build_signature(session, effective_model: Optional[str] = None) -> str:
+    """Build italic response signature: '\\n\\n_Agent Name · model-id_'.
+
+    ``effective_model`` overrides ``session.model`` when the fallback chain
+    routed the request to a different model than the one stored on the session.
+    """
     agent_label = _agent_display_name(session.agent or MAIN_AGENT_ID)
-    model_id = MODEL_FULL_IDS.get(session.model, session.model)
+    raw_model = effective_model or session.model
+    model_id = MODEL_FULL_IDS.get(raw_model, raw_model)
     return f"\n\n_{agent_label} · {model_id}_"
 
 
@@ -530,6 +535,8 @@ WEBHOOK_MAX_BODY_BYTES = 1_048_576                  # 1 MB cap on webhook payloa
 PIPELINE_WORKSPACE_MAX_AGE = 86400  # 24 hours in seconds
 PIPELINE_ACTIVITY_FILE = DATA_DIR / "pipeline-activity.json"
 ACTIVE_MESSAGES_FILE = DATA_DIR / "active-messages.json"
+RESPONSE_CACHE_DIR = DATA_DIR / "response-cache"
+RESPONSE_CACHE_MAX_AGE = 3600  # 1 hour — stale cache after bot restart is useless
 SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 20   # auto-compact every N turns in a session (reduced from 25 — Opus 4.7 tokenizer uses ~35% more tokens)
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
@@ -776,6 +783,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/haiku` — Usar Haiku
 • `/glm` — Usar GLM 4.7 (z.AI, requer `ZAI_API_KEY`)
 • `/model` — Escolher modelo (teclado)
+• `/restart-agent` — Restaurar modelo preferido após fallback por rate limit
 
 🔧 *Controle*
 • `/stop` — Cancelar execução atual
@@ -3533,6 +3541,13 @@ class Session:
     # Prevents the watchdog from re-firing compact every IDLE_COMPACT_HOURS while
     # the user remains idle.
     idle_compact_done: bool = False
+    # Rate-limit fallback state. When the user's chosen model hits a rate limit,
+    # the bot instantly switches `model` to the next entry in the fallback chain
+    # and snapshots the original choice here. On the next interactive turn — or
+    # when the user issues /restart-agent — the preferred model is restored if
+    # `rate_limit_until` has passed (or the user forces it).
+    preferred_model: Optional[str] = None
+    rate_limit_until: Optional[float] = None
 
 
 class SessionManager:
@@ -3831,6 +3846,83 @@ def classify_error(raw: str) -> ErrorKind:
 def get_recovery_plan(kind: ErrorKind) -> tuple:
     """Return (action, backoff_seconds, max_attempts) for an ErrorKind."""
     return _RECOVERY_MAP.get(kind, (RecoveryAction.ABORT, 0, 0))
+
+
+_UNIT_SECONDS = {
+    "second": 1, "seconds": 1, "sec": 1, "secs": 1, "s": 1,
+    "minute": 60, "minutes": 60, "min": 60, "mins": 60, "m": 60,
+    "hour": 3600, "hours": 3600, "hr": 3600, "hrs": 3600, "h": 3600,
+    "day": 86400, "days": 86400, "d": 86400,
+    "week": 604800, "weeks": 604800, "w": 604800,
+}
+
+
+def parse_rate_limit_reset(raw: str) -> Optional[float]:
+    """Extract retry delay (seconds) from a rate-limit error message.
+
+    Returns the parsed TTL in seconds, or None if no pattern matched. When
+    None, the bot keeps the fallback active until the user manually restores
+    via /restart-agent (or another error trips a new fallback).
+    """
+    if not raw:
+        return None
+    sl = raw.lower()
+
+    # "retry-after: 42", "retry after 42 seconds", "retry after 2 minutes"
+    m = re.search(r'retry[\s_-]*after[:\s]+(\d+)\s*([a-z]+)?', sl)
+    if m:
+        unit = (m.group(2) or "second").strip()
+        return int(m.group(1)) * _UNIT_SECONDS.get(unit, 1)
+
+    # "try again in 2 hours", "reset in 45 minutes", "available in 30 seconds"
+    m = re.search(
+        r'(?:try again|reset|retry|available|wait)\s+in\s+(\d+)\s*([a-z]+)',
+        sl,
+    )
+    if m:
+        unit = m.group(2).strip()
+        if unit in _UNIT_SECONDS:
+            return int(m.group(1)) * _UNIT_SECONDS[unit]
+
+    # ISO timestamp: "resets at 2026-04-21T12:00:00Z"
+    m = re.search(r'reset[a-z ]*\s+(\d{4}-\d{2}-\d{2}t\d{2}:\d{2}(?::\d{2})?)', sl)
+    if m:
+        try:
+            import datetime as _dt
+            raw_ts = m.group(1).rstrip("z")
+            reset_dt = _dt.datetime.fromisoformat(raw_ts)
+            if reset_dt.tzinfo is None:
+                reset_dt = reset_dt.replace(tzinfo=_dt.timezone.utc)
+            delta = (reset_dt - _dt.datetime.now(_dt.timezone.utc)).total_seconds()
+            if delta > 0:
+                return delta
+        except (ValueError, ImportError):
+            pass
+
+    # Weekly usage limit — Anthropic's weekly cap resets 7 days after first
+    # request of the week; without a specific reset time we conservatively
+    # hold the fallback for the full 7 days.
+    if "weekly" in sl and ("limit" in sl or "usage" in sl or "quota" in sl):
+        return 7 * 86400
+
+    return None
+
+
+def _format_duration(seconds: float) -> str:
+    """Human-readable short duration for Telegram notices ('2h 15min', '45s')."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        m, s = divmod(seconds, 60)
+        return f"{m}min" if s == 0 else f"{m}min {s}s"
+    if seconds < 86400:
+        h, rem = divmod(seconds, 3600)
+        m = rem // 60
+        return f"{h}h" if m == 0 else f"{h}h {m}min"
+    d, rem = divmod(seconds, 86400)
+    h = rem // 3600
+    return f"{d}d" if h == 0 else f"{d}d {h}h"
 
 
 def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str]:
@@ -4228,6 +4320,14 @@ def load_agent(agent_id: str) -> Optional[Dict[str, Any]]:
     fm["_body"] = body
     fm["_id"] = agent_id
     return fm
+
+
+def _agent_default_model(agent_id: Optional[str]) -> str:
+    """Return the model declared in the agent's hub frontmatter, or DEFAULT_MODEL."""
+    agent = load_agent(_agent_id_or_main(agent_id))
+    if agent:
+        return agent.get("model") or DEFAULT_MODEL
+    return DEFAULT_MODEL
 
 
 def list_agents() -> List[Dict[str, Any]]:
@@ -5780,8 +5880,10 @@ class ClaudeTelegramBot:
 
         # Tracks active routine/pipeline contexts for HTTP stop requests
         self._routine_contexts: Dict[str, "ThreadContext"] = {}
+        self._routine_agents: Dict[str, str] = {}   # routine name → agent_id (same lock)
         self._routine_contexts_lock = threading.Lock()
         self._active_pipelines: Dict[str, PipelineExecutor] = {}
+        self._pipeline_agents: Dict[str, str] = {}  # pipeline name → agent_id (same lock)
         self._active_pipelines_lock = threading.Lock()
 
         # Recover interrupted tasks BEFORE starting the scheduler (no race)
@@ -6071,6 +6173,8 @@ class ClaudeTelegramBot:
         def _run_routine() -> None:
             with self._routine_contexts_lock:
                 self._routine_contexts[task.name] = ctx
+                if task.agent:
+                    self._routine_agents[task.name] = task.agent
             try:
                 self._ctx = ctx
                 self._execute_routine_task(task)
@@ -6084,6 +6188,7 @@ class ClaudeTelegramBot:
             finally:
                 with self._routine_contexts_lock:
                     self._routine_contexts.pop(task.name, None)
+                    self._routine_agents.pop(task.name, None)
 
         threading.Thread(target=_run_routine, daemon=True, name=f"routine-{task.name}").start()
 
@@ -6107,6 +6212,8 @@ class ClaudeTelegramBot:
             executor._bot = self
             with self._active_pipelines_lock:
                 self._active_pipelines[task.name] = executor
+                if task.agent:
+                    self._pipeline_agents[task.name] = task.agent
             try:
                 self._ctx = ctx
                 executor.execute()
@@ -6120,6 +6227,7 @@ class ClaudeTelegramBot:
             finally:
                 with self._active_pipelines_lock:
                     self._active_pipelines.pop(task.name, None)
+                    self._pipeline_agents.pop(task.name, None)
 
         threading.Thread(target=_run_pipeline, daemon=True, name=f"pipeline-{task.name}").start()
 
@@ -6342,8 +6450,65 @@ class ClaudeTelegramBot:
         logger.info("Resuming routine %s", name)
         self._enqueue_routine(task)
 
+    # -- Response cache (restart recovery) ------------------------------------
+
+    def _cache_response(self, msg_id: int, chat_id: int, final_text: str) -> None:
+        """Persist final_text to disk so restart recovery can deliver it if the bot dies before send."""
+        try:
+            RESPONSE_CACHE_DIR.mkdir(exist_ok=True)
+            cache_file = RESPONSE_CACHE_DIR / f"{msg_id}.json"
+            cache_file.write_text(json.dumps({
+                "msg_id": msg_id,
+                "chat_id": chat_id,
+                "final_text": final_text,
+                "timestamp": time.time(),
+            }, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to cache response for msg %s: %s", msg_id, exc)
+
+    def _uncache_response(self, msg_id: int) -> None:
+        """Remove cached response after successful delivery."""
+        try:
+            (RESPONSE_CACHE_DIR / f"{msg_id}.json").unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Failed to remove response cache for msg %s: %s", msg_id, exc)
+
+    def _load_cached_response(self, msg_id: int) -> Optional[str]:
+        """Return cached final_text if it exists and is fresh, else None."""
+        try:
+            cache_file = RESPONSE_CACHE_DIR / f"{msg_id}.json"
+            if not cache_file.exists():
+                return None
+            data = json.loads(cache_file.read_text(encoding="utf-8"))
+            if time.time() - data.get("timestamp", 0) > RESPONSE_CACHE_MAX_AGE:
+                cache_file.unlink(missing_ok=True)
+                return None
+            return data.get("final_text")
+        except Exception as exc:
+            logger.warning("Failed to load response cache for msg %s: %s", msg_id, exc)
+            return None
+
+    def _cleanup_stale_response_cache(self) -> None:
+        """Remove response cache files older than RESPONSE_CACHE_MAX_AGE."""
+        try:
+            if not RESPONSE_CACHE_DIR.exists():
+                return
+            now = time.time()
+            for f in RESPONSE_CACHE_DIR.glob("*.json"):
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    if now - data.get("timestamp", 0) > RESPONSE_CACHE_MAX_AGE:
+                        f.unlink(missing_ok=True)
+                except Exception:
+                    f.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Failed to clean up response cache: %s", exc)
+
+    # -------------------------------------------------------------------------
+
     def _cleanup_orphaned_messages(self) -> None:
         """Edit orphaned Telegram messages from a previous run."""
+        self._cleanup_stale_response_cache()
         orphans = self._active_msgs.get_all()
         if not orphans:
             return
@@ -6366,8 +6531,18 @@ class ClaudeTelegramBot:
                                       f"⚠️ Rotina *{rname}* interrompida — verificando retomada\\.\\.\\.",
                                       chat_id=chat_id)
                 else:
-                    self.edit_message(msg_id, "⚠️ _Interrompido por reinício do bot_",
-                                      chat_id=chat_id)
+                    cached = self._load_cached_response(msg_id)
+                    if cached:
+                        logger.info("Restart recovery: delivering cached response for msg %s", msg_id)
+                        sent = self.edit_message(msg_id, cached, chat_id=chat_id)
+                        if sent:
+                            self._uncache_response(msg_id)
+                        else:
+                            self.edit_message(msg_id, "⚠️ _Interrompido por reinício do bot_",
+                                              chat_id=chat_id)
+                    else:
+                        self.edit_message(msg_id, "⚠️ _Interrompido por reinício do bot_",
+                                          chat_id=chat_id)
             except Exception as exc:
                 logger.warning("Failed to clean up orphaned message %s: %s", msg_id, exc)
         self._active_msgs.clear()
@@ -6490,6 +6665,7 @@ class ClaudeTelegramBot:
                 session.session_id = None
                 session.message_count = 0
                 session.last_activity = now
+                session.model = _agent_default_model(session.agent)
                 self.sessions.save()
                 self._send_idle_notification(
                     ctx,
@@ -7122,6 +7298,11 @@ class ClaudeTelegramBot:
             return
         s = self._get_session()
         s.model = model
+        # User explicitly chose a model — drop any pending rate-limit fallback
+        # state so the bot respects the new choice and doesn't auto-restore
+        # the previous preference later.
+        s.preferred_model = None
+        s.rate_limit_until = None
         self.sessions.save()
         self.send_message(f"✅ Modelo alterado para `{model}`")
 
@@ -7268,9 +7449,8 @@ class ClaudeTelegramBot:
         if not name:
             name = _make_session_name(agent, self.sessions.sessions)
         s = self.sessions.create(name, agent=agent)
-        # Inherit model from current session (respects agent frontmatter or manual /model switch)
-        if current:
-            s.model = current.model
+        # New sessions start at the agent's declared default model
+        s.model = _agent_default_model(agent)
         s.last_activity = time.time()
         self.sessions.save()
         agent_label = s.agent if s.agent != "main" else ""
@@ -7380,10 +7560,39 @@ class ClaudeTelegramBot:
         if s:
             s.session_id = None
             s.last_activity = time.time()
+            s.model = _agent_default_model(s.agent)
+            s.preferred_model = None
+            s.rate_limit_until = None
             self.sessions.save()
             self.send_message(f"🔄 Sessão `{s.name}` resetada (session\\_id removido).")
         else:
             self.send_message("❌ Nenhuma sessão ativa.")
+
+    def cmd_restart_agent(self) -> None:
+        """Force-restore the session's preferred model after a rate-limit fallback.
+
+        Useful when the user knows the rate limit was lifted before the TTL
+        parsed from the error message expired (e.g., paid plan reset, manual
+        quota top-up). Leaves `session_id` intact — this is a model-state
+        reset only, not a conversation reset.
+        """
+        s = self._get_session()
+        if not s:
+            self.send_message("❌ Nenhuma sessão ativa.")
+            return
+        if not s.preferred_model:
+            self.send_message(
+                f"ℹ️ Sessão `{s.name}` já está no modelo preferido (`{s.model}`)."
+            )
+            return
+        restored = s.preferred_model
+        s.model = restored
+        s.preferred_model = None
+        s.rate_limit_until = None
+        self.sessions.save()
+        self.send_message(
+            f"✅ Sessão `{s.name}` restaurada para `{restored}`."
+        )
 
     def cmd_compact(self) -> None:
         """Manual /compact — mirrors the auto-compact flow (snapshot + /compact
@@ -7945,7 +8154,7 @@ class ClaudeTelegramBot:
     def cmd_stop(self, arg: str = "") -> None:
         arg = arg.strip().replace(".md", "")
 
-        # /stop <name> — stop a specific routine/pipeline
+        # /stop <name> — explicit name bypasses agent filtering (user knows what they want)
         if arg:
             if self._stop_routine_by_name(arg):
                 self.send_message(f"🛑 `{arg}` cancelado.")
@@ -7959,18 +8168,23 @@ class ClaudeTelegramBot:
             self.send_message("🛑 Cancelamento enviado.")
             return
 
-        # No user task — check running routines/pipelines
-        running = self._get_running_routines()
+        # No user task — check routines/pipelines, but only for the current agent.
+        # Cross-agent isolation: a /stop in agent A must never cancel agent B's routines.
+        session = self._get_session()
+        current_agent = (session.agent if session else None) or MAIN_AGENT_ID
+        all_running = self._get_running_routines()
+        running = [(n, t, a) for n, t, a in all_running if a == current_agent]
+
         if not running:
             self.send_message("ℹ️ Nenhum processo rodando.")
         elif len(running) == 1:
-            name, rtype = running[0]
+            name, rtype, _ = running[0]
             self._stop_routine_by_name(name)
             icon = "🔗" if rtype == "pipeline" else "🔁"
             self.send_message(f"🛑 {icon} `{name}` cancelado.")
         else:
             buttons = []
-            for name, rtype in running:
+            for name, rtype, _ in running:
                 icon = "🔗" if rtype == "pipeline" else "🔁"
                 buttons.append([{"text": f"🛑 {icon} {name}", "callback_data": f"stop:{name}"}])
             self.send_message("🛑 *Qual processo parar?*", reply_markup={"inline_keyboard": buttons})
@@ -8539,15 +8753,15 @@ class ClaudeTelegramBot:
     # -- Stop helpers --
 
     def _get_running_routines(self) -> list:
-        """Returns list of (name, type) for all running routines and pipelines."""
+        """Returns list of (name, type, agent) for all running routines and pipelines."""
         running = []
         with self._active_pipelines_lock:
             for name in self._active_pipelines:
-                running.append((name, "pipeline"))
+                running.append((name, "pipeline", self._pipeline_agents.get(name)))
         with self._routine_contexts_lock:
             for name, ctx in self._routine_contexts.items():
                 if ctx.runner and ctx.runner.running:
-                    running.append((name, "routine"))
+                    running.append((name, "routine", self._routine_agents.get(name)))
         return running
 
     def _stop_routine_by_name(self, name: str) -> bool:
@@ -9092,7 +9306,7 @@ class ClaudeTelegramBot:
             self._media_group_buffer[group_id].append(msg)
             if group_id in self._media_group_timers:
                 self._media_group_timers[group_id].cancel()
-            t = threading.Timer(1.5, self._flush_media_group, args=(group_id,))
+            t = threading.Timer(0.3, self._flush_media_group, args=(group_id,))
             t.daemon = True
             self._media_group_timers[group_id] = t
             t.start()
@@ -9584,6 +9798,26 @@ class ClaudeTelegramBot:
             return
 
         session = self._get_session()
+
+        # Rate-limit fallback auto-restore: when the TTL set at fallback time
+        # has elapsed, swap back to the user's preferred model so the next
+        # turn uses the real choice again. Only fires on fresh interactive
+        # turns (not retries, not routines, not fallback recursions).
+        if (not _retry
+                and not routine_mode
+                and _fallback_model is None
+                and session.preferred_model
+                and session.rate_limit_until
+                and time.time() >= session.rate_limit_until):
+            restored = session.preferred_model
+            session.model = restored
+            session.preferred_model = None
+            session.rate_limit_until = None
+            self.sessions.save()
+            self.send_message(
+                f"✅ *Rate limit liberou* — sessão `{session.name}` voltou para `{restored}`."
+            )
+
         if not _retry:
             session.message_count += 1
             session.total_turns += 1
@@ -9788,8 +10022,12 @@ class ClaudeTelegramBot:
                     session.session_id = None
                     self.sessions.save()
 
-                # Phase 1: retry same model
-                if action != RecoveryAction.ABORT and _retry < max_attempts:
+                # Phase 1: retry same model (skipped for RATE_LIMIT — those go
+                # straight to Phase 2 so the user doesn't wait 3 minutes on a
+                # cap that won't clear in seconds).
+                if (action != RecoveryAction.ABORT
+                        and kind != ErrorKind.RATE_LIMIT
+                        and _retry < max_attempts):
                     scaled_backoff = backoff * (_retry + 1)
                     logger.info(
                         "Auto-recovery: kind=%s action=%s backoff=%ds attempt=%d/%d",
@@ -9830,6 +10068,51 @@ class ClaudeTelegramBot:
                             len(runner.stderr_text),
                             runner.error_text[:200] if runner.error_text else "none",
                         )
+                        # Rate limit: persist the fallback so subsequent turns
+                        # skip the failing model entirely until the cap resets.
+                        # Snapshots the preferred model on first trip only — if
+                        # the fallback itself rate limits later, we keep the
+                        # original preference as the restoration target.
+                        if kind == ErrorKind.RATE_LIMIT and not routine_mode:
+                            if not session.preferred_model:
+                                session.preferred_model = current_model
+                            ttl = parse_rate_limit_reset(raw_error)
+                            if ttl and ttl > 0:
+                                session.rate_limit_until = time.time() + ttl
+                                eta = _format_duration(ttl)
+                                notice = (
+                                    f"⚠️ *Rate limit em `{current_model}`* — "
+                                    f"fallback para `{next_model}`.\n"
+                                    f"Restauro automático em ~{eta} "
+                                    f"(ou use `/restart-agent` para forçar)."
+                                )
+                            else:
+                                session.rate_limit_until = None
+                                notice = (
+                                    f"⚠️ *Rate limit em `{current_model}`* — "
+                                    f"fallback para `{next_model}`.\n"
+                                    f"Tempo de reset não informado; use "
+                                    f"`/restart-agent` quando o limite liberar."
+                                )
+                            session.model = next_model
+                            self.sessions.save()
+                            self.send_message(notice)
+                            # Recursive call: use session.model (already updated),
+                            # drop _fallback_model so the persisted value wins.
+                            self._run_claude_prompt(
+                                prompt,
+                                _retry=0,
+                                _fallback_model=None,
+                                no_output_timeout=no_output_timeout,
+                                max_total_timeout=max_total_timeout,
+                                inactivity_timeout=inactivity_timeout,
+                                routine_mode=routine_mode,
+                                system_prompt=system_prompt,
+                                force_tts=force_tts,
+                                suppress_text=suppress_text,
+                            )
+                            return
+
                         excerpt = raw_error[:150].replace('\n', ' ')
                         if len(raw_error) > 150:
                             excerpt += "..."
@@ -9854,7 +10137,7 @@ class ClaudeTelegramBot:
         # Finalize
         self._finalize_response(session, runner, prompt=prompt if not _retry else None,
                                 routine_mode=routine_mode, force_tts=tts_this_request,
-                                suppress_text=force_tts)
+                                suppress_text=force_tts, effective_model=effective_model)
 
         # Process queued messages for this context
         self._process_pending()
@@ -10026,7 +10309,7 @@ class ClaudeTelegramBot:
 
     def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None,
                            routine_mode: bool = False, force_tts: bool = False,
-                           suppress_text: bool = False) -> None:
+                           suppress_text: bool = False, effective_model: Optional[str] = None) -> None:
         ctx = self._ctx
 
         if runner.captured_session_id:
@@ -10044,6 +10327,7 @@ class ClaudeTelegramBot:
                             session.name, session.message_count)
                 session.session_id = None
                 session.message_count = 0
+                session.model = _agent_default_model(session.agent)
                 self.sessions.save()
                 self.send_message("🔄 _Sessão rotacionada automaticamente (%d turns)_" % AUTO_ROTATE_THRESHOLD)
             elif session.message_count > 0 and session.message_count % AUTO_COMPACT_INTERVAL == 0:
@@ -10092,7 +10376,7 @@ class ClaudeTelegramBot:
             _track_cost(runner.cost_usd, model=session.model)
 
         if SHOW_SIGNATURE and not routine_mode and not suppress_text and (runner.result_text or runner.accumulated_text):
-            final_text += _build_signature(session)
+            final_text += _build_signature(session, effective_model=effective_model)
 
         # Build copy-code button if response has a single dominant code block
         copy_markup = None
@@ -10102,8 +10386,13 @@ class ClaudeTelegramBot:
                 {"text": "📋 Copiar código", "copy_text": {"text": copyable}}
             ]]}
 
-        # Send final
+        # Persist complete response to disk so restart recovery can deliver it
+        # if the bot dies between here and the Telegram edit below.
         stream_msg = ctx.stream_msg_id if ctx else None
+        if stream_msg and ctx and runner.result_text and not routine_mode and not suppress_text:
+            self._cache_response(stream_msg, ctx.chat_id, final_text)
+
+        # Send final
         if routine_mode:
             # NO_REPLY means Claude completed via tools with no text to send — silent success
             if final_text.strip() == "NO_REPLY":
@@ -10141,6 +10430,7 @@ class ClaudeTelegramBot:
         # Unregister the stream message from active tracking (it's finalized now)
         if stream_msg:
             self._active_msgs.unregister(stream_msg)
+            self._uncache_response(stream_msg)
             self._reasoning_toggles.pop(stream_msg, None)
 
         # TTS: send voice message if enabled or forced (background, non-blocking)
@@ -10453,6 +10743,7 @@ class ClaudeTelegramBot:
                 "/btw": lambda: self.cmd_btw(arg) if arg else self.send_message("❌ Use: `/btw <mensagem>`"),
                 "/delegate": lambda: self.cmd_delegate(arg) if arg else self.send_message("❌ Use: `/delegate <prompt>`"),
                 "/clear": lambda: self.cmd_clear(),
+                "/restart-agent": lambda: self.cmd_restart_agent(),
                 "/important": lambda: self.cmd_important(),
                 "/save": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),
@@ -10770,7 +11061,7 @@ class ClaudeTelegramBot:
                     if result.returncode == 0:
                         # Get new version
                         ver_result = subprocess.run(
-                            [config["claude_path"], "--version"],
+                            [CLAUDE_PATH, "--version"],
                             capture_output=True, text=True, timeout=10,
                         )
                         new_ver = ver_result.stdout.strip() if ver_result.returncode == 0 else "?"
@@ -11468,6 +11759,28 @@ class ClaudeTelegramBot:
             try:
                 updates = self._poll_updates()
                 _poll_backoff = 0  # reset on success
+
+                # Pre-group media album updates in this poll batch.
+                # Telegram usually delivers all photos of an album in one getUpdates
+                # response → detect the complete group here for zero-delay dispatch.
+                _batch_albums: Dict[str, List] = {}
+                for _u in updates:
+                    _m = _u.get("message", {})
+                    _mgid = _m.get("media_group_id")
+                    if _mgid and (_m.get("photo") or _m.get("document")):
+                        _batch_albums.setdefault(_mgid, []).append(_m)
+                _instant_groups: set = set()
+                with self._media_group_lock:
+                    for _mgid, _msgs in _batch_albums.items():
+                        if _mgid not in self._media_group_buffer:
+                            _instant_groups.add(_mgid)
+                            self._media_group_buffer[_mgid] = list(_msgs)
+                            _first = _msgs[0]
+                            self._media_group_ctx[_mgid] = (
+                                str(_first.get("chat", {}).get("id", "")),
+                                _first.get("message_thread_id"),
+                            )
+
                 for update in updates:
                     uid = update.get("update_id", 0)
                     if uid >= self._update_offset:
@@ -11475,6 +11788,9 @@ class ClaudeTelegramBot:
                         self._save_offset(self._update_offset)
                     try:
                         msg = update.get("message", {})
+                        # Skip individual updates belonging to an instant album batch
+                        if msg.get("media_group_id") in _instant_groups:
+                            continue
                         chat_id = str(msg.get("chat", {}).get("id", ""))
                         user_id = str(msg.get("from", {}).get("id", ""))
                         chat_type = msg.get("chat", {}).get("type", "private")
@@ -11527,6 +11843,21 @@ class ClaudeTelegramBot:
                         threading.Thread(target=_handle, daemon=True).start()
                     except Exception as exc:
                         logger.error("Error handling update %s: %s", update.get("update_id"), exc, exc_info=True)
+
+                # Dispatch pre-grouped albums immediately (zero-delay — no timer)
+                for _mgid in _instant_groups:
+                    _cid, _tid = self._media_group_ctx.get(_mgid, (None, None))
+                    if not _cid or not self._is_authorized(_cid):
+                        with self._media_group_lock:
+                            self._media_group_buffer.pop(_mgid, None)
+                            self._media_group_ctx.pop(_mgid, None)
+                        continue
+                    _ictx = self._get_context(_cid, _tid)
+                    def _handle_album(mgid=_mgid, c=_ictx):
+                        self._ctx = c
+                        self._flush_media_group(mgid)
+                    threading.Thread(target=_handle_album, daemon=True).start()
+
             except KeyboardInterrupt:
                 logger.info("Keyboard interrupt, shutting down.")
                 break

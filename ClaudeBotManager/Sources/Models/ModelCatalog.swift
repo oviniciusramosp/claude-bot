@@ -10,7 +10,7 @@ struct ModelOption: Hashable, Sendable {
 enum ModelCatalog {
     static let all: [ModelOption] = [
         ModelOption(id: "sonnet",       label: "Sonnet 4.6",  provider: "anthropic", description: "Balanced performance and speed"),
-        ModelOption(id: "opus",         label: "Opus 4.6",    provider: "anthropic", description: "Most capable for ambitious work"),
+        ModelOption(id: "opus",         label: "Opus 4.7",    provider: "anthropic", description: "Most capable for ambitious work"),
         ModelOption(id: "haiku",        label: "Haiku 4.5",   provider: "anthropic", description: "Fastest and most compact"),
         ModelOption(id: "glm-5.1",      label: "GLM 5.1",     provider: "zai",       description: "z.AI flagship — 200K context"),
         ModelOption(id: "glm-4.7",      label: "GLM 4.7",     provider: "zai",       description: "z.AI balanced — 131K context"),

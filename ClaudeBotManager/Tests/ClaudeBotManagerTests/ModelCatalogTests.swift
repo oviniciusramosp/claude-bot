@@ -14,6 +14,7 @@ final class ModelCatalogTests: XCTestCase {
 
     func testLabelForKnownID() {
         XCTAssertEqual(ModelCatalog.label(for: "sonnet"), "Sonnet 4.6")
+        XCTAssertEqual(ModelCatalog.label(for: "opus"), "Opus 4.7")
         XCTAssertEqual(ModelCatalog.label(for: "glm-5.1"), "GLM 5.1")
     }
 
