@@ -92,5 +92,94 @@ class CodexModelRegistry(unittest.TestCase):
         self.assertEqual(self.bot.MODEL_PROVIDERS["gpt-5-codex"], "openai")
 
 
+class PerProviderSessionId(unittest.TestCase):
+    """Session.session_id (Claude) and Session.codex_thread_id (Codex) live
+    side by side so switching providers mid-session doesn't corrupt either."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def _session(self, **kw):
+        kw.setdefault("name", "test")
+        return self.bot.Session(**kw)
+
+    def test_session_id_for_claude_returns_claude_sid(self):
+        s = self._session(session_id="claude-abc", codex_thread_id="codex-xyz",
+                          model="sonnet")
+        self.assertEqual(self.bot._session_id_for(s), "claude-abc")
+
+    def test_session_id_for_gpt_returns_codex_sid(self):
+        s = self._session(session_id="claude-abc", codex_thread_id="codex-xyz",
+                          model="gpt-5")
+        self.assertEqual(self.bot._session_id_for(s), "codex-xyz")
+
+    def test_session_id_for_glm_uses_claude_sid(self):
+        # GLM shares the Claude local history store
+        s = self._session(session_id="claude-abc", codex_thread_id="codex-xyz",
+                          model="glm-4.7")
+        self.assertEqual(self.bot._session_id_for(s), "claude-abc")
+
+    def test_session_id_for_explicit_model_overrides_session_model(self):
+        s = self._session(session_id="claude-abc", codex_thread_id="codex-xyz",
+                          model="sonnet")
+        # Fallback chain might route to gpt — should use codex id even though
+        # session.model is still sonnet.
+        self.assertEqual(self.bot._session_id_for(s, "gpt-5"), "codex-xyz")
+
+
+class PersistCapturedId(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def _runner(self, captured=None, exit_code=0, error_text=""):
+        r = self.bot.ClaudeRunner()
+        r.captured_session_id = captured
+        r.exit_code = exit_code
+        r.error_text = error_text
+        return r
+
+    def _session(self, **kw):
+        kw.setdefault("name", "test")
+        return self.bot.Session(**kw)
+
+    def test_persists_to_session_id_for_claude(self):
+        s = self._session(model="sonnet")
+        r = self._runner(captured="new-claude-sid")
+        stored = self.bot._persist_captured_id(s, r)
+        self.assertTrue(stored)
+        self.assertEqual(s.session_id, "new-claude-sid")
+        self.assertIsNone(s.codex_thread_id)
+
+    def test_persists_to_codex_thread_id_for_gpt(self):
+        s = self._session(model="gpt-5")
+        r = self._runner(captured="new-codex-thread")
+        stored = self.bot._persist_captured_id(s, r)
+        self.assertTrue(stored)
+        self.assertEqual(s.codex_thread_id, "new-codex-thread")
+        self.assertIsNone(s.session_id)
+
+    def test_does_not_persist_on_failed_run(self):
+        s = self._session(model="gpt-5", codex_thread_id="old-id")
+        r = self._runner(captured="fresh-id", exit_code=1, error_text="oops")
+        stored = self.bot._persist_captured_id(s, r)
+        self.assertFalse(stored)
+        # Previous id unchanged (no poisoning)
+        self.assertEqual(s.codex_thread_id, "old-id")
+
+    def test_does_not_persist_when_no_capture(self):
+        s = self._session(model="sonnet")
+        r = self._runner(captured=None)
+        self.assertFalse(self.bot._persist_captured_id(s, r))
+
+    def test_error_text_alone_blocks_persist_even_with_exit_zero(self):
+        # exit_code can be None for runners that never got to finalize;
+        # error_text is the stronger signal that something went wrong.
+        s = self._session(model="sonnet")
+        r = self._runner(captured="maybe-id", exit_code=0, error_text="bad")
+        self.assertFalse(self.bot._persist_captured_id(s, r))
+
+
 if __name__ == "__main__":
     unittest.main()

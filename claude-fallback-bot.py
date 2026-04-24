@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.44.4"  # fix: /gpt uses gpt-5 (ChatGPT OAuth), parse nested error JSON, hide gpt-5-codex from picker
+BOT_VERSION = "3.45.0"  # feat: per-provider session ids (Claude↔GPT toggle keeps history) + GPT dangerous-bypass mode
 
 import hmac
 import hashlib
@@ -444,6 +444,40 @@ def model_provider(model: str) -> str:
     if model.startswith("gpt-"):
         return "openai"
     return "anthropic"
+
+
+def _session_id_for(session, model: Optional[str] = None) -> Optional[str]:
+    """Return the right resume ID for the given model's provider.
+
+    Claude CLI (anthropic + zai) and Codex CLI keep their conversation state
+    in separate local stores and use different ID formats, so `session.session_id`
+    (Claude) and `session.codex_thread_id` (Codex) aren't interchangeable.
+    This helper picks the one that matches the runner we're about to spawn."""
+    m = model or getattr(session, "model", "sonnet")
+    if model_provider(m) == "openai":
+        return getattr(session, "codex_thread_id", None)
+    return session.session_id
+
+
+def _persist_captured_id(session, runner, model: Optional[str] = None) -> bool:
+    """Store `runner.captured_session_id` into the correct session field based
+    on the model's provider, but ONLY if the turn succeeded. A failed turn
+    (non-zero exit or an error_text) often captures a thread_id before blowing
+    up — persisting it poisons the next turn (Codex: "no rollout found";
+    Claude: --resume of a dead session). Returns True if a value was stored."""
+    captured = getattr(runner, "captured_session_id", None)
+    if not captured:
+        return False
+    exit_code = getattr(runner, "exit_code", None)
+    error_text = getattr(runner, "error_text", "")
+    if exit_code not in (0, None) or error_text:
+        return False
+    m = model or getattr(session, "model", "sonnet")
+    if model_provider(m) == "openai":
+        session.codex_thread_id = captured
+    else:
+        session.session_id = captured
+    return True
 
 
 def _start_zai_proxy(glm_model: str, zai_base_url: str, zai_api_key: str):
@@ -3599,6 +3633,15 @@ class Session:
     # `rate_limit_until` has passed (or the user forces it).
     preferred_model: Optional[str] = None
     rate_limit_until: Optional[float] = None
+    # Per-provider session continuation. `session_id` is the Claude CLI local
+    # conversation ID (shared between anthropic + zai — both run on the same
+    # `claude` binary with a local history store); `codex_thread_id` is the
+    # thread ID that `codex exec` emits via `thread.started`. They live in
+    # different storage paths (~/.claude vs ~/.codex) and aren't portable, so
+    # the bot tracks both and routes the right one to the right runner. When
+    # the user toggles between Claude and GPT mid-session, each side preserves
+    # its own history.
+    codex_thread_id: Optional[str] = None
 
 
 class SessionManager:
@@ -4473,7 +4516,10 @@ class CodexRunner:
         # model should set it in `~/.codex/config.toml`.
         flags = [
             "--json",
-            "--full-auto",            # auto-approve all operations — no TTY prompts
+            # Full trust — same semantic as Claude's --dangerously-skip-permissions.
+            # Bypasses both approval prompts AND the Codex sandbox so Bash/Edit/MCP
+            # tool calls fire exactly like in an interactive Claude session.
+            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",  # vault workspace isn't always a git repo
         ]
         if effort:
@@ -7180,6 +7226,7 @@ class ClaudeTelegramBot:
                 except Exception as exc:
                     logger.error("Idle clear snapshot failed for %s: %s", name, exc)
                 session.session_id = None
+                session.codex_thread_id = None
                 session.message_count = 0
                 session.last_activity = now
                 session.model = _agent_default_model(session.agent)
@@ -8090,6 +8137,7 @@ class ClaudeTelegramBot:
         s = self._get_session()
         if s:
             s.session_id = None
+            s.codex_thread_id = None
             s.last_activity = time.time()
             s.model = _agent_default_model(s.agent)
             s.preferred_model = None
@@ -8163,13 +8211,12 @@ class ClaudeTelegramBot:
             runner.run(
                 prompt="/compact",
                 model=session.model,
-                session_id=session.session_id,
+                session_id=_session_id_for(session),
                 workspace=session.workspace,
                 system_prompt=None,
                 agent_id=session.agent or MAIN_AGENT_ID,
             )
-            if runner.captured_session_id:
-                session.session_id = runner.captured_session_id
+            _persist_captured_id(session, runner)
             session.last_activity = time.time()
             self.sessions.save()
             # 3. Refresh agent hot cache for cross-session continuity
@@ -8430,7 +8477,7 @@ class ClaudeTelegramBot:
             runner.run(
                 prompt=snapshot_prompt,
                 model=session.model,
-                session_id=session.session_id,
+                session_id=_session_id_for(session),
                 workspace=session.workspace,
                 system_prompt=None,
                 agent_id=session.agent or MAIN_AGENT_ID,
@@ -8473,9 +8520,9 @@ class ClaudeTelegramBot:
         compacting, refreshes the agent's hot-cache (.context.md) so the next
         session for the same agent resumes with rolling continuity.
         """
-        if not session.session_id:
+        sid = _session_id_for(session, session.model)
+        if not sid:
             return
-        sid = session.session_id
         ws = session.workspace
         model = session.model
 
@@ -8495,8 +8542,7 @@ class ClaudeTelegramBot:
                     system_prompt=None,
                     agent_id=session.agent or MAIN_AGENT_ID,
                 )
-                if runner.captured_session_id:
-                    session.session_id = runner.captured_session_id
+                _persist_captured_id(session, runner, model)
                 # Reset idle clock after compact so the watchdog doesn't re-trigger
                 session.last_activity = time.time()
                 self.sessions.save()
@@ -8548,7 +8594,7 @@ class ClaudeTelegramBot:
             runner.run(
                 prompt=prompt,
                 model=session.model,
-                session_id=session.session_id,
+                session_id=_session_id_for(session),
                 workspace=session.workspace,
                 system_prompt=None,
                 agent_id=agent_id,
@@ -9776,9 +9822,10 @@ class ClaudeTelegramBot:
             # waiting for the 04:05 daily rebuild. Fail-open.
             _vault_index_bootstrap_agent(new_id)
             self.cmd_agent_switch(new_id)
-            # Reset session_id so next message starts fresh with new agent's context
+            # Reset session IDs so next message starts fresh with new agent's context
             session = self._get_session()
             session.session_id = None
+            session.codex_thread_id = None
             self.sessions.save()
 
     def cmd_agent_switch(self, agent_id: str) -> None:
@@ -10527,8 +10574,8 @@ class ClaudeTelegramBot:
             effective_sp = (effective_sp + _advisor_block) if effective_sp else _advisor_block
 
         # All paths use the same session/model/effort
-        effective_session_id = session.session_id
         effective_model = _fallback_model or session.model
+        effective_session_id = _session_id_for(session, effective_model)
         effective_effort = self.effort
 
         # Reconcile cached runner type with the effective model's provider.
@@ -10898,12 +10945,18 @@ class ClaudeTelegramBot:
                            suppress_text: bool = False, effective_model: Optional[str] = None) -> None:
         ctx = self._ctx
 
-        if runner.captured_session_id:
-            session.session_id = runner.captured_session_id
+        # Route the captured ID to the provider-appropriate field and only
+        # persist it on a successful turn. A failed turn often captures a
+        # thread_id before blowing up — storing it poisons the next turn
+        # ("no rollout found" on Codex; stale --resume on Claude).
+        if _persist_captured_id(session, runner, effective_model or session.model):
             self.sessions.save()
 
-        # Auto session management (interactive sessions only)
-        if not routine_mode and session.session_id and runner.exit_code in (None, 0):
+        # Auto session management (interactive sessions only). Use the
+        # provider-appropriate resume id so GPT sessions (which may only have
+        # codex_thread_id, not session_id) still run auto-compact/rotate.
+        current_sid = _session_id_for(session, effective_model or session.model)
+        if not routine_mode and current_sid and runner.exit_code in (None, 0):
             # Refresh idle clock on every successful interactive turn and clear
             # the idle-compact flag so the watchdog can fire again next idle period.
             session.last_activity = time.time()
@@ -10912,6 +10965,7 @@ class ClaudeTelegramBot:
                 logger.info("Auto-rotate: session %s reached %d turns, starting fresh",
                             session.name, session.message_count)
                 session.session_id = None
+                session.codex_thread_id = None
                 session.message_count = 0
                 session.model = _agent_default_model(session.agent)
                 self.sessions.save()
@@ -11108,9 +11162,13 @@ class ClaudeTelegramBot:
         changed = (session.model != original_model or session.agent != original_agent
                     or session.workspace != original_workspace)
 
-        # Routines always run with a fresh session (no prior conversation context)
+        # Routines always run with a fresh session (no prior conversation context).
+        # Back up both provider IDs so the restore at the bottom leaves the
+        # interactive session's Claude + Codex history intact.
         original_session_id = session.session_id
+        original_codex_thread_id = session.codex_thread_id
         session.session_id = None
+        session.codex_thread_id = None
 
         if changed:
             self.sessions.save()
@@ -11246,11 +11304,12 @@ class ClaudeTelegramBot:
             if progress_msg_id:
                 self._active_msgs.unregister(progress_msg_id)
 
-        # Restore original model, agent, workspace, and session_id
+        # Restore original model, agent, workspace, and both provider session IDs
         session.model = original_model
         session.agent = original_agent
         session.workspace = original_workspace
         session.session_id = original_session_id
+        session.codex_thread_id = original_codex_thread_id
         if changed:
             self.sessions.save()
 
