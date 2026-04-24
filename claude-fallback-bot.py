@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.44.1"  # fix: auto-compact failure now notifies user via Telegram (was silent)
+BOT_VERSION = "3.44.2"  # fix: register /glm and /gpt in Telegram setMyCommands autocomplete
 
 import hmac
 import hashlib
@@ -11757,6 +11757,8 @@ class ClaudeTelegramBot:
             {"command": "sonnet", "description": "Usar modelo Sonnet"},
             {"command": "opus", "description": "Usar modelo Opus"},
             {"command": "haiku", "description": "Usar modelo Haiku"},
+            {"command": "glm", "description": "Usar modelo GLM 4.7 (z.AI)"},
+            {"command": "gpt", "description": "Usar modelo GPT-5 Codex (ChatGPT Plus/Pro)"},
             {"command": "model", "description": "Escolher modelo"},
             {"command": "agent", "description": "Gerenciar agentes"},
             {"command": "skill", "description": "Gerenciar skills"},
