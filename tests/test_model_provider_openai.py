@@ -181,5 +181,61 @@ class PersistCapturedId(unittest.TestCase):
         self.assertFalse(self.bot._persist_captured_id(s, r))
 
 
+class CrossProviderHandoff(unittest.TestCase):
+    """Cross-provider transcript bridging — the buffer, recap block, and
+    the cmd_model_switch trigger that arms the handoff on boundary crossings."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def _fresh_bot(self):
+        # Instantiate a bare bot-like object with just the pieces we need.
+        bot = self.bot.ClaudeTelegramBot.__new__(self.bot.ClaudeTelegramBot)
+        bot._transcripts = {}
+        bot._handoff_pending = {}
+        import threading
+        bot._transcripts_lock = threading.Lock()
+        return bot
+
+    def test_append_transcript_caps_entries(self):
+        b = self._fresh_bot()
+        for i in range(b._TRANSCRIPT_MAX_TURNS * 3):
+            b._append_transcript("s", "user", f"msg{i}", "sonnet")
+        self.assertLessEqual(
+            len(b._transcripts["s"]),
+            b._TRANSCRIPT_MAX_TURNS * 2,
+        )
+
+    def test_append_transcript_truncates_long_entry(self):
+        b = self._fresh_bot()
+        big = "x" * (b._TRANSCRIPT_ENTRY_CHARS + 1000)
+        b._append_transcript("s", "user", big, "sonnet")
+        self.assertEqual(len(b._transcripts["s"][0]["text"]), b._TRANSCRIPT_ENTRY_CHARS)
+
+    def test_build_handoff_block_returns_empty_when_no_transcript(self):
+        b = self._fresh_bot()
+        self.assertEqual(b._build_handoff_block("s", "sonnet", "gpt-5"), "")
+
+    def test_build_handoff_block_includes_recap_and_tmp_pointer(self):
+        b = self._fresh_bot()
+        b._append_transcript("s", "user", "me chame de Vinizeira", "gpt-5")
+        b._append_transcript("s", "assistant", "Beleza, Vinizeira.", "gpt-5")
+        block = b._build_handoff_block("s", "gpt-5", "sonnet")
+        self.assertIn("Recap cross-provider", block)
+        self.assertIn("Vinizeira", block)
+        self.assertIn("/tmp/claude-bot-handoff-", block)
+        self.assertIn("gpt-5", block)
+        self.assertIn("sonnet", block)
+
+    def test_build_handoff_block_caps_inline_entries(self):
+        b = self._fresh_bot()
+        b._append_transcript("s", "user", "a" * 2000, "gpt-5")
+        b._append_transcript("s", "assistant", "b" * 2000, "gpt-5")
+        block = b._build_handoff_block("s", "gpt-5", "sonnet")
+        # Inline recap entries are truncated to HANDOFF_RECAP_CHARS
+        self.assertIn("…", block)
+
+
 if __name__ == "__main__":
     unittest.main()

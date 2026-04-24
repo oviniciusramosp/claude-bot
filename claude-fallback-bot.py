@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.45.0"  # feat: per-provider session ids (Claude↔GPT toggle keeps history) + GPT dangerous-bypass mode
+BOT_VERSION = "3.46.0"  # feat: cross-provider handoff on Claude↔GPT switch — recap + full transcript in /tmp
 
 import hmac
 import hashlib
@@ -6441,6 +6441,18 @@ class ClaudeTelegramBot:
             notify_fn=self.send_message,
         )
 
+        # Cross-provider conversation bridging. `_transcripts` keeps an
+        # in-memory log of (user, assistant) turns per session name so that
+        # when the user switches between Claude and Codex mid-conversation,
+        # the new provider can see a recap of what happened on the old one
+        # (the two CLIs keep history in separate, incompatible stores).
+        # `_handoff_pending` marks a session that just switched provider —
+        # the next `_run_claude_prompt` call injects the recap + a temp-file
+        # pointer to the full transcript, then clears the flag.
+        self._transcripts: Dict[str, List[Dict[str, Any]]] = {}
+        self._handoff_pending: Dict[str, Dict[str, str]] = {}
+        self._transcripts_lock = threading.Lock()
+
         # Tracks active routine/pipeline contexts for HTTP stop requests
         self._routine_contexts: Dict[str, "ThreadContext"] = {}
         self._routine_agents: Dict[str, str] = {}   # routine name → agent_id (same lock)
@@ -7868,6 +7880,7 @@ class ClaudeTelegramBot:
             )
             return
         s = self._get_session()
+        old_model = s.model
         s.model = model
         # User explicitly chose a model — drop any pending rate-limit fallback
         # state so the bot respects the new choice and doesn't auto-restore
@@ -7875,7 +7888,101 @@ class ClaudeTelegramBot:
         s.preferred_model = None
         s.rate_limit_until = None
         self.sessions.save()
+        # Cross-provider bridging: only arm a handoff when crossing the
+        # Claude-CLI ↔ Codex-CLI boundary (the two have separate history
+        # stores). anthropic ↔ zai shares the same `claude --resume` state,
+        # so no handoff is needed between sonnet/opus/haiku and glm-*.
+        was_openai = model_provider(old_model) == "openai"
+        is_openai = model_provider(model) == "openai"
+        if was_openai != is_openai:
+            with self._transcripts_lock:
+                if self._transcripts.get(s.name):
+                    self._handoff_pending[s.name] = {
+                        "from_model": old_model,
+                        "to_model": model,
+                    }
         self.send_message(f"✅ Modelo alterado para `{model}`")
+
+    # -- Cross-provider transcript bridging --
+
+    _TRANSCRIPT_MAX_TURNS = 20         # cap: last 20 user+assistant PAIRS per session
+    _TRANSCRIPT_ENTRY_CHARS = 5000     # cap: per-entry char limit (stays in memory)
+    _HANDOFF_RECAP_TURNS = 5           # how many recent pairs to inline into the recap
+    _HANDOFF_RECAP_CHARS = 500         # per-entry truncation in the inline recap
+
+    def _append_transcript(self, session_name: str, role: str, text: str, model: str) -> None:
+        """Record a turn in the in-memory transcript for cross-provider bridging.
+        `role` is 'user' or 'assistant'. Non-persistent — wiped on restart and
+        on /clear; used only to synthesize the handoff recap."""
+        if not session_name or not text:
+            return
+        entry = {
+            "role": role,
+            "text": text[: self._TRANSCRIPT_ENTRY_CHARS],
+            "model": model,
+            "ts": time.time(),
+        }
+        with self._transcripts_lock:
+            turns = self._transcripts.setdefault(session_name, [])
+            turns.append(entry)
+            # Keep last N pairs (N*2 entries) to bound memory.
+            cap = self._TRANSCRIPT_MAX_TURNS * 2
+            if len(turns) > cap:
+                self._transcripts[session_name] = turns[-cap:]
+
+    def _build_handoff_block(self, session_name: str, from_model: str, to_model: str) -> str:
+        """Return a recap block to prepend to the first user prompt after a
+        provider switch. Also writes the full transcript to /tmp so the new
+        provider can read it in full when it needs deeper context."""
+        with self._transcripts_lock:
+            turns = list(self._transcripts.get(session_name, []))
+        if not turns:
+            return ""
+
+        # Write the full transcript to /tmp — new provider can read it on demand.
+        ts_tag = time.strftime("%Y%m%d-%H%M%S")
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "-", session_name)[:40]
+        tmp_path = Path(f"/tmp/claude-bot-handoff-{safe_name}-{ts_tag}.md")
+        try:
+            lines = [
+                f"# Handoff transcript — sessão `{session_name}`",
+                f"_De {from_model} para {to_model} · {len(turns)//2} turns registrados · {ts_tag}_",
+                "",
+                "---",
+                "",
+            ]
+            for t in turns:
+                who = "Usuário" if t["role"] == "user" else f"Assistente ({t.get('model') or '?'})"
+                lines.append(f"**{who}:**\n\n{t['text']}\n")
+            tmp_path.write_text("\n".join(lines), encoding="utf-8")
+            tmp_hint = str(tmp_path)
+        except Exception as exc:
+            logger.warning("Handoff transcript write failed: %s", exc)
+            tmp_hint = None
+
+        # Build the inline recap — last N pairs, each truncated.
+        recent = turns[-(self._HANDOFF_RECAP_TURNS * 2):]
+        block = [
+            f"## Recap cross-provider (trocou de {from_model} para {to_model})",
+            f"Últimas {len(recent)//2 if recent else 0} trocas na sessão:",
+            "",
+        ]
+        for t in recent:
+            who = "Usuário" if t["role"] == "user" else f"Assistente ({t.get('model') or '?'})"
+            txt = t["text"]
+            if len(txt) > self._HANDOFF_RECAP_CHARS:
+                txt = txt[: self._HANDOFF_RECAP_CHARS].rstrip() + "…"
+            block.append(f"**{who}:** {txt}")
+            block.append("")
+        if tmp_hint:
+            block.append(
+                f"_Transcrição completa em `{tmp_hint}` — leia esse arquivo se precisar de "
+                "qualquer detalhe que esse recap omitiu._"
+            )
+            block.append("")
+        block.append("---")
+        block.append("")
+        return "\n".join(block)
 
     def cmd_model_keyboard(self) -> None:
         rows = [
@@ -8143,6 +8250,10 @@ class ClaudeTelegramBot:
             s.preferred_model = None
             s.rate_limit_until = None
             self.sessions.save()
+            # Wipe the cross-provider bridging buffers too — fresh start.
+            with self._transcripts_lock:
+                self._transcripts.pop(s.name, None)
+                self._handoff_pending.pop(s.name, None)
             self.send_message(f"🔄 Sessão `{s.name}` resetada (session\\_id removido).")
         else:
             self.send_message("❌ Nenhuma sessão ativa.")
@@ -10403,6 +10514,10 @@ class ClaudeTelegramBot:
         # Resolve inactivity timeout: explicit param > user-configured /timeout value
         if inactivity_timeout is None:
             inactivity_timeout = self.timeout_seconds
+        # Snapshot the raw user prompt BEFORE any enrichment (handoff block,
+        # skill hint, journal nudge, etc.) so the transcript we feed back to
+        # the other provider on /gpt↔/sonnet toggle stays clean.
+        raw_user_prompt = prompt
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
@@ -10423,6 +10538,21 @@ class ClaudeTelegramBot:
             return
 
         session = self._get_session()
+
+        # Cross-provider handoff: if the user just switched Claude↔GPT and a
+        # transcript exists, prepend a recap block (with a /tmp file pointer
+        # for full context) to this turn's prompt. Consumed once; cleared
+        # after injection so subsequent turns talk to the new provider
+        # naturally. Only fires on fresh turns (not retries / routines).
+        if not _retry and not routine_mode and session:
+            with self._transcripts_lock:
+                pending = self._handoff_pending.pop(session.name, None)
+            if pending:
+                block = self._build_handoff_block(
+                    session.name, pending["from_model"], pending["to_model"]
+                )
+                if block:
+                    prompt = block + "\n" + prompt
 
         # Rate-limit fallback auto-restore: when the TTL set at fallback time
         # has elapsed, swap back to the user's preferred model so the next
@@ -10767,8 +10897,9 @@ class ClaudeTelegramBot:
                         )
                         return
 
-        # Finalize
-        self._finalize_response(session, runner, prompt=prompt if not _retry else None,
+        # Finalize — pass raw_user_prompt (pre-enrichment) so the transcript
+        # stored for cross-provider handoff doesn't carry recap/hint prefixes.
+        self._finalize_response(session, runner, prompt=raw_user_prompt if not _retry else None,
                                 routine_mode=routine_mode, force_tts=tts_this_request,
                                 suppress_text=force_tts, effective_model=effective_model)
 
@@ -10951,6 +11082,18 @@ class ClaudeTelegramBot:
         # ("no rollout found" on Codex; stale --resume on Claude).
         if _persist_captured_id(session, runner, effective_model or session.model):
             self.sessions.save()
+
+        # Record this turn in the cross-provider transcript buffer so the
+        # user can toggle /gpt ↔ /sonnet without losing context. Only on
+        # successful turns (skip error paths — nothing useful to recap).
+        turn_model = effective_model or session.model
+        if (not routine_mode and not runner.error_text
+                and runner.exit_code in (None, 0) and session):
+            if prompt:
+                self._append_transcript(session.name, "user", prompt, turn_model)
+            reply_text = (runner.result_text or runner.accumulated_text or "").strip()
+            if reply_text:
+                self._append_transcript(session.name, "assistant", reply_text, turn_model)
 
         # Auto session management (interactive sessions only). Use the
         # provider-appropriate resume id so GPT sessions (which may only have
