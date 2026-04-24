@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.44.3"  # fix: CodexRunner auto-recovers from stale rollout IDs + friendly /clear hint
+BOT_VERSION = "3.44.4"  # fix: /gpt uses gpt-5 (ChatGPT OAuth), parse nested error JSON, hide gpt-5-codex from picker
 
 import hmac
 import hashlib
@@ -819,7 +819,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/opus` — Usar Opus
 • `/haiku` — Usar Haiku
 • `/glm` — Usar GLM 4.7 (z.AI, requer `ZAI_API_KEY`)
-• `/gpt` — Usar GPT-5 Codex (OpenAI, requer `codex login` com ChatGPT Plus/Pro)
+• `/gpt` — Usar GPT-5 (OpenAI, requer `codex login` com ChatGPT Plus/Pro)
 • `/model` — Escolher modelo (teclado)
 • `/restart-agent` — Restaurar modelo preferido após fallback por rate limit
 
@@ -4346,11 +4346,29 @@ _CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
 def _translate_openai_error(raw: str) -> str:
     """Map Codex/OpenAI error strings to friendly Portuguese.
 
-    Grows as we capture real error samples — the patterns below cover the
-    documented error types plus common stderr strings. Fail-loud default:
-    unknown errors surface as-is so nothing gets silently swallowed."""
+    Codex sometimes nests a JSON payload inside the event's `message` field
+    (e.g. a 400 from the upstream API is stringified then embedded). Unwrap
+    it before matching patterns. Fail-loud default: unknown errors surface
+    verbatim so nothing is silently swallowed."""
+    if not raw:
+        return "❌ Erro do Codex (mensagem vazia)."
+    # Unwrap nested JSON error payload if present
+    stripped = raw.strip()
+    if stripped.startswith("{") and '"message"' in stripped:
+        try:
+            obj = json.loads(stripped)
+            inner = obj.get("error", {}).get("message") or obj.get("message")
+            if inner:
+                raw = str(inner)
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            pass
     low = raw.lower()
-    if "not authenticated" in low or "please run" in low and "login" in low:
+    if "not supported when using codex with a chatgpt account" in low:
+        return (
+            "❌ Este modelo GPT exige OpenAI API key — não funciona com a assinatura "
+            "ChatGPT Plus/Pro. Troque para `/gpt` (gpt-5) ou configure uma API key."
+        )
+    if "not authenticated" in low or ("please run" in low and "login" in low):
         return "❌ Codex não autenticado. Rode `codex login` no terminal."
     if "no rollout found" in low:
         return (
@@ -4446,11 +4464,17 @@ class CodexRunner:
         #   codex exec <flags> [PROMPT]
         # Working directory is set via Popen(cwd=workspace) below — Codex has
         # no --cd/--cwd flag; the subprocess cwd is what it uses.
+        #
+        # IMPORTANT: `--model` is intentionally omitted. When authenticated via
+        # `codex login` (ChatGPT Plus/Pro OAuth), Codex rejects any explicit
+        # --model value with `400 The 'X' model is not supported when using
+        # Codex with a ChatGPT account`. The CLI picks the right model based
+        # on the user's subscription tier. API-key users who want a specific
+        # model should set it in `~/.codex/config.toml`.
         flags = [
             "--json",
             "--full-auto",            # auto-approve all operations — no TTY prompts
             "--skip-git-repo-check",  # vault workspace isn't always a git repo
-            "--model", model,
         ]
         if effort:
             # Codex exposes reasoning effort via -c key=value global config override.
@@ -4657,12 +4681,20 @@ class CodexRunner:
             # Keep cost_usd at 0.0 — /cost shows "openai" as $0.00 until we
             # implement the token→price mapping. Flag to the user in docs.
 
-        elif etype == "error":
-            err = obj.get("error", {}) or {}
-            err_msg = err.get("message", "") if isinstance(err, dict) else str(err)
-            logger.error("Codex stream error: %s", err_msg[:300])
+        elif etype in ("error", "turn.failed"):
+            # Codex error events can carry the message either at top-level
+            # ({"type":"error","message":"..."}) or nested under "error"
+            # ({"type":"turn.failed","error":{"message":"..."}}). Handle both.
+            err_msg = obj.get("message") or ""
+            if not err_msg:
+                err = obj.get("error", {}) or {}
+                if isinstance(err, dict):
+                    err_msg = err.get("message", "") or json.dumps(err)
+                else:
+                    err_msg = str(err)
+            logger.error("Codex stream error: %s", (err_msg or "")[:300])
             if not self.error_text:
-                self.error_text = _translate_openai_error(err_msg or json.dumps(err))
+                self.error_text = _translate_openai_error(err_msg)
 
     def _cleanup(self) -> None:
         self.running = False
@@ -7813,9 +7845,11 @@ class ClaudeTelegramBot:
                 {"text": "GLM 4.5 Air", "callback_data": "model:glm-4.5-air"},
             ])
         if CODEX_ENABLED:
+            # Only gpt-5 works with ChatGPT Plus/Pro OAuth. gpt-5-codex
+            # requires an OpenAI API key and is hidden from the default picker
+            # — users who want it can set the model explicitly.
             rows.append([
                 {"text": "GPT-5", "callback_data": "model:gpt-5"},
-                {"text": "GPT-5 Codex", "callback_data": "model:gpt-5-codex"},
             ])
         markup = {"inline_keyboard": rows}
         self.send_message("Escolha o modelo:", reply_markup=markup)
@@ -11275,7 +11309,7 @@ class ClaudeTelegramBot:
                 "/opus": lambda: self.cmd_model_switch("opus"),
                 "/haiku": lambda: self.cmd_model_switch("haiku"),
                 "/glm": lambda: self.cmd_model_switch("glm-4.7"),
-                "/gpt": lambda: self.cmd_model_switch("gpt-5-codex"),
+                "/gpt": lambda: self.cmd_model_switch("gpt-5"),
                 "/model": lambda: self.cmd_model_keyboard(),
                 "/new": lambda: self.cmd_new(arg if arg else None),
                 "/sessions": lambda: self.cmd_sessions_list(),
@@ -11806,7 +11840,7 @@ class ClaudeTelegramBot:
             {"command": "opus", "description": "Usar modelo Opus"},
             {"command": "haiku", "description": "Usar modelo Haiku"},
             {"command": "glm", "description": "Usar modelo GLM 4.7 (z.AI)"},
-            {"command": "gpt", "description": "Usar modelo GPT-5 Codex (ChatGPT Plus/Pro)"},
+            {"command": "gpt", "description": "Usar modelo GPT-5 (ChatGPT Plus/Pro)"},
             {"command": "model", "description": "Escolher modelo"},
             {"command": "agent", "description": "Gerenciar agentes"},
             {"command": "skill", "description": "Gerenciar skills"},
