@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.44.2"  # fix: register /glm and /gpt in Telegram setMyCommands autocomplete
+BOT_VERSION = "3.44.3"  # fix: CodexRunner auto-recovers from stale rollout IDs + friendly /clear hint
 
 import hmac
 import hashlib
@@ -4352,6 +4352,11 @@ def _translate_openai_error(raw: str) -> str:
     low = raw.lower()
     if "not authenticated" in low or "please run" in low and "login" in low:
         return "❌ Codex não autenticado. Rode `codex login` no terminal."
+    if "no rollout found" in low:
+        return (
+            "❌ Sessão Codex corrompida (rollout não encontrado). "
+            "Rode `/clear` para recomeçar — o bot vai abrir uma thread nova no próximo turno."
+        )
     if "usage limit" in low or "quota" in low:
         return "❌ Limite de uso do ChatGPT Plus atingido. Tente mais tarde ou use outro provider."
     if "rate limit" in low:
@@ -4513,6 +4518,49 @@ class CodexRunner:
             logger.error(self.error_text, exc_info=True)
         finally:
             self._cleanup()
+
+        # Auto-recover from stale rollout IDs (e.g. when a previous turn
+        # captured a thread_id but never persisted it because the spawn
+        # crashed). Retry once as a fresh session — the NEW captured_session_id
+        # replaces the dead one on _finalize_response.
+        if (session_id
+                and not self.accumulated_text
+                and "no rollout found" in (self.error_text or "").lower()):
+            logger.info("Codex rollout %s not found — retrying as fresh session", session_id)
+            # Reset runtime state
+            self.accumulated_text = ""
+            self.accumulated_thinking = ""
+            self.result_text = ""
+            self.tool_log = []
+            self.cost_usd = 0.0
+            self.total_cost_usd = 0.0
+            self.captured_session_id = None
+            self.error_text = ""
+            self.stderr_text = ""
+            self.exit_code = None
+            self.activity_type = "thinking"
+            self.running = True
+            self.last_activity = time.time()
+            fresh_cmd = [CODEX_PATH, "exec"] + flags + [full_prompt]
+            try:
+                self.process = subprocess.Popen(
+                    fresh_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    stdin=subprocess.PIPE,
+                    cwd=workspace,
+                    env=clean_env,
+                    text=True,
+                    bufsize=1,
+                )
+                if self.process.stdin:
+                    self.process.stdin.close()
+                self._read_stream()
+            except Exception as exc:
+                self.error_text = f"❌ Erro ao executar Codex (retry fresh): {exc}"
+                logger.error(self.error_text, exc_info=True)
+            finally:
+                self._cleanup()
 
     def _read_stream(self) -> None:
         assert self.process and self.process.stdout

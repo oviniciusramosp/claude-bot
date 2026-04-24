@@ -511,10 +511,14 @@ class CodexRunnerAuthGate(unittest.TestCase):
         cls.bot = load_bot_module()
 
     def test_missing_binary_sets_error_and_bails(self):
+        # Patch the detector too — the runner re-detects when disabled, so on
+        # machines that actually have codex installed the test would otherwise
+        # fall through to the real binary.
         self.bot.CODEX_ENABLED = False
         self.bot.CODEX_PATH = None
         runner = self.bot.CodexRunner()
-        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+        with patch.object(self.bot, "_detect_codex_path", return_value=None), \
+             patch.object(self.bot.subprocess, "Popen") as mock_popen:
             runner.run(prompt="hi", model="gpt-5", system_prompt=None)
         mock_popen.assert_not_called()
         self.assertIn("Codex CLI", runner.error_text)
