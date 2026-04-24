@@ -399,5 +399,142 @@ class ProviderRouting(unittest.TestCase):
         self.assertEqual(self.bot.model_provider("glm-4.7"), "zai")
 
 
+class CodexHandleEvent(unittest.TestCase):
+    """Parser tests for CodexRunner._handle_event. Drives the JSONL shapes
+    documented by the Codex CLI (thread.started, item.started/completed,
+    turn.completed, error) to lock the normalization contract. # VERIFY field
+    names against real sample output during smoke test."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def setUp(self):
+        self.runner = self.bot.CodexRunner()
+        self.runner.running = True
+
+    def test_thread_started_captures_session_id(self):
+        self.runner._handle_event({"type": "thread.started", "thread_id": "thr-xyz"})
+        self.assertEqual(self.runner.captured_session_id, "thr-xyz")
+
+    def test_agent_message_item_accumulates_text(self):
+        self.runner._handle_event({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "Olá "},
+        })
+        self.runner._handle_event({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "mundo"},
+        })
+        self.assertEqual(self.runner.accumulated_text, "Olá mundo")
+        self.assertEqual(self.runner.activity_type, "text")
+
+    def test_reasoning_item_accumulates_thinking(self):
+        self.runner._handle_event({
+            "type": "item.completed",
+            "item": {"type": "reasoning", "text": "pensando..."},
+        })
+        self.assertIn("pensando", self.runner.accumulated_thinking)
+        self.assertEqual(self.runner.activity_type, "thinking")
+
+    def test_command_execution_logs_tool_call(self):
+        self.runner._handle_event({
+            "type": "item.started",
+            "item": {"type": "command_execution", "command": "ls -la /tmp"},
+        })
+        self.assertEqual(len(self.runner.tool_log), 1)
+        self.assertIn("Bash", self.runner.tool_log[0])
+        self.assertIn("ls -la", self.runner.tool_log[0])
+
+    def test_file_change_logs_edit(self):
+        self.runner._handle_event({
+            "type": "item.started",
+            "item": {"type": "file_change", "path": "src/models/user.py"},
+        })
+        self.assertEqual(len(self.runner.tool_log), 1)
+        self.assertIn("Edit", self.runner.tool_log[0])
+
+    def test_turn_completed_finalizes_result_text(self):
+        self.runner.accumulated_text = "resposta acumulada"
+        self.runner._handle_event({"type": "turn.completed", "usage": {"input_tokens": 10}})
+        self.assertEqual(self.runner.result_text, "resposta acumulada")
+
+    def test_error_event_sets_error_text_translated(self):
+        self.runner._handle_event({
+            "type": "error",
+            "error": {"message": "rate limit exceeded, try later"},
+        })
+        self.assertIn("Rate limit", self.runner.error_text)
+
+    def test_unknown_event_does_not_crash(self):
+        self.runner._handle_event({"type": "fancy.new.event", "data": "?"})
+
+    def test_tool_log_caps_at_200(self):
+        for i in range(250):
+            self.runner._handle_event({
+                "type": "item.started",
+                "item": {"type": "command_execution", "command": f"echo {i}"},
+            })
+        self.assertLessEqual(len(self.runner.tool_log), 200)
+
+
+class MakeRunnerForDispatch(unittest.TestCase):
+    """Ensure _make_runner_for picks CodexRunner vs ClaudeRunner by provider."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def test_gpt_returns_codex_runner(self):
+        r = self.bot._make_runner_for("gpt-5")
+        self.assertIsInstance(r, self.bot.CodexRunner)
+
+    def test_gpt_codex_returns_codex_runner(self):
+        r = self.bot._make_runner_for("gpt-5-codex")
+        self.assertIsInstance(r, self.bot.CodexRunner)
+
+    def test_sonnet_returns_claude_runner(self):
+        r = self.bot._make_runner_for("sonnet")
+        self.assertIsInstance(r, self.bot.ClaudeRunner)
+
+    def test_glm_returns_claude_runner(self):
+        # GLM still uses ClaudeRunner (via z.AI proxy), not CodexRunner
+        r = self.bot._make_runner_for("glm-5.1")
+        self.assertIsInstance(r, self.bot.ClaudeRunner)
+
+
+class CodexRunnerAuthGate(unittest.TestCase):
+    """Ensure CodexRunner fails loud before subprocess when auth is missing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def test_missing_binary_sets_error_and_bails(self):
+        self.bot.CODEX_ENABLED = False
+        self.bot.CODEX_PATH = None
+        runner = self.bot.CodexRunner()
+        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+            runner.run(prompt="hi", model="gpt-5", system_prompt=None)
+        mock_popen.assert_not_called()
+        self.assertIn("Codex CLI", runner.error_text)
+
+    def test_missing_auth_sets_error_and_bails(self):
+        self.bot.CODEX_ENABLED = True
+        self.bot.CODEX_PATH = "/tmp/fake-codex-that-exists"
+        # Make the fake binary actually exist so the early guard passes
+        open(self.bot.CODEX_PATH, "w").close()
+        # Point auth file at a non-existent path
+        self.bot._CODEX_AUTH_FILE = self.bot.Path("/tmp/__definitely_not_there__codex_auth.json")
+        try:
+            runner = self.bot.CodexRunner()
+            with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+                runner.run(prompt="hi", model="gpt-5", system_prompt=None)
+            mock_popen.assert_not_called()
+            self.assertIn("codex login", runner.error_text)
+        finally:
+            os.remove(self.bot.CODEX_PATH)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -262,6 +262,60 @@ struct SettingsView: View {
                 .padding(.top, Spacing.xs)
         }
 
+        // ChatGPT (Codex CLI)
+        SectionCard(title: "ChatGPT (Codex CLI)", symbol: "brain") {
+            SettingRow("Binary") {
+                HStack(spacing: Spacing.sm) {
+                    Circle()
+                        .fill(codexBinaryExists ? Color.statusGreen : Color.statusRed)
+                        .frame(width: 8, height: 8)
+                    Text(codexBinaryExists ? config.codexPath : "Não instalado")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(codexBinaryExists ? .primary : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+
+            SettingRow("Login") {
+                HStack(spacing: Spacing.sm) {
+                    Circle()
+                        .fill(codexAuthExists ? Color.statusGreen : Color.statusRed)
+                        .frame(width: 8, height: 8)
+                    Text(codexAuthExists ? "Logado com ChatGPT" : "Rode `codex login`")
+                        .font(.callout)
+                        .foregroundStyle(codexAuthExists ? .primary : .secondary)
+                }
+            }
+
+            HStack {
+                Spacer()
+                if !codexBinaryExists {
+                    Button {
+                        openTerminal(with: "brew install --cask codex && codex login")
+                    } label: {
+                        Label("Instalar Codex", systemImage: "arrow.down.circle")
+                            .font(.callout)
+                    }
+                    .buttonStyle(.bordered)
+                } else if !codexAuthExists {
+                    Button {
+                        openTerminal(with: "codex login")
+                    } label: {
+                        Label("codex login", systemImage: "key.fill")
+                            .font(.callout)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.top, Spacing.xs)
+
+            Text("Conecta sua assinatura ChatGPT Plus/Pro via OAuth. Habilita GPT-5 e GPT-5 Codex em rotinas, pipelines e /model.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.top, Spacing.xs)
+        }
+
         // Paths Info
         SectionCard(title: "Data Paths", symbol: "folder") {
             PathRow(label: "Bot Dir", path: appState.dataDir)
@@ -403,7 +457,11 @@ struct SettingsView: View {
                 .foregroundStyle(.secondary)
                 .padding(.bottom, Spacing.xs)
 
-            FallbackChainEditor(chain: $config.modelFallbackChain, zaiKeySet: !config.zaiApiKey.isEmpty)
+            FallbackChainEditor(
+                chain: $config.modelFallbackChain,
+                zaiKeySet: !config.zaiApiKey.isEmpty,
+                codexAvailable: codexBinaryExists && codexAuthExists
+            )
         }
 
         // Vault Rules (universal — vault/CLAUDE.md)
@@ -812,6 +870,26 @@ struct SettingsView: View {
 
     // MARK: - Webhooks Tab
 
+    // MARK: - Codex (ChatGPT) status helpers
+
+    private var codexBinaryExists: Bool {
+        FileManager.default.fileExists(atPath: config.codexPath)
+    }
+
+    private var codexAuthExists: Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return FileManager.default.fileExists(atPath: home.appendingPathComponent(".codex/auth.json").path)
+    }
+
+    private func openTerminal(with command: String) {
+        // Escape double quotes inside the command for AppleScript embedding.
+        let escaped = command.replacingOccurrences(of: "\"", with: "\\\"")
+        let script = "tell application \"Terminal\" to do script \"\(escaped)\""
+        let task = Process()
+        task.launchPath = "/usr/bin/osascript"
+        task.arguments = ["-e", script]
+        try? task.run()
+    }
 }
 
 struct PathRow: View {

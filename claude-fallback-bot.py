@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.43.0"  # feat: ClaudeBotManager shows in Dock with robot icon
+BOT_VERSION = "3.44.0"  # feat: ChatGPT via Codex CLI as third model provider
 
 import hmac
 import hashlib
@@ -77,6 +77,8 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("MODEL_FALLBACK_CHAIN", _v)
             elif _k == "SHOW_SIGNATURE":
                 os.environ.setdefault("SHOW_SIGNATURE", _v)
+            elif _k == "CODEX_PATH":
+                os.environ.setdefault("CODEX_PATH", _v)
 # Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
 MODEL_FALLBACK_CHAIN = [
     m.strip() for m in
@@ -106,6 +108,29 @@ def _detect_claude_path() -> str:
     return "/opt/homebrew/bin/claude"
 
 CLAUDE_PATH = _detect_claude_path()
+
+
+def _detect_codex_path() -> Optional[str]:
+    """Locate the codex CLI binary. Returns None if not installed (valid state —
+    ChatGPT/Codex is opt-in, the bot works fine without it)."""
+    env_path = os.environ.get("CODEX_PATH")
+    if env_path and os.path.isfile(env_path):
+        return env_path
+    for candidate in (
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        os.path.expanduser("~/.local/bin/codex"),
+        os.path.expanduser("~/.npm-global/bin/codex"),
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    from shutil import which
+    return which("codex")
+
+
+CODEX_PATH: Optional[str] = _detect_codex_path()
+CODEX_ENABLED: bool = bool(CODEX_PATH and os.path.isfile(CODEX_PATH))
+
 # Default workspace for interactive sessions on the Main agent. In v3.0 the
 # Main agent is just another agent and owns its own folder directly at the
 # vault root (vault/main/). No `Agents/` wrapper — the user's diagram shows
@@ -334,8 +359,10 @@ TTS_LOCALE_NAMES = {
     "ja-JP": "Japanese", "zh-CN": "Chinese", "en-GB": "British English",
 }
 
-# Model → provider mapping. Provider determines which API the claude CLI talks to.
-# "anthropic" = native Anthropic API. "zai" = z.AI gateway (Anthropic-compatible).
+# Model → provider mapping. Provider determines which runtime the bot dispatches to.
+# "anthropic" = claude CLI → native Anthropic API. "zai" = claude CLI → z.AI gateway
+# (Anthropic-compatible, via local proxy). "openai" = codex CLI → ChatGPT Plus/Pro
+# subscription (OAuth, no Anthropic wire format — handled by a separate CodexRunner).
 MODEL_PROVIDERS = {
     "sonnet": "anthropic",
     "opus": "anthropic",
@@ -343,6 +370,8 @@ MODEL_PROVIDERS = {
     "glm-5.1": "zai",
     "glm-4.7": "zai",
     "glm-4.5-air": "zai",
+    "gpt-5": "openai",
+    "gpt-5-codex": "openai",
 }
 
 # Short alias → full API model ID, used in the response signature.
@@ -353,6 +382,8 @@ MODEL_FULL_IDS: dict = {
     "glm-5.1":     "glm-5.1",
     "glm-4.7":     "glm-4.7",
     "glm-4.5-air": "glm-4.5-air",
+    "gpt-5":       "gpt-5",
+    "gpt-5-codex": "gpt-5-codex",
 }
 DEFAULT_MODEL = "sonnet"
 
@@ -402,12 +433,16 @@ def _build_signature(session, effective_model: Optional[str] = None) -> str:
 
 
 def model_provider(model: str) -> str:
-    """Returns 'zai' for GLM models, 'anthropic' otherwise. Prefix fallback
-    so new glm-* variants work without code changes."""
+    """Map a model id to its provider runtime: 'anthropic' | 'zai' | 'openai'.
+
+    Prefix fallbacks let new variants work without code changes:
+    glm* → zai, gpt-* → openai, everything else → anthropic."""
     if model in MODEL_PROVIDERS:
         return MODEL_PROVIDERS[model]
-    if model.startswith("glm-") or model.startswith("glm"):
+    if model.startswith("glm"):
         return "zai"
+    if model.startswith("gpt-"):
+        return "openai"
     return "anthropic"
 
 
@@ -784,6 +819,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/opus` — Usar Opus
 • `/haiku` — Usar Haiku
 • `/glm` — Usar GLM 4.7 (z.AI, requer `ZAI_API_KEY`)
+• `/gpt` — Usar GPT-5 Codex (OpenAI, requer `codex login` com ChatGPT Plus/Pro)
 • `/model` — Escolher modelo (teclado)
 • `/restart-agent` — Restaurar modelo preferido após fallback por rate limit
 
@@ -3943,10 +3979,11 @@ def _format_duration(seconds: float) -> str:
 def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str]:
     """Return the next model in MODEL_FALLBACK_CHAIN after failed_model, or None.
 
-    Skips GLM models when ZAI_API_KEY is not set.
-    Skips same-provider models for AUTH/CREDIT/RATE_LIMIT errors — these are
-    account-wide failures, so trying another model from the same provider is
-    almost certainly going to hit the same limit/credit/auth wall.
+    Skips GLM models when ZAI_API_KEY is not set, and gpt-* models when the
+    codex CLI isn't installed. Skips same-provider models for AUTH/CREDIT/
+    RATE_LIMIT errors — those are account-wide failures, so trying another
+    model from the same provider is almost certainly going to hit the same
+    limit/credit/auth wall.
     """
     if failed_model not in MODEL_FALLBACK_CHAIN:
         return None
@@ -3957,9 +3994,12 @@ def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str
     ) else None
 
     for candidate in MODEL_FALLBACK_CHAIN[idx + 1:]:
-        if model_provider(candidate) == "zai" and not ZAI_API_KEY:
+        cand_provider = model_provider(candidate)
+        if cand_provider == "zai" and not ZAI_API_KEY:
             continue
-        if skip_provider and model_provider(candidate) == skip_provider:
+        if cand_provider == "openai" and not CODEX_ENABLED:
+            continue
+        if skip_provider and cand_provider == skip_provider:
             continue
         return candidate
     return None
@@ -4296,6 +4336,349 @@ class ClaudeRunner:
 
 
 # ---------------------------------------------------------------------------
+# Codex Runner (OpenAI ChatGPT via `codex exec --json`)
+# ---------------------------------------------------------------------------
+
+
+_CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
+
+
+def _translate_openai_error(raw: str) -> str:
+    """Map Codex/OpenAI error strings to friendly Portuguese.
+
+    Grows as we capture real error samples — the patterns below cover the
+    documented error types plus common stderr strings. Fail-loud default:
+    unknown errors surface as-is so nothing gets silently swallowed."""
+    low = raw.lower()
+    if "not authenticated" in low or "please run" in low and "login" in low:
+        return "❌ Codex não autenticado. Rode `codex login` no terminal."
+    if "usage limit" in low or "quota" in low:
+        return "❌ Limite de uso do ChatGPT Plus atingido. Tente mais tarde ou use outro provider."
+    if "rate limit" in low:
+        return "❌ Rate limit do OpenAI atingido — aguarde antes de tentar novamente."
+    if "context window" in low or "context length" in low or "too long" in low:
+        return "❌ Contexto excede a janela do modelo GPT — reduza ou inicie nova sessão."
+    if "invalid model" in low or "model not found" in low:
+        return "❌ Modelo GPT inválido. Atualize o Codex CLI (`brew upgrade codex`)."
+    return f"❌ Erro do Codex: {raw[:300]}"
+
+
+class CodexRunner:
+    """Subprocess runner for OpenAI's codex CLI (ChatGPT Plus/Pro subscription).
+
+    Mirrors the ClaudeRunner public surface so _run_claude_prompt and the
+    downstream snapshot/cost/edit machinery work unchanged. Key differences:
+    codex has its own JSONL event schema (thread.started, item.started,
+    item.completed, turn.completed, error) that this class normalizes to the
+    same internal state ClaudeRunner produces. Auth is via OAuth file at
+    ~/.codex/auth.json (written by `codex login`) — no env var path.
+
+    NOTE: JSONL field shapes below are based on documented event types. Any
+    fields marked # VERIFY need confirmation against a real captured sample
+    (run: `codex exec --json "hi" | tee /tmp/codex-sample.jsonl`).
+    """
+
+    def __init__(self) -> None:
+        self.process: Optional[subprocess.Popen] = None
+        self.running = False
+        self.last_activity: float = 0.0
+        self.start_time: float = 0.0
+        self.accumulated_text: str = ""
+        self.accumulated_thinking: str = ""
+        self.result_text: str = ""
+        self.tool_log: List[str] = []
+        self.cost_usd: float = 0.0
+        self.total_cost_usd: float = 0.0
+        self.captured_session_id: Optional[str] = None
+        self.error_text: str = ""
+        self.stderr_text: str = ""
+        self.exit_code: Optional[int] = None
+        self.activity_type: str = ""
+        self._lock = threading.Lock()
+
+    def run(
+        self,
+        prompt: str,
+        model: str = "gpt-5-codex",
+        session_id: Optional[str] = None,
+        workspace: str = CLAUDE_WORKSPACE,
+        max_budget: Optional[float] = None,  # unused (Codex has no --max-budget)
+        effort: Optional[str] = None,
+        system_prompt: Optional[str] = SYSTEM_PROMPT,
+        lightweight: bool = False,  # unused, kept for API compat
+        agent_id: Optional[str] = None,
+    ) -> None:
+        global CODEX_PATH, CODEX_ENABLED
+        if not CODEX_ENABLED or not CODEX_PATH:
+            CODEX_PATH = _detect_codex_path()
+            CODEX_ENABLED = bool(CODEX_PATH and os.path.isfile(CODEX_PATH))
+        if not CODEX_ENABLED or not CODEX_PATH:
+            self.error_text = (
+                "❌ Codex CLI não encontrado. "
+                "Instale com `brew install --cask codex` e entre com `codex login`."
+            )
+            logger.error(self.error_text)
+            return
+        if not _CODEX_AUTH_FILE.exists():
+            self.error_text = (
+                "❌ Codex não autenticado. "
+                "Rode `codex login` no terminal para conectar sua assinatura ChatGPT Plus/Pro."
+            )
+            logger.error(self.error_text)
+            return
+
+        # Codex has no --append-system-prompt — prepend to the prompt body.
+        # Cost: the system prefix won't hit Codex's prompt cache, so repeated
+        # turns pay the prefix tokens each time. Acceptable trade-off; document
+        # in .claude/rules/multi-provider-models.md.
+        full_prompt = prompt
+        if system_prompt:
+            full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
+
+        # Build argv. Resume uses `exec resume <sid>` as a subcommand (NOT a
+        # flag on `exec`) — different shape from `claude --resume`. # VERIFY
+        if session_id:
+            cmd = [CODEX_PATH, "exec", "resume", session_id]
+        else:
+            cmd = [CODEX_PATH, "exec"]
+        cmd += [
+            "--json",
+            "--full-auto",            # auto-approve all operations — no TTY prompts
+            "--skip-git-repo-check",  # vault workspace isn't always a git repo
+            "--model", model,
+            "--cd", workspace,
+        ]
+        if effort:
+            # Codex exposes reasoning effort via the -c key=value flag.
+            # model_reasoning_effort accepts low|medium|high. # VERIFY key name.
+            cmd += ["-c", f"model_reasoning_effort={effort}"]
+        cmd += [full_prompt]
+
+        logger.info("Running codex: %s", " ".join(cmd[:6]) + " ...")
+        self.running = True
+        self.start_time = time.time()
+        self.last_activity = time.time()
+        self.accumulated_text = ""
+        self.accumulated_thinking = ""
+        self.result_text = ""
+        self.tool_log = []
+        self.cost_usd = 0.0
+        self.total_cost_usd = 0.0
+        self.captured_session_id = None
+        self.error_text = ""
+        self.stderr_text = ""
+        self.exit_code = None
+        self.activity_type = "thinking"
+
+        try:
+            clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+            clean_env["TELEGRAM_NOTIFY"] = str(
+                Path(__file__).resolve().parent / "scripts" / "telegram_notify.py"
+            )
+            if agent_id:
+                clean_env["AGENT_ID"] = agent_id
+                _agent_def = load_agent(agent_id)
+                if _agent_def:
+                    _cid = _agent_def.get("chat_id") or _agent_def.get("telegram_chat_id", "")
+                    _tid = _agent_def.get("thread_id") or _agent_def.get("telegram_thread_id", "")
+                    if _cid:
+                        clean_env["AGENT_CHAT_ID"] = str(_cid)
+                    if _tid:
+                        clean_env["AGENT_THREAD_ID"] = str(_tid)
+            # Strip any ANTHROPIC_* vars that the GLM proxy may have set in a
+            # prior run — Codex talks to OpenAI, not Anthropic.
+            for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+                clean_env.pop(k, None)
+
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=subprocess.PIPE,
+                cwd=workspace,
+                env=clean_env,
+                text=True,
+                bufsize=1,
+            )
+            if self.process.stdin:
+                self.process.stdin.close()
+            self._read_stream()
+        except FileNotFoundError:
+            self.error_text = f"❌ Codex CLI não encontrado em {cmd[0]}"
+            logger.error(self.error_text)
+        except Exception as exc:
+            self.error_text = f"❌ Erro ao executar Codex: {exc}"
+            logger.error(self.error_text, exc_info=True)
+        finally:
+            self._cleanup()
+
+    def _read_stream(self) -> None:
+        assert self.process and self.process.stdout
+        for raw_line in self.process.stdout:
+            self.last_activity = time.time()
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            self._handle_event(obj)
+        if self.process.stderr:
+            stderr = self.process.stderr.read()
+            if stderr and stderr.strip():
+                stderr_clean = stderr.strip()
+                self.stderr_text = stderr_clean
+                logger.warning("Codex stderr: %s", stderr_clean[:500])
+                if not self.accumulated_text and not self.result_text and not self.error_text:
+                    self.error_text = _translate_openai_error(stderr_clean)
+
+    def _handle_event(self, obj: Dict[str, Any]) -> None:
+        """Normalize a Codex JSONL event to the same internal state the
+        ClaudeRunner produces. # VERIFY event shapes against real sample."""
+        etype = obj.get("type", "")
+
+        if etype == "thread.started":
+            sid = obj.get("thread_id") or obj.get("session_id")  # # VERIFY field name
+            if sid:
+                with self._lock:
+                    self.captured_session_id = sid
+
+        elif etype == "item.started":
+            item = obj.get("item", {}) or {}
+            itype = item.get("type", "")
+            if itype == "agent_message":
+                with self._lock:
+                    self.activity_type = "text"
+                    self.last_activity = time.time()
+            elif itype == "reasoning":
+                with self._lock:
+                    self.activity_type = "thinking"
+                    self.last_activity = time.time()
+            elif itype in ("command_execution", "file_change", "mcp_tool_call"):
+                hint = ""
+                tool_name = "Bash"  # default fallback
+                if itype == "command_execution":
+                    cmd_str = item.get("command", "") or item.get("cmd", "")
+                    hint = cmd_str[:60] + ("…" if len(cmd_str) > 60 else "")
+                    tool_name = "Bash"
+                elif itype == "file_change":
+                    path = item.get("path", "") or item.get("file", "")
+                    if "/" in path:
+                        parts = path.rstrip("/").split("/")
+                        hint = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+                    else:
+                        hint = path
+                    tool_name = "Edit"
+                elif itype == "mcp_tool_call":
+                    hint = item.get("name", "") or item.get("tool", "")
+                    tool_name = "MCP"
+                entry = f"🔧 {tool_name}" + (f": `{hint}`" if hint else "")
+                with self._lock:
+                    self.tool_log.append(entry)
+                    if len(self.tool_log) > 200:
+                        self.tool_log = self.tool_log[-100:]
+                    self.activity_type = _TOOL_ACTIVITY_MAP.get(tool_name, "tool")
+                    self.last_activity = time.time()
+
+        elif etype == "item.completed":
+            item = obj.get("item", {}) or {}
+            itype = item.get("type", "")
+            if itype == "agent_message":
+                text = item.get("text", "") or item.get("content", "")  # # VERIFY field name
+                if text:
+                    with self._lock:
+                        self.accumulated_text += text
+                        self.activity_type = "text"
+            elif itype == "reasoning":
+                text = item.get("text", "") or item.get("content", "")
+                if text:
+                    with self._lock:
+                        if self.accumulated_thinking:
+                            self.accumulated_thinking += "\n"
+                        self.accumulated_thinking += text
+                        self.activity_type = "thinking"
+
+        elif etype == "turn.completed":
+            # Docs mention usage data here. Cost tracking is deferred to v3.45
+            # per the plan — we just finalize result_text.
+            if not self.result_text and self.accumulated_text:
+                self.result_text = self.accumulated_text
+            # Keep cost_usd at 0.0 — /cost shows "openai" as $0.00 until we
+            # implement the token→price mapping. Flag to the user in docs.
+
+        elif etype == "error":
+            err = obj.get("error", {}) or {}
+            err_msg = err.get("message", "") if isinstance(err, dict) else str(err)
+            logger.error("Codex stream error: %s", err_msg[:300])
+            if not self.error_text:
+                self.error_text = _translate_openai_error(err_msg or json.dumps(err))
+
+    def _cleanup(self) -> None:
+        self.running = False
+        if self.process:
+            try:
+                self.process.stdout and self.process.stdout.close()
+                self.process.stderr and self.process.stderr.close()
+                self.process.wait(timeout=5)
+                self.exit_code = self.process.returncode
+            except Exception:
+                self.exit_code = None
+            self.process = None
+        else:
+            self.exit_code = None
+
+    def cancel(self) -> None:
+        proc = self.process
+        if not proc or not self.running:
+            return
+        logger.info("Cancelling Codex process PID %d", proc.pid)
+        try:
+            proc.send_signal(signal.SIGINT)
+            time.sleep(3)
+            if proc.poll() is None:
+                proc.terminate()
+                time.sleep(2)
+                if proc.poll() is None:
+                    proc.kill()
+        except Exception as exc:
+            logger.error("Error cancelling Codex process: %s", exc)
+
+    def send_btw(self, message: str) -> bool:
+        # Codex CLI doesn't document a live-inject mechanism for non-interactive
+        # runs. Return False so the bot falls back to queueing the BTW for the
+        # next turn (existing behavior in _run_claude_prompt).
+        return False
+
+    def get_snapshot(self) -> str:
+        with self._lock:
+            if self.accumulated_text:
+                if self.tool_log:
+                    recent_tools = "\n".join(self.tool_log[-5:])
+                    return f"{recent_tools}\n\n{self.accumulated_text}"
+                return self.accumulated_text
+            elif self.tool_log:
+                return "\n".join(self.tool_log[-10:])
+            return ""
+
+    def get_thinking_snapshot(self, max_chars: int = 1500) -> str:
+        with self._lock:
+            t = self.accumulated_thinking
+            if not t:
+                return ""
+            if len(t) > max_chars:
+                return "...\n" + t[-max_chars:]
+            return t
+
+
+def _make_runner_for(model: str):
+    """Return the appropriate runner (ClaudeRunner or CodexRunner) for a model.
+    Used so routines, subagents, and background spawns always pick the right
+    subprocess target based on the session's current model."""
+    return CodexRunner() if model_provider(model) == "openai" else ClaudeRunner()
+
+
+# ---------------------------------------------------------------------------
 # Agent helpers
 # ---------------------------------------------------------------------------
 
@@ -4499,9 +4882,18 @@ class ThreadContext:
     _auto_agent: Optional[str] = None  # agent ID set by auto-routing (None = manual or unset)
     _manual_override: bool = False  # True when user explicitly switched agent in this context
 
-    def ensure_runner(self) -> "ClaudeRunner":
-        if self.runner is None:
-            self.runner = ClaudeRunner()
+    def ensure_runner(self, model: Optional[str] = None):
+        """Return a runner, creating or swapping types if the model's provider
+        changed (openai ↔ anthropic/zai). Never swaps mid-run — if the cached
+        runner is currently running, returns it as-is. Callers pass `model`
+        when known so the type matches on first dispatch."""
+        want_codex = bool(model and model_provider(model) == "openai")
+        target_type = CodexRunner if want_codex else ClaudeRunner
+        cached = self.runner
+        if cached is None:
+            self.runner = target_type()
+        elif not isinstance(cached, target_type) and not cached.running:
+            self.runner = target_type()
         return self.runner
 
 
@@ -4981,8 +5373,8 @@ class PipelineExecutor:
         # Build prompt with workspace context
         prompt = self._build_step_prompt(step, data_dir)
 
-        # Create a fresh ClaudeRunner for this step
-        runner = ClaudeRunner()
+        # Create a fresh runner for this step — matches the step's provider
+        runner = _make_runner_for(step.model)
         with self._lock:
             self._active_runners[step.id] = runner
 
@@ -5060,7 +5452,7 @@ class PipelineExecutor:
                         if self._cancelled.is_set():
                             raise RuntimeError("Pipeline cancelled during nested session wait")
                         logger.info("Pipeline %s: retrying step %s after nested session wait", self.task.name, step.id)
-                        runner2 = ClaudeRunner()
+                        runner2 = _make_runner_for(step.model)
                         with self._lock:
                             self._active_runners[step.id] = runner2
                         runner2.run(prompt, model=step.model, workspace=ws,
@@ -5142,7 +5534,7 @@ class PipelineExecutor:
         cancellation, or runner error. Updates the pipeline's active-runners
         registry so `cancel()` can abort mid-loop.
         """
-        runner = ClaudeRunner()
+        runner = _make_runner_for(step.model)
         with self._lock:
             self._active_runners[step.id] = runner
         try:
@@ -7328,7 +7720,7 @@ class ClaudeTelegramBot:
         self.send_message("\n".join(lines))
 
     def cmd_model_switch(self, model: str) -> None:
-        if model not in MODEL_PROVIDERS and not model.startswith("glm"):
+        if model not in MODEL_PROVIDERS and not model.startswith("glm") and not model.startswith("gpt-"):
             known = ", ".join(sorted(MODEL_PROVIDERS.keys()))
             self.send_message(f"❌ Modelo desconhecido: `{model}`\nConhecidos: {known}")
             return
@@ -7337,6 +7729,13 @@ class ClaudeTelegramBot:
             self.send_message(
                 "⚠️ `ZAI_API_KEY` não está configurado no `~/claude-bot/.env`.\n"
                 "Obtenha uma chave em https://z.ai/manage-apikey e adicione ao arquivo."
+            )
+            return
+        # Guard: if ChatGPT requested but codex CLI absent, warn with install steps.
+        if model_provider(model) == "openai" and not CODEX_ENABLED:
+            self.send_message(
+                "⚠️ Codex CLI não está instalado.\n"
+                "Instale com `brew install --cask codex` e entre com sua assinatura ChatGPT Plus/Pro via `codex login`."
             )
             return
         s = self._get_session()
@@ -7362,6 +7761,11 @@ class ClaudeTelegramBot:
                 {"text": "GLM 5.1", "callback_data": "model:glm-5.1"},
                 {"text": "GLM 4.7", "callback_data": "model:glm-4.7"},
                 {"text": "GLM 4.5 Air", "callback_data": "model:glm-4.5-air"},
+            ])
+        if CODEX_ENABLED:
+            rows.append([
+                {"text": "GPT-5", "callback_data": "model:gpt-5"},
+                {"text": "GPT-5 Codex", "callback_data": "model:gpt-5-codex"},
             ])
         markup = {"inline_keyboard": rows}
         self.send_message("Escolha o modelo:", reply_markup=markup)
@@ -7671,7 +8075,7 @@ class ClaudeTelegramBot:
             # 1. Snapshot to journal before compacting (preserves episodic memory)
             self._snapshot_session_to_journal(session)
             # 2. Compact
-            runner = ClaudeRunner()
+            runner = _make_runner_for(session.model)
             runner.run(
                 prompt="/compact",
                 model=session.model,
@@ -7938,7 +8342,7 @@ class ClaudeTelegramBot:
             "Responda APENAS com o markdown do snapshot."
         )
         try:
-            runner = ClaudeRunner()
+            runner = _make_runner_for(session.model)
             runner.run(
                 prompt=snapshot_prompt,
                 model=session.model,
@@ -7998,7 +8402,7 @@ class ClaudeTelegramBot:
                 # 1. Snapshot to journal before compacting (preserves episodic memory)
                 self._snapshot_session_to_journal(session)
                 # 2. Compact
-                runner = ClaudeRunner()
+                runner = _make_runner_for(model)
                 runner.run(
                     prompt="/compact",
                     model=model,
@@ -8055,7 +8459,7 @@ class ClaudeTelegramBot:
             "If nothing is durable, leave this section empty.)\n"
         )
         try:
-            runner = ClaudeRunner()
+            runner = _make_runner_for(session.model)
             runner.run(
                 prompt=prompt,
                 model=session.model,
@@ -8306,7 +8710,7 @@ class ClaudeTelegramBot:
 
         def _worker() -> None:
             try:
-                sub_runner = ClaudeRunner()
+                sub_runner = _make_runner_for(session.model)
                 runner_thread = threading.Thread(
                     target=sub_runner.run,
                     kwargs={
@@ -8469,7 +8873,7 @@ class ClaudeTelegramBot:
 
         def _worker() -> None:
             try:
-                bg_runner = ClaudeRunner()
+                bg_runner = _make_runner_for(old_model)
                 bg_runner.run(
                     prompt=prompt,
                     model=old_model,
@@ -9870,6 +10274,11 @@ class ClaudeTelegramBot:
         ctx = self._ctx
         runner = ctx.ensure_runner() if ctx else ClaudeRunner()
 
+        # The cached runner's type will be reconciled below against the resolved
+        # model (after _fallback_model / rate-limit-restore logic). For the
+        # BTW-inject fast path we only need `runner.running`, which both runner
+        # types expose identically.
+
         if runner.running:
             if runner.send_btw(prompt):
                 self.send_message("💭 Enviado ao Claude via /btw.")
@@ -10036,6 +10445,14 @@ class ClaudeTelegramBot:
         effective_session_id = session.session_id
         effective_model = _fallback_model or session.model
         effective_effort = self.effort
+
+        # Reconcile cached runner type with the effective model's provider.
+        # ensure_runner() swaps between ClaudeRunner / CodexRunner when needed.
+        # For the no-ctx fallback, build a runner that matches the model.
+        if ctx:
+            runner = ctx.ensure_runner(effective_model)
+        else:
+            runner = _make_runner_for(effective_model)
 
         # Start runner thread FIRST — before any blocking network I/O
         runner_thread = threading.Thread(
@@ -10807,6 +11224,7 @@ class ClaudeTelegramBot:
                 "/opus": lambda: self.cmd_model_switch("opus"),
                 "/haiku": lambda: self.cmd_model_switch("haiku"),
                 "/glm": lambda: self.cmd_model_switch("glm-4.7"),
+                "/gpt": lambda: self.cmd_model_switch("gpt-5-codex"),
                 "/model": lambda: self.cmd_model_keyboard(),
                 "/new": lambda: self.cmd_new(arg if arg else None),
                 "/sessions": lambda: self.cmd_sessions_list(),

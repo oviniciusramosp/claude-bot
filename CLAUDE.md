@@ -101,6 +101,7 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager. Contains cr
 | `CLAUDE_WORKSPACE` | No | `vault/main/` | Working directory for Main sessions |
 | `ZAI_API_KEY` | No | — | z.AI API key — required for any `glm-*` model. See `.claude/rules/multi-provider-models.md` |
 | `ZAI_BASE_URL` | No | `https://api.z.ai/api/anthropic` | z.AI's Anthropic-compatible gateway |
+| `CODEX_PATH` | No | `/opt/homebrew/bin/codex` | Path to OpenAI Codex CLI — required for any `gpt-*` model. Install: `brew install --cask codex`, then `codex login` with ChatGPT Plus/Pro |
 | `ADVISOR_MODEL` | No | `opus` | Model used by `scripts/advisor.sh` when escalating |
 | `MODEL_FALLBACK_CHAIN` | No | `opus,glm-5.1,sonnet,glm-4.7,haiku` | Fallback order when a model fails. Configurable via macOS app. |
 
@@ -120,7 +121,8 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/status` | Session & process info |
 | `/sonnet`, `/opus`, `/haiku` | Quick model switch (Anthropic) |
 | `/glm` | Quick switch to `glm-4.7` (z.AI) — requires `ZAI_API_KEY` |
-| `/model` | Model picker (inline keyboard; GLM row shown only when `ZAI_API_KEY` is set) |
+| `/gpt` | Quick switch to `gpt-5-codex` (OpenAI) — requires `codex login` with ChatGPT Plus/Pro |
+| `/model` | Model picker (inline keyboard; GLM row requires `ZAI_API_KEY`, GPT row requires the `codex` binary) |
 | `/new [name]` | Create new session |
 | `/sessions` | List all sessions |
 | `/switch <name>` | Switch session |

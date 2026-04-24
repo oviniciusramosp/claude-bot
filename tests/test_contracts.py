@@ -175,6 +175,8 @@ class ModelProvidersRegistry(unittest.TestCase):
             "glm-5.1": "zai",
             "glm-4.7": "zai",
             "glm-4.5-air": "zai",
+            "gpt-5": "openai",
+            "gpt-5-codex": "openai",
         }
         self.assertEqual(
             self.bot.MODEL_PROVIDERS, expected,

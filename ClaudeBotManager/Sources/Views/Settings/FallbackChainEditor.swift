@@ -3,6 +3,7 @@ import SwiftUI
 struct FallbackChainEditor: View {
     @Binding var chain: String
     let zaiKeySet: Bool
+    let codexAvailable: Bool
 
     private let defaultChain = "opus,glm-5.1,sonnet,glm-4.7,haiku"
 
@@ -32,9 +33,18 @@ struct FallbackChainEditor: View {
                     Text(ModelCatalog.label(for: modelId))
                         .font(.callout)
 
-                    // No API key warning for GLM models
-                    if ModelCatalog.provider(for: modelId) == "zai" && !zaiKeySet {
+                    // Availability warnings by provider
+                    let prov = ModelCatalog.provider(for: modelId)
+                    if prov == "zai" && !zaiKeySet {
                         Text("sem API key")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.12))
+                            .clipShape(Capsule())
+                    } else if prov == "openai" && !codexAvailable {
+                        Text("sem codex")
                             .font(.caption2.weight(.medium))
                             .foregroundStyle(.orange)
                             .padding(.horizontal, 5)
