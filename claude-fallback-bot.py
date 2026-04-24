@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.40.0"  # feat: instant model fallback on rate limit, sticky until reset + /restart-agent
+BOT_VERSION = "3.43.0"  # feat: ClaudeBotManager shows in Dock with robot icon
 
 import hmac
 import hashlib
@@ -540,6 +540,8 @@ RESPONSE_CACHE_MAX_AGE = 3600  # 1 hour — stale cache after bot restart is use
 SESSION_MAX_AGE_DAYS = 60
 AUTO_COMPACT_INTERVAL = 20   # auto-compact every N turns in a session (reduced from 25 — Opus 4.7 tokenizer uses ~35% more tokens)
 AUTO_ROTATE_THRESHOLD = 80   # start fresh session after N turns
+DELEGATE_WALL_TIMEOUT = 600       # /delegate hard wall-clock limit (seconds)
+DELEGATE_INACTIVITY_TIMEOUT = 300 # /delegate max seconds without output — matches PipelineStep default (inspired by hermes-agent #13770)
 IDLE_COMPACT_HOURS = 4       # proactive compact after N hours without a message
 IDLE_CLEAR_HOURS = 12        # clear session (fresh start) after N hours without a message
 SKILL_HINTS_ENABLED = True   # inject top-N skill hints from vault/.graphs/graph.json
@@ -786,6 +788,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/restart-agent` — Restaurar modelo preferido após fallback por rate limit
 
 🔧 *Controle*
+• `/restart` — Reiniciar o bot (confirma via Telegram quando voltar)
 • `/stop` — Cancelar execução atual
 • `/status` — Info da sessão e processo
 • `/timeout <seg>` — Alterar timeout (padrão 600s)
@@ -2943,6 +2946,7 @@ def _append_execution_report(
     status: str,
     elapsed: int,
     steps: Optional[List[Tuple[str, str]]] = None,
+    step_timings: Optional[Dict[str, int]] = None,
     error: Optional[str] = None,
     failed_step: Optional[str] = None,
     data_dir: Optional[str] = None,
@@ -2987,6 +2991,17 @@ def _append_execution_report(
                      "running": "🔄", "pending": "⏰"}
             step_parts = [f"{icons.get(st, '⏰')} {sn}" for sn, st in steps]
             lines.append(f"**Steps:** {' → '.join(step_parts)}")
+            # Per-step timing breakdown
+            if step_timings:
+                timing_parts = []
+                for sn, _st in steps:
+                    dur = step_timings.get(sn)
+                    if dur is not None and dur >= 0:
+                        sm, ss = divmod(dur, 60)
+                        timing_parts.append(f"- {sn}: {sm}m{ss:02d}s")
+                if timing_parts:
+                    lines.append("**Step timings:**")
+                    lines.extend(timing_parts)
 
         if error:
             lines.append(f"**Error:** {error[:150]}")
@@ -4538,10 +4553,23 @@ class PipelineExecutor:
         self._cancelled = threading.Event()
         self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
         self._bot = None  # set by _enqueue_pipeline if available
+        self._step_timestamps: Dict[str, Dict[str, float]] = {}  # step_id → {"start": epoch, "end": epoch}
         self._progress_msg_id: Optional[int] = None  # Telegram message ID for live progress
         # Path locking: output_filename → step_id holding the write lock.
         # Prevents two parallel steps from writing to the same output file.
         self._output_file_locks: Dict[str, str] = {}
+
+    def _compute_step_timings(self) -> Dict[str, int]:
+        """Compute per-step durations (seconds) from recorded timestamps.
+        Returns dict of step_name → duration_seconds."""
+        timings = {}
+        for step in self.task.steps:
+            ts = self._step_timestamps.get(step.id, {})
+            start = ts.get("start")
+            end = ts.get("end")
+            if start and end:
+                timings[step.name] = int(end - start)
+        return timings
 
     def execute(self) -> bool:
         """Run the full pipeline. Returns True if all steps completed successfully."""
@@ -4596,6 +4624,7 @@ class PipelineExecutor:
                 agent=self.task.agent, kind="pipeline", name=self.task.name,
                 status="failed", elapsed=int(time.time() - start_time),
                 steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
+                step_timings=self._compute_step_timings(),
                 error=str(exc)[:150],
                 data_dir=f"workspace/data/{self.task.name}/",
             )
@@ -4632,6 +4661,7 @@ class PipelineExecutor:
                 agent=self.task.agent, kind="pipeline", name=self.task.name,
                 status="completed", elapsed=elapsed,
                 steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
+                step_timings=self._compute_step_timings(),
                 data_dir=f"workspace/data/{self.task.name}/",
             )
             if soft_success:
@@ -4662,6 +4692,7 @@ class PipelineExecutor:
                 agent=self.task.agent, kind="pipeline", name=self.task.name,
                 status=status, elapsed=elapsed,
                 steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
+                step_timings=self._compute_step_timings(),
                 error=err[:150], failed_step=failed_step_name,
                 data_dir=f"workspace/data/{self.task.name}/",
             )
@@ -4919,14 +4950,24 @@ class PipelineExecutor:
 
     def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute a single pipeline step using ClaudeRunner."""
+        with self._lock:
+            self._step_timestamps.setdefault(step.id, {})["start"] = time.time()
         # Manual review gate — pause and wait for human approval
         if step.manual:
-            self._execute_manual_step(step, data_dir)
+            try:
+                self._execute_manual_step(step, data_dir)
+            finally:
+                with self._lock:
+                    self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
             return
         # Ralph loop dispatcher — when the step has loop config, use the
         # dedicated loop executor. Otherwise fall through to the normal path.
         if step.has_loop:
-            self._execute_loop_step(step, data_dir)
+            try:
+                self._execute_loop_step(step, data_dir)
+            finally:
+                with self._lock:
+                    self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
             return
 
         attempt = self._step_attempts.get(step.id, 0) + 1
@@ -5071,6 +5112,7 @@ class PipelineExecutor:
             with self._lock:
                 self._step_outputs[step.id] = output
                 self._step_status[step.id] = "completed"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
             self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "completed", attempt=attempt)
             logger.info("Pipeline %s: step %s completed", self.task.name, step.id)
 
@@ -5079,6 +5121,7 @@ class PipelineExecutor:
             with self._lock:
                 self._step_errors[step.id] = err_msg
                 self._step_status[step.id] = "failed"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
             self.state.set_step_status(self.task.name, self.task.time_slot, step.id, "failed",
                                        error=err_msg, attempt=attempt)
             logger.error("Pipeline %s: step %s failed: %s", self.task.name, step.id, err_msg)
@@ -5739,10 +5782,10 @@ class PipelineExecutor:
             if step.output_to_telegram and step.id in self._step_outputs:
                 output_text = self._step_outputs[step.id]
                 break
-        # Fallback: last completed step's output
+        # Fallback: last completed step's output (skip output: none steps)
         if output_text is None:
             for step in reversed(self.task.steps):
-                if step.id in self._step_outputs:
+                if step.id in self._step_outputs and step.output_type != "none":
                     output_text = self._step_outputs[step.id]
                     break
 
@@ -7568,6 +7611,20 @@ class ClaudeTelegramBot:
         else:
             self.send_message("❌ Nenhuma sessão ativa.")
 
+    def cmd_restart(self) -> None:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "bot-self-restart.sh")
+        if not os.path.isfile(script):
+            self.send_message("❌ Script de restart não encontrado.")
+            return
+        self.send_message("🔄 Reiniciando...")
+        subprocess.Popen(
+            ["bash", script],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+        )
+
     def cmd_restart_agent(self) -> None:
         """Force-restore the session's preferred model after a rate-limit fallback.
 
@@ -8232,15 +8289,20 @@ class ClaudeTelegramBot:
     def cmd_delegate(self, prompt: str) -> None:
         """Spawn an isolated Claude subprocess for a sub-task and inject the result back.
 
-        The subagent runs with session_id=None (fresh context, no conversation history),
-        minimal system prompt, and a hard 10-minute wall-clock limit. The result is sent
-        to Telegram and optionally injected into the parent session via /btw.
+        The subagent runs with session_id=None (fresh context, no conversation history)
+        and a minimal system prompt. Two guardrails stop runaway subagents:
+          - wall-clock hard limit (DELEGATE_WALL_TIMEOUT, default 600s)
+          - inactivity detection (DELEGATE_INACTIVITY_TIMEOUT, default 300s — no output)
+        The result is sent to Telegram and optionally injected into the parent session via /btw.
         """
         if not prompt.strip():
             self.send_message("❌ Uso: `/delegate <prompt>`")
             return
         session = self._get_session()
-        self.send_message(f"🧬 _Sub-task delegada — aguardando resultado (max 10min)..._")
+        self.send_message(
+            f"🧬 _Sub-task delegada — wall-clock {DELEGATE_WALL_TIMEOUT // 60}min, "
+            f"inatividade {DELEGATE_INACTIVITY_TIMEOUT}s..._"
+        )
 
         def _worker() -> None:
             try:
@@ -8259,10 +8321,32 @@ class ClaudeTelegramBot:
                     daemon=True,
                 )
                 runner_thread.start()
-                runner_thread.join(timeout=600)     # 10-minute hard limit
-                if runner_thread.is_alive():
+
+                # Dual-timeout polling (inspired by pipeline pattern, lines ~5006-5035):
+                #   - wall-clock: hard upper bound
+                #   - inactivity: catches stalled subprocesses (process alive, no output)
+                start = time.time()
+                stall_reason: Optional[str] = None
+                while runner_thread.is_alive():
+                    elapsed = time.time() - start
+                    if elapsed > DELEGATE_WALL_TIMEOUT:
+                        stall_reason = f"wall-clock {DELEGATE_WALL_TIMEOUT}s"
+                        sub_runner.cancel()
+                        break
+                    if sub_runner.last_activity > 0:
+                        idle = time.time() - sub_runner.last_activity
+                        if idle > DELEGATE_INACTIVITY_TIMEOUT:
+                            stall_reason = f"idle {int(idle)}s (no output for {DELEGATE_INACTIVITY_TIMEOUT}s)"
+                            sub_runner.cancel()
+                            break
+                    runner_thread.join(timeout=1.0)
+
+                if stall_reason:
+                    self.send_message(f"⏱️ _Subagent abortado: {stall_reason}. Resultado parcial:_")
+                elif runner_thread.is_alive():
+                    # Safety net — shouldn't happen, but cancel() could race with natural exit
                     sub_runner.cancel()
-                    self.send_message("⏱️ _Subagent timeout (10min). Resultado parcial:_")
+                    runner_thread.join(timeout=5)
 
                 result = (sub_runner.result_text or sub_runner.accumulated_text or "").strip()
                 if not result:
@@ -10743,6 +10827,7 @@ class ClaudeTelegramBot:
                 "/btw": lambda: self.cmd_btw(arg) if arg else self.send_message("❌ Use: `/btw <mensagem>`"),
                 "/delegate": lambda: self.cmd_delegate(arg) if arg else self.send_message("❌ Use: `/delegate <prompt>`"),
                 "/clear": lambda: self.cmd_clear(),
+                "/restart": lambda: self.cmd_restart(),
                 "/restart-agent": lambda: self.cmd_restart_agent(),
                 "/important": lambda: self.cmd_important(),
                 "/save": lambda: self.cmd_important(),

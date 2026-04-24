@@ -11,13 +11,13 @@
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundleShortVersionString</key>
-	<string>3.40.0</string>
+	<string>3.43.0</string>
 	<key>CFBundleExecutable</key>
 	<string>ClaudeBotManager</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
-	<key>LSUIElement</key>
-	<true/>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSUserNotificationAlertStyle</key>
