@@ -37,6 +37,12 @@ Focus on:
 
 Be honest. If nothing is relevant, say so. Don't force connections.
 
+## Check the watchlist
+
+Read `../../Notes/oss-watchlist.md` if it exists. For each item under `Active watches`, scan the collected data (commits, releases, PRs) for state changes — merged, closed, re-opened, new commits on the PR, or a major update. If any watched item changed, surface it prominently in the report under a `⚠️ *Watchlist update*` header **above** the normal repo summaries. Include the item name, what changed, and a one-line actionable nudge (e.g., "re-read diff and assess our auto-compact").
+
+If nothing changed on the watchlist, do not mention the watchlist at all — silence is the default.
+
 ## Output format
 
 If there ARE relevant insights, format the report as:

@@ -15,16 +15,16 @@ Which tool to use for each type of task. Check before choosing an approach.
 
 - **PinchTab** — Web browsing CLI with logged-in sessions (X, Threads). Prefer over urllib to avoid bot fingerprinting.
 - Repo/docs: https://github.com/pinchtab/pinchtab
-- Default port: `9870`
+- Default port: `9867`
 - Requires `PINCHTAB_ALLOW_EVALUATE=1` for JavaScript form submission (X and other sites)
 
 Commands:
 ```
-pinchtab nav <url> --port 9870       # navigate
-pinchtab text --port 9870            # extract text
-pinchtab snap -i -c --port 9870      # interactive snapshot
-pinchtab click <ref> --port 9870     # click element
-pinchtab fill <ref> "text" --port 9870  # fill form field
+pinchtab nav <url> --port 9867       # navigate
+pinchtab text --port 9867            # extract text
+pinchtab snap -i -c --port 9867      # interactive snapshot
+pinchtab click <ref> --port 9867     # click element
+pinchtab fill <ref> "text" --port 9867  # fill form field
 ```
 
 ### Tab cleanup rule
@@ -35,7 +35,7 @@ Add at the end of every routine prompt that uses PinchTab:
 ```
 **Cleanup:** After extracting all needed content, close the current tab:
 ```bash
-pinchtab tabs close --port 9870
+pinchtab tabs close --port 9867
 ```
 ```
 

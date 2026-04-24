@@ -1,17 +1,16 @@
 ---
-title: "Update Check"
-description: "Checks daily for updates to Claude Code CLI and claude-bot repo/macOS app. Summarizes changes, recommends urgency, offers install button."
+title: Update Check
+description: Checks daily for updates to Claude Code CLI and claude-bot repo/macOS app. Summarizes changes, recommends urgency, offers install button.
 type: routine
 created: 2026-04-08
-updated: 2026-04-14
+updated: 2026-04-17
 tags: [routine, maintenance, updates]
 schedule:
   days: ["*"]
-  times: ["10:00"]
-model: sonnet
-context: minimal
-effort: low
+  times: [10:00]
+model: glm-5.1
 enabled: true
+context: minimal
 ---
 
 Check whether updates are available for three components. Run ALL commands below and analyze results.
@@ -41,6 +40,12 @@ Then assess urgency:
 - **Update now** — if there are security fixes, critical bug fixes, or features the user likely needs
 - **Update when convenient** — if changes are minor improvements or edge-case fixes
 - **Can wait** — if changes are mostly internal/cosmetic
+
+**After upgrading Claude Code CLI**, the bot must be restarted so it picks up the new binary. Use:
+```bash
+bash ~/claude-bot/scripts/bot-self-restart.sh
+```
+This script suppresses the watchdog false alarm, restarts the launchd service, and sends a Telegram confirmation when the bot is back online.
 
 ## 2. claude-bot repo
 
