@@ -7,7 +7,7 @@ updated: 2026-04-23
 tags: [oss, radar, watchlist, monitoring]
 ---
 
-[[Notes]]
+[[agent-notes]]
 
 ## Active watches
 

@@ -12,6 +12,7 @@ tags: [index, notes]
 <!-- vault-query:start filter="type=note" scope="main/Notes" sort="title" format="- [[{link}|{stem}]] — {description}" -->
 - [[main/Notes/agent-detection-rule|agent-detection-rule]] — A vault directory is an agent iff it contains `agent-<dirname>.md`
 - [[main/Notes/agentid-required-in-cron|agentid-required-in-cron]] — Missing agentId in cron job payload silently routes execution to main/Jarvis instead of the intended agent.
+- [[main/Notes/auto-compact-silent-error-fix|auto-compact-silent-error-fix]] — `_auto_compact._worker()` must call `self.send_message()` on exception, not just `logger.error()` — asymmetry with `cmd_compact` was a bug
 - [[main/Notes/btc-preco-matinal|btc-preco-matinal]] — Only active routine: Bitcoin price check daily at 08:30
 - [[main/Notes/btc-preco-matinal-routine|btc-preco-matinal-routine]] — Daily 8:30 BTC price alert at `~/claude-bot/vault/Routines/btc-preco-matinal.md`, sends to chat_id 6948798151 via Claudinho bot
 - [[main/Notes/concurrent-context-writes|concurrent-context-writes]] — `.context.md` is written by multiple parallel sessions; re-read before write is insufficient under high contention — deliver inline and let 
@@ -30,6 +31,7 @@ tags: [index, notes]
 - [[main/Notes/forbidden-terms-cripto|forbidden-terms-cripto]] — 7 termos proibidos: halving, histórico, sem precedentes, hawkish, dovish, bear case, unverified superlatives
 - [[main/Notes/forbidden-terms-list|forbidden-terms-list]] — 7 banned terms in TA posts: halving, histórico, sem precedentes, hawkish, dovish, bear case, unverified superlatives
 - [[main/Notes/framer-csr-seo|framer-csr-seo]] — Framer renders via JS (CSR); Google crawlers may not index content properly — always verify with Google Search Console URL Inspection tool
+- [[main/Notes/glm-parallel-rate-limit-risk|glm-parallel-rate-limit-risk]] — Simultaneous GLM-5.1 sessions (e.g. Contador + Digests routines) exhaust z.AI quota; global backoff coordination is an open candidate fix
 - [[main/Notes/glm-thinking-disabled|glm-thinking-disabled]] — Always pass `thinking: {type: "disabled"}` via `extra_body` for glm-5.1 to avoid burning tokens on reasoning_content
 - [[main/Notes/glm-thinking-leak|glm-thinking-leak]] — Z.ai payloads must suppress thinking tokens via `params.thinking: "off"` in model catalog
 - [[main/Notes/homebridge-auth-endpoint|homebridge-auth-endpoint]] — Correct login endpoint is `/api/auth/login` (not `/api/sign-in`); credentials in `~/.homebridge/auth.json`
