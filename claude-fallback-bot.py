@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.44.0"  # feat: ChatGPT via Codex CLI as third model provider
+BOT_VERSION = "3.44.1"  # fix: auto-compact failure now notifies user via Telegram (was silent)
 
 import hmac
 import hashlib
@@ -4435,24 +4435,26 @@ class CodexRunner:
         if system_prompt:
             full_prompt = f"{system_prompt}\n\n---\n\n{prompt}"
 
-        # Build argv. Resume uses `exec resume <sid>` as a subcommand (NOT a
-        # flag on `exec`) — different shape from `claude --resume`. # VERIFY
-        if session_id:
-            cmd = [CODEX_PATH, "exec", "resume", session_id]
-        else:
-            cmd = [CODEX_PATH, "exec"]
-        cmd += [
+        # Build argv. Resume shape (per `codex exec resume` Usage):
+        #   codex exec resume <flags> <SESSION_ID> [PROMPT]
+        # Fresh shape:
+        #   codex exec <flags> [PROMPT]
+        # Working directory is set via Popen(cwd=workspace) below — Codex has
+        # no --cd/--cwd flag; the subprocess cwd is what it uses.
+        flags = [
             "--json",
             "--full-auto",            # auto-approve all operations — no TTY prompts
             "--skip-git-repo-check",  # vault workspace isn't always a git repo
             "--model", model,
-            "--cd", workspace,
         ]
         if effort:
-            # Codex exposes reasoning effort via the -c key=value flag.
+            # Codex exposes reasoning effort via -c key=value global config override.
             # model_reasoning_effort accepts low|medium|high. # VERIFY key name.
-            cmd += ["-c", f"model_reasoning_effort={effort}"]
-        cmd += [full_prompt]
+            flags += ["-c", f"model_reasoning_effort={effort}"]
+        if session_id:
+            cmd = [CODEX_PATH, "exec", "resume"] + flags + [session_id, full_prompt]
+        else:
+            cmd = [CODEX_PATH, "exec"] + flags + [full_prompt]
 
         logger.info("Running codex: %s", " ".join(cmd[:6]) + " ...")
         self.running = True
@@ -8422,6 +8424,7 @@ class ClaudeTelegramBot:
                     self._update_agent_hot_cache(session)
             except Exception as exc:
                 logger.error("Auto-compact failed: %s", exc)
+                self.send_message(f"⚠️ _Auto-compact falhou: `{exc}`_")
 
         threading.Thread(target=_worker, daemon=True, name="auto-compact").start()
 
