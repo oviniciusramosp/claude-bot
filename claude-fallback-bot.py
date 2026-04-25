@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.46.0"  # feat: cross-provider handoff on Claude↔GPT switch — recap + full transcript in /tmp
+BOT_VERSION = "3.46.1"  # fix: setActivationPolicy(.regular) so ClaudeBotManager shows in the Dock
 
 import hmac
 import hashlib

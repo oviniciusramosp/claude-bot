@@ -32,9 +32,8 @@ struct ClaudeBotApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Hide from Dock — LSUIElement handles this via Info.plist
-        // but we ensure it programmatically too
-        NSApp.setActivationPolicy(.accessory)
+        // Show in Dock as a regular app (also keeps the MenuBarExtra item).
+        NSApp.setActivationPolicy(.regular)
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
