@@ -11,6 +11,10 @@ struct ClaudeBotApp: App {
             ContentView()
                 .environmentObject(appState)
                 .frame(minWidth: 900, minHeight: 600)
+                .onAppear { updateDockBadge(running: appState.isRunning) }
+                .onChange(of: appState.isRunning) { _, running in
+                    updateDockBadge(running: running)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 700)
@@ -27,6 +31,13 @@ struct ClaudeBotApp: App {
         }
         .menuBarExtraStyle(.window)
     }
+}
+
+/// Sets the Dock tile badge based on bot state.
+/// `nil` clears the badge (bot online); a short label is shown when offline.
+@MainActor
+private func updateDockBadge(running: Bool) {
+    NSApp.dockTile.badgeLabel = running ? nil : "OFF"
 }
 
 @MainActor

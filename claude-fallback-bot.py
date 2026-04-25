@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.46.1"  # fix: setActivationPolicy(.regular) so ClaudeBotManager shows in the Dock
+BOT_VERSION = "3.47.0"  # feat: Dock tile shows "OFF" badge when the bot is not running
 
 import hmac
 import hashlib
