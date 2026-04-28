@@ -167,6 +167,12 @@ Open Telegram, find your bot, and send any message. Claude will respond.
 | `/agent new` | Create a new agent (interactive) |
 | `/agent list` | List all agents |
 
+### Multi-tenant (primary chat only, v3.49+)
+| Command | Description |
+|---------|-------------|
+| `/onboard <chat_id> <agent>` | Bind a secondary chat to a locked agent — creates the agent if it doesn't exist. See "Multi-tenant secondary chats". |
+| `/onboard list` | List secondary chat bindings. |
+
 ### Journal & Memory
 | Command | Description |
 |---------|-------------|
@@ -268,6 +274,53 @@ The bot auto-discovers groups when a previously authorized user (your private ch
 ### Private chat
 
 Private chat continues to work as before. Use `/agent` to switch agents freely.
+
+---
+
+## Multi-tenant secondary chats (v3.49+)
+
+Share your bot with a friend without exposing your personal group. The bot supports two chat tiers on a single instance:
+
+- **Primary chat** — your own group/private chat (the one in `TELEGRAM_CHAT_ID`). Full access to every agent, all commands, runs with `--dangerously-skip-permissions`.
+- **Secondary chat** — a friend's group. Locked to a single agent that you choose. Agent-switching, agent creation, cross-agent cloning are all blocked. Subprocess runs with `--permission-mode dontAsk` against a per-agent `settings.json` allowlist scoped to the agent's vault directory.
+
+```
+You (primary chat) ─┐
+                    │  same launchd service, same Mac mini
+Friend (secondary) ─┘
+                                ↓
+                  vault/main/         ← your agents (isolated)
+                  vault/crypto-bro/   ← your agents
+                  vault/carol/        ← friend's agent (locked, restricted)
+```
+
+### Onboarding a friend
+
+1. Friend creates a Telegram group, adds your bot. They send any message — bot logs `Ignoring message from unauthorized chat -100…`.
+2. From **your primary chat**, run:
+   ```
+   /onboard -1001234567890 carol
+   ```
+   - If `vault/carol/` doesn't exist, a minimal scaffold is created (hub file, `CLAUDE.md`, sub-folders + index files). You'll personalize the personality afterward.
+   - The chat ID + agent binding is persisted to `~/.claude-bot/chats.json`.
+   - A per-agent permission profile is written to `~/.claude-bot/agents/carol/settings.json` with sensible defaults.
+3. Friend's group is bound. Every subsequent message there activates the `carol` agent automatically and runs in restricted mode.
+
+Use `/onboard list` to see all secondary bindings. To revoke, edit `chats.json` and restart the bot.
+
+### Per-agent permission profile
+
+Generated on `/onboard`, located at `~/.claude-bot/agents/<agent>/settings.json`. Default allowlist permits Read/Edit/Write/Glob/Grep/TodoWrite/Task/Web tools and common safe Bash builtins (`git`, `ls`, `cat`, `grep`, `find`, `mkdir`, `mv`, `cp`, `rm`, `python3`, `node`, etc.). Default denylist blocks Read/Edit/Write of every other agent's vault, plus `~/.claude-bot/**`, `**/.env`, `**/sessions.json`, `**/chats.json`.
+
+The file is plain JSON — edit to tighten (e.g. drop `Bash(rm:*)`) or relax. Changes are picked up on the next subprocess spawn; no restart needed.
+
+### Isolation caveat — soft, not hard
+
+The deny list is enforced by Claude's permission system, which **does not sandbox Bash subprocesses**. A motivated user can still read other vaults via `Bash(cat ../main/x.md)` if `Bash(cat:*)` is in their allowlist. This is suitable for **trusted friends**, not adversarial users. For hard isolation, wrap the subprocess in `sandbox-exec` with a filesystem-deny profile — left as a future enhancement.
+
+### API costs
+
+Secondary chats use the same Anthropic auth as primary, so usage is billed to you. To make a friend bring their own credit, set `model: glm-4.7` (or another `glm-*` model) in `agent-<name>.md` frontmatter — they'll need to provide their own `ZAI_API_KEY` in the bot's `.env`.
 
 ---
 
@@ -572,9 +625,12 @@ CI runs on every push/PR via `.github/workflows/tests.yml` on a macOS runner.
 
 ## Security
 
-- The bot **only responds to your `TELEGRAM_CHAT_ID`** -- all other messages are silently ignored
+- The bot **only responds to authorized chats** — primary chats from `TELEGRAM_CHAT_ID` and secondary chats listed in `~/.claude-bot/chats.json` (managed via `/onboard`). All other messages are silently ignored.
 - No secrets in the repository -- `.env` and `vault/.env` are gitignored
-- Claude runs with `--dangerously-skip-permissions` (no interactive permission prompts)
+- **Permission modes by chat tier:**
+  - Primary chats run Claude with `--dangerously-skip-permissions` (no friction, you trust your own commands)
+  - Secondary chats run with `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json` — an allowlist scoped to the agent's vault that blocks reads of other agents' folders and bot config files
+  - **Soft isolation only:** Claude's permission system doesn't sandbox Bash subprocesses, so the multi-tenant model is suitable for trusted friends, not adversarial users (see "Multi-tenant secondary chats" above)
 - Everything runs locally -- Claude processing never leaves your machine
 
 ---

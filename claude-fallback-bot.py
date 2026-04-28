@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.47.0"  # feat: Dock tile shows "OFF" badge when the bot is not running
+BOT_VERSION = "3.49.0"  # feat: multi-tenant secondary chats (/onboard) with restricted permissions
 
 import hmac
 import hashlib
@@ -143,10 +143,12 @@ CLAUDE_WORKSPACE = os.environ.get(
 DATA_DIR = Path.home() / ".claude-bot"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
 CONTEXTS_FILE = DATA_DIR / "contexts.json"
+CHATS_FILE = DATA_DIR / "chats.json"
 LOG_FILE = DATA_DIR / "bot.log"
 
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
+AGENTS_SETTINGS_DIR = DATA_DIR / "agents"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
 
@@ -298,6 +300,77 @@ def iter_agent_ids() -> List[str]:
         if hub.is_file():
             ids.append(entry.name)
     return ids
+
+
+def _ensure_agent_settings(agent_id: str) -> Path:
+    """Ensure a per-agent Claude CLI settings.json exists, return its path.
+
+    Used by secondary (multi-tenant) chats that run with
+    ``--permission-mode dontAsk`` instead of ``--dangerously-skip-permissions``.
+    The default allowlist permits file ops within the agent's vault and common
+    safe Bash builtins; the denylist blocks reading other agents' vaults and
+    bot config files. Soft isolation only — Bash subprocesses (e.g. ``cat``)
+    aren't sandboxed by Claude's permission system, so this is suitable for
+    trusted-friends multi-tenant, not adversarial isolation.
+    """
+    AGENTS_SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+    agent_dir = AGENTS_SETTINGS_DIR / agent_id
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    path = agent_dir / "settings.json"
+    if path.exists():
+        return path
+    other_agents = [a for a in iter_agent_ids() if a != agent_id]
+    deny_other_vaults: List[str] = []
+    for other in other_agents:
+        deny_other_vaults.append(f"Read({VAULT_DIR / other}/**)")
+        deny_other_vaults.append(f"Edit({VAULT_DIR / other}/**)")
+        deny_other_vaults.append(f"Write({VAULT_DIR / other}/**)")
+    default = {
+        "permissions": {
+            "allow": [
+                "Read",
+                "Edit",
+                "Write",
+                "Glob",
+                "Grep",
+                "TodoWrite",
+                "Task",
+                "WebFetch",
+                "WebSearch",
+                "Bash(git:*)",
+                "Bash(ls:*)",
+                "Bash(cat:*)",
+                "Bash(grep:*)",
+                "Bash(find:*)",
+                "Bash(echo:*)",
+                "Bash(date:*)",
+                "Bash(pwd)",
+                "Bash(wc:*)",
+                "Bash(head:*)",
+                "Bash(tail:*)",
+                "Bash(sort:*)",
+                "Bash(uniq:*)",
+                "Bash(mkdir:*)",
+                "Bash(touch:*)",
+                "Bash(mv:*)",
+                "Bash(cp:*)",
+                "Bash(rm:*)",
+                "Bash(python3:*)",
+                "Bash(node:*)",
+            ],
+            "deny": deny_other_vaults + [
+                f"Read({DATA_DIR}/**)",
+                "Read(**/.env)",
+                "Read(**/sessions.json)",
+                "Read(**/chats.json)",
+            ],
+        }
+    }
+    try:
+        path.write_text(json.dumps(default, indent=2), encoding="utf-8")
+    except Exception as exc:
+        logger.error("Failed to write per-agent settings %s: %s", path, exc)
+    return path
 
 
 def trash_path(path: Path) -> bool:
@@ -882,6 +955,10 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 🤖 *Agentes*
 • `/agent` — Gerenciar agentes (trocar, criar, editar, importar)
 • `/agent <nome>` — Trocar para agente
+
+👥 *Multi-tenant (chat primário)*
+• `/onboard <chat_id> <nome>` — Vincular chat secundário a um agente travado (cria o agente se não existir)
+• `/onboard list` — Listar chats secundários vinculados
 
 ⚡ *Skills*
 • `/skill` — Gerenciar skills (listar, editar)
@@ -4083,14 +4160,18 @@ class ClaudeRunner:
         system_prompt: Optional[str] = SYSTEM_PROMPT,
         lightweight: bool = False,  # unused, kept for API compat
         agent_id: Optional[str] = None,
+        restricted: bool = False,
     ) -> None:
         global CLAUDE_PATH
         if not os.path.isfile(CLAUDE_PATH):
             CLAUDE_PATH = _detect_claude_path()
-        cmd = [
-            CLAUDE_PATH,
-            "--print",
-            "--dangerously-skip-permissions",
+        cmd = [CLAUDE_PATH, "--print"]
+        if restricted and agent_id:
+            settings_path = _ensure_agent_settings(agent_id)
+            cmd += ["--permission-mode", "dontAsk", "--settings", str(settings_path)]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
+        cmd += [
             "--model", model,
             "--output-format", "stream-json",
             "--verbose",
@@ -4473,7 +4554,15 @@ class CodexRunner:
         system_prompt: Optional[str] = SYSTEM_PROMPT,
         lightweight: bool = False,  # unused, kept for API compat
         agent_id: Optional[str] = None,
+        restricted: bool = False,
     ) -> None:
+        if restricted:
+            logger.warning(
+                "CodexRunner: restricted=True requested for agent %s but the "
+                "Codex CLI has no equivalent permission-mode flag — running "
+                "with default Codex sandboxing.",
+                agent_id,
+            )
         global CODEX_PATH, CODEX_ENABLED
         if not CODEX_ENABLED or not CODEX_PATH:
             CODEX_PATH = _detect_codex_path()
@@ -6404,12 +6493,19 @@ class PipelineExecutor:
 class ClaudeTelegramBot:
     def __init__(self) -> None:
         self.token = TELEGRAM_BOT_TOKEN
-        # Support comma-separated chat IDs (private + group)
-        self.authorized_ids: set = set()
+        # Multi-tenant: primary chats have full access (any agent, all commands);
+        # secondary chats are locked to a single agent and run restricted.
+        # TELEGRAM_CHAT_ID env var seeds primary; chats.json (managed via
+        # /onboard) carries both lists across restarts.
+        self.primary_chat_ids: set = set()
         for cid in str(TELEGRAM_CHAT_ID).split(","):
             cid = cid.strip()
             if cid:
-                self.authorized_ids.add(cid)
+                self.primary_chat_ids.add(cid)
+        self.secondary_chats: Dict[str, str] = {}  # chat_id → agent_id
+        self._load_chats_config()
+        # Union for cheap "is this chat allowed to talk to the bot at all?" checks
+        self.authorized_ids: set = self.primary_chat_ids | set(self.secondary_chats.keys())
         self.base_url = f"https://api.telegram.org/bot{self.token}"
 
         self.sessions = SessionManager()
@@ -6668,9 +6764,85 @@ class ClaudeTelegramBot:
     def _is_authorized(self, chat_id: str) -> bool:
         return chat_id in self.authorized_ids
 
+    def _is_primary_chat(self, chat_id: str) -> bool:
+        return chat_id in self.primary_chat_ids
+
+    def _is_secondary_chat(self, chat_id: str) -> bool:
+        return chat_id in self.secondary_chats
+
+    def _locked_agent_for_chat(self, chat_id: str) -> Optional[str]:
+        """Return the agent_id this chat is locked to (secondary), or None."""
+        return self.secondary_chats.get(chat_id)
+
+    def _resolved_agent_for_chat(
+        self, chat_id: str, thread_id: Optional[int]
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve the bound agent for an incoming message.
+
+        Resolution order:
+          1. Secondary chat lock (chats.json) — entire chat tied to one agent
+          2. Topic-based mapping (frontmatter chat_id+thread_id) — primary chat topics
+        """
+        locked = self.secondary_chats.get(chat_id)
+        if locked:
+            agent = load_agent(locked)
+            if agent:
+                return agent
+        return self._find_agent_for_chat(chat_id, thread_id)
+
+    def _load_chats_config(self) -> None:
+        """Load multi-tenant chat config from CHATS_FILE.
+
+        Format: ``{"primary": ["123"], "secondary": {"456": "carol"}}``.
+        Primary IDs from ``TELEGRAM_CHAT_ID`` env are merged with the JSON's
+        primary list; secondary mappings live exclusively in chats.json.
+        Fail-open — missing/corrupt file is logged but doesn't abort startup.
+        """
+        if not CHATS_FILE.exists():
+            return
+        try:
+            data = json.loads(CHATS_FILE.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.error("Failed to parse chats.json: %s", exc)
+            return
+        for cid in data.get("primary", []) or []:
+            cid = str(cid).strip()
+            if cid:
+                self.primary_chat_ids.add(cid)
+        for cid, agent_id in (data.get("secondary", {}) or {}).items():
+            cid = str(cid).strip()
+            agent_id = str(agent_id).strip()
+            if cid and agent_id:
+                self.secondary_chats[cid] = agent_id
+        logger.info(
+            "Loaded chats.json: %d primary, %d secondary",
+            len(self.primary_chat_ids), len(self.secondary_chats),
+        )
+
+    def _save_chats_config(self) -> None:
+        """Persist primary + secondary chat mappings to CHATS_FILE atomically."""
+        try:
+            data = {
+                "primary": sorted(self.primary_chat_ids),
+                "secondary": dict(self.secondary_chats),
+            }
+            CHATS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = CHATS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(CHATS_FILE)
+        except Exception as exc:
+            logger.error("Failed to save chats.json: %s", exc)
+
     def _authorize_chat(self, chat_id: str) -> None:
-        """Dynamically authorize a new chat ID (e.g., a group the bot was added to)."""
+        """Dynamically authorize a new chat ID (e.g., a group the bot was added to).
+
+        Auto-discovery only adds primary chats — secondary chats arrive via
+        the explicit ``/onboard`` admin command. Persisted to both ``.env``
+        (legacy) and ``chats.json`` (forward-compatible).
+        """
+        self.primary_chat_ids.add(chat_id)
         self.authorized_ids.add(chat_id)
+        self._save_chats_config()
         # Persist to .env
         try:
             env_file = Path(__file__).resolve().parent / ".env"
@@ -8145,6 +8317,10 @@ class ClaudeTelegramBot:
 
     def cmd_sessions_list(self) -> None:
         items = self.sessions.list()
+        ctx = self._ctx
+        locked_agent = self._locked_agent_for_chat(ctx.chat_id) if ctx else None
+        if locked_agent:
+            items = [s for s in items if s.agent == locked_agent]
         if not items:
             self.send_message("Nenhuma sessão encontrada.")
             return
@@ -8156,6 +8332,16 @@ class ClaudeTelegramBot:
         self.send_message("\n".join(lines))
 
     def cmd_switch(self, name: str) -> None:
+        ctx = self._ctx
+        locked_agent = self._locked_agent_for_chat(ctx.chat_id) if ctx else None
+        if locked_agent:
+            target = self.sessions.sessions.get(name)
+            if target and target.agent != locked_agent:
+                self.send_message(
+                    f"❌ Sessão `{name}` pertence a outro agente. "
+                    f"_Este chat está travado em `{locked_agent}`._"
+                )
+                return
         # Consolidate current session before switching
         self._consolidate_session()
         s = self.sessions.switch(name)
@@ -9843,6 +10029,13 @@ class ClaudeTelegramBot:
     def cmd_agent(self, arg: str) -> None:
         arg = arg.strip()
         arg_lower = arg.lower()
+        # Secondary chats only get the read-only `list` view
+        if self._is_secondary_chat(self._ctx.chat_id if self._ctx else ""):
+            if arg_lower == "list":
+                self._agent_list()
+            else:
+                self._block_if_secondary("/agent")
+            return
         if not arg:
             # No argument: show action keyboard
             rows = [
@@ -9902,6 +10095,8 @@ class ClaudeTelegramBot:
         self._run_claude_prompt(prompt)
 
     def _run_agent_create_skill(self, extra: str = "") -> None:
+        if self._block_if_secondary("/agent new"):
+            return
         prompt = (
             "Execute a skill de criacao de agentes. "
             "Leia Skills/create-agent.md para instrucoes. "
@@ -9940,6 +10135,8 @@ class ClaudeTelegramBot:
             self.sessions.save()
 
     def cmd_agent_switch(self, agent_id: str) -> None:
+        if self._block_if_secondary("/agent <nome>"):
+            return
         # Refresh agent chat map on every switch (catches new/updated agents)
         self._refresh_agent_chat_map()
         # Mark as manual override so auto-routing doesn't overwrite
@@ -9992,6 +10189,197 @@ class ClaudeTelegramBot:
         ])
         markup = {"inline_keyboard": rows}
         self.send_message("Escolha o agente:", reply_markup=markup)
+
+    # -- Multi-tenant onboarding --
+
+    def cmd_onboard(self, arg: str) -> None:
+        """Bind a secondary chat to a locked agent (admin-only).
+
+        Usage: ``/onboard <chat_id> <agent_name>``
+
+        Only callable from a primary chat. Creates the agent's vault directory
+        if it doesn't exist, generates the per-agent ``settings.json`` for
+        ``--permission-mode dontAsk``, and persists the binding to
+        ``~/.claude-bot/chats.json``. Subsequent messages from ``<chat_id>``
+        are locked to ``<agent_name>`` and run with restricted permissions.
+        """
+        ctx = self._ctx
+        if not ctx or not self._is_primary_chat(ctx.chat_id):
+            self.send_message(
+                "❌ `/onboard` só pode ser usado a partir do chat primário."
+            )
+            return
+        parts = arg.split()
+        if len(parts) != 2:
+            self.send_message(
+                "❌ Use: `/onboard <chat_id> <nome_do_agente>`\n"
+                "_Vincula um chat secundário a um agente travado. "
+                "O `chat_id` aparece em `bot.log` quando uma mensagem chega "
+                "de chat não autorizado (procure `Ignoring message from "
+                "unauthorized chat`)._"
+            )
+            return
+        chat_id, agent_name = parts[0].strip(), parts[1].strip().lower()
+        try:
+            int(chat_id)
+        except ValueError:
+            self.send_message(
+                f"❌ `chat_id` deve ser numérico (recebido: `{chat_id}`)."
+            )
+            return
+        if not re.match(r"^[a-z0-9-]+$", agent_name):
+            self.send_message(
+                "❌ Nome do agente inválido. Use apenas `a-z`, `0-9` e `-` "
+                "(ex: `carol`, `bob-dev`)."
+            )
+            return
+        if chat_id in self.primary_chat_ids:
+            self.send_message(
+                f"❌ Chat `{chat_id}` já é primário. "
+                "Remova-o de `TELEGRAM_CHAT_ID` antes de usar como secundário."
+            )
+            return
+        if chat_id in self.secondary_chats:
+            existing = self.secondary_chats[chat_id]
+            self.send_message(
+                f"❌ Chat `{chat_id}` já está vinculado ao agente `{existing}`."
+            )
+            return
+        agent_created = False
+        if (VAULT_DIR / agent_name).exists():
+            if agent_name not in iter_agent_ids():
+                self.send_message(
+                    f"❌ `vault/{agent_name}/` existe mas não tem "
+                    f"`agent-{agent_name}.md`. Resolva o conflito antes de continuar."
+                )
+                return
+        else:
+            agent_created = self._scaffold_agent(agent_name)
+            if not agent_created:
+                self.send_message(
+                    f"❌ Falha ao criar diretório do agente `{agent_name}`. Veja o log."
+                )
+                return
+        self.secondary_chats[chat_id] = agent_name
+        self.authorized_ids.add(chat_id)
+        self._save_chats_config()
+        _ensure_agent_settings(agent_name)
+        self._refresh_agent_chat_map()
+        msg_lines = [
+            f"✅ Chat `{chat_id}` vinculado ao agente *{agent_name}*.",
+            "",
+            f"_Permissões restritas: `--permission-mode dontAsk` + allowlist em_",
+            f"`~/.claude-bot/agents/{agent_name}/settings.json`",
+        ]
+        if agent_created:
+            msg_lines.append("")
+            msg_lines.append(
+                f"🌱 Agente criado em `vault/{agent_name}/` (template mínimo — "
+                "personalize `agent-{0}.md` e `CLAUDE.md` quando puder).".format(agent_name)
+            )
+        self.send_message("\n".join(msg_lines))
+
+    def cmd_onboard_list(self) -> None:
+        """List secondary chat bindings (admin-only, primary chat)."""
+        ctx = self._ctx
+        if not ctx or not self._is_primary_chat(ctx.chat_id):
+            self.send_message("❌ Disponível só no chat primário.")
+            return
+        if not self.secondary_chats:
+            self.send_message(
+                "🪪 Nenhum chat secundário vinculado.\n"
+                "_Use `/onboard <chat_id> <nome>` para criar._"
+            )
+            return
+        lines = ["🪪 *Chats secundários vinculados*\n"]
+        for cid, agent_id in sorted(self.secondary_chats.items()):
+            lines.append(f"• `{cid}` → *{agent_id}*")
+        self.send_message("\n".join(lines))
+
+    def _scaffold_agent(self, agent_id: str) -> bool:
+        """Create a minimal agent directory (vault/<id>/ + required files).
+
+        Determinist scaffold for ``/onboard`` — bypasses the interactive
+        ``create-agent`` skill so the binding can finish in one command.
+        Mirrors the layout the create-agent skill produces (hub file,
+        per-folder index files) so existing iterators (``iter_agent_ids``,
+        sub-index resolvers) treat the new agent as first-class. Returns
+        True on success.
+        """
+        try:
+            agent_dir = VAULT_DIR / agent_id
+            if agent_dir.exists():
+                logger.warning("Scaffold aborted — directory exists: %s", agent_dir)
+                return False
+            for sub in ("Skills", "Routines", "Journal", "Reactions",
+                        "Lessons", "Notes", "workspace"):
+                (agent_dir / sub).mkdir(parents=True, exist_ok=True)
+            today = time.strftime("%Y-%m-%d")
+            display = agent_id.replace("-", " ").title()
+            hub = agent_dir / f"agent-{agent_id}.md"
+            hub.write_text(
+                f"---\n"
+                f"title: {display}\n"
+                f"name: {display}\n"
+                f"description: Agente {display}.\n"
+                f"type: agent\n"
+                f"model: sonnet\n"
+                f"icon: 🤖\n"
+                f"created: {today}\n"
+                f"tags: [agent]\n"
+                f"---\n\n"
+                f"# {display}\n\n"
+                f"Hub do agente {display}.\n\n"
+                f"## Links\n\n"
+                f"- [[agent-skills]]\n"
+                f"- [[agent-routines]]\n"
+                f"- [[agent-journal]]\n"
+                f"- [[agent-lessons]]\n"
+                f"- [[agent-notes]]\n",
+                encoding="utf-8",
+            )
+            claude_md = agent_dir / "CLAUDE.md"
+            claude_md.write_text(
+                f"# {display} — Agent Instructions\n\n"
+                f"Você é o agente {display}. Seu workspace é `vault/{agent_id}/`.\n\n"
+                f"## Personalidade\n\n"
+                f"_(Personalize esta seção)_\n\n"
+                f"## Especialização\n\n"
+                f"_(Personalize esta seção)_\n",
+                encoding="utf-8",
+            )
+            for folder, idx_filename in SUB_INDEX_FILENAMES.items():
+                (agent_dir / folder / idx_filename).write_text(
+                    f"---\ntitle: {folder}\ntype: index\ncreated: {today}\n---\n\n"
+                    f"# {folder}\n",
+                    encoding="utf-8",
+                )
+            try:
+                _vault_index_bootstrap_agent(agent_id)
+            except Exception as exc:
+                logger.warning("Vault index bootstrap failed for %s: %s", agent_id, exc)
+            logger.info("Scaffolded new agent: %s", agent_id)
+            return True
+        except Exception as exc:
+            logger.error("Failed to scaffold agent %s: %s", agent_id, exc, exc_info=True)
+            return False
+
+    def _block_if_secondary(self, action: str) -> bool:
+        """If the current chat is secondary, send an error and return True.
+
+        Helper for command handlers that should be admin-only (agent
+        switching, agent creation, etc.). Returns False on primary chats
+        so callers can ``if self._block_if_secondary("/foo"): return``.
+        """
+        ctx = self._ctx
+        if ctx and self._is_secondary_chat(ctx.chat_id):
+            agent = self.secondary_chats.get(ctx.chat_id, "?")
+            self.send_message(
+                f"❌ `{action}` está bloqueado neste chat.\n"
+                f"_Este grupo está travado no agente `{agent}`._"
+            )
+            return True
+        return False
 
     # -- Telegram file download --
 
@@ -10716,6 +11104,10 @@ class ClaudeTelegramBot:
         else:
             runner = _make_runner_for(effective_model)
 
+        # Multi-tenant: secondary chats run with --permission-mode dontAsk
+        # + per-agent settings.json instead of --dangerously-skip-permissions
+        restricted = bool(ctx and self._is_secondary_chat(ctx.chat_id))
+
         # Start runner thread FIRST — before any blocking network I/O
         runner_thread = threading.Thread(
             target=runner.run,
@@ -10727,6 +11119,7 @@ class ClaudeTelegramBot:
                 "effort": effective_effort,
                 "system_prompt": effective_sp,
                 "agent_id": session.agent or MAIN_AGENT_ID,
+                "restricted": restricted,
             },
             daemon=True,
         )
@@ -11542,6 +11935,7 @@ class ClaudeTelegramBot:
                 "/dry-run": lambda: self.cmd_dry_run(arg),
                 "/dryrun": lambda: self.cmd_dry_run(arg),
                 "/agent": lambda: self.cmd_agent(arg),
+                "/onboard": lambda: (self.cmd_onboard_list() if arg.strip().lower() == "list" else self.cmd_onboard(arg)),
                 "/skill": lambda: self.cmd_skill(arg),
                 "/audio": lambda: self.cmd_audio(),
                 "/voice": lambda: self.cmd_voice(arg),
@@ -12608,15 +13002,16 @@ class ClaudeTelegramBot:
                         def _handle(u=update, c=self._ctx, new=is_new_topic, ct=chat_type, tid=thread_id, cid=chat_id):
                             try:
                                 self._ctx = c
-                                # Auto-routing: check if this chat/thread is mapped to an agent
-                                if ct in ("group", "supergroup"):
-                                    mapped_agent = self._find_agent_for_chat(cid, tid)
-                                    if mapped_agent and not c._manual_override:
-                                        # Ensure agent is active (covers new topics + bot restarts)
+                                # Auto-routing for groups (incl. secondary chats locked to one agent)
+                                is_secondary = self._is_secondary_chat(cid)
+                                if ct in ("group", "supergroup") or is_secondary:
+                                    mapped_agent = self._resolved_agent_for_chat(cid, tid)
+                                    # Secondary chats always lock — manual override is ignored
+                                    if mapped_agent and (is_secondary or not c._manual_override):
                                         session = self._get_session()
                                         if session.agent != mapped_agent["_id"]:
                                             self._auto_activate_agent(mapped_agent)
-                                    elif new and tid:
+                                    elif new and tid and not is_secondary:
                                         # No mapping — show onboarding keyboard for new topics
                                         agents = list_agents()
                                         if agents:
