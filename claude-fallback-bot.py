@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.49.1"  # feat: /discovery pairing window for multi-tenant onboarding
+BOT_VERSION = "3.50.0"  # feat: topic-aware secondary chats — one chat, multiple agents per topic
 
 import hmac
 import hashlib
@@ -959,8 +959,9 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 👥 *Multi-tenant (chat primário)*
 • `/discovery [min]` — Abrir janela de pareamento (default 10min, máx 60). Mensagens de chat não autorizado disparam notificação com botões pra vincular agente. Só funciona em chat *privado* primário.
 • `/discovery status` — Ver tempo restante. `/discovery off` — fechar imediatamente.
-• `/onboard <chat_id> <nome>` — Vincular chat secundário a um agente travado (cria o agente se não existir). Forma manual; prefira `/discovery` quando possível.
-• `/onboard list` — Listar chats secundários vinculados
+• `/onboard <chat_id> <nome>` — Vincular chat secundário a um agente default (cria se não existir). Prefira `/discovery`.
+• `/onboard <chat_id>:<thread> <nome>` — Vincular um topic específico a um agente diferente do default
+• `/onboard list` — Listar chats secundários vinculados (com topics expandidos)
 
 ⚡ *Skills*
 • `/skill` — Gerenciar skills (listar, editar)
@@ -6504,7 +6505,11 @@ class ClaudeTelegramBot:
             cid = cid.strip()
             if cid:
                 self.primary_chat_ids.add(cid)
-        self.secondary_chats: Dict[str, str] = {}  # chat_id → agent_id
+        # secondary_chats: chat_id → {"default": agent_id, "topics": {thread_id_str: agent_id}}.
+        # The default agent answers when the chat has no topics or for the
+        # general topic (thread_id=None). Topic mappings let one secondary
+        # group serve several agents on different forum topics.
+        self.secondary_chats: Dict[str, Dict[str, Any]] = {}
         self._load_chats_config()
         # Union for cheap "is this chat allowed to talk to the bot at all?" checks
         self.authorized_ids: set = self.primary_chat_ids | set(self.secondary_chats.keys())
@@ -6596,6 +6601,10 @@ class ClaudeTelegramBot:
         # Convites pendentes durante a janela: chat_id → {chat_title, sender, ts, notify_msg_id}
         # Dedupe: uma notificação por chat_id enquanto a janela estiver aberta.
         self._pending_invites: Dict[str, dict] = {}
+        # Topics novos em chats secundários — notifica o primário sem precisar
+        # de /discovery. Dedupe por (chat_id, thread_id). Chave normalizada
+        # como string "<chat_id>:<thread_id>" pra serializar em callback_data.
+        self._pending_topic_invites: Dict[str, dict] = {}
         # Pending manual pipeline review gates: {review_id: {pipeline_name, step_id, step_name,
         #     time_slot, event: threading.Event, result: Optional[str], feedback: Optional[str],
         #     content_path: str, message_id: Optional[int], dep_step_id: str,
@@ -6780,9 +6789,31 @@ class ClaudeTelegramBot:
     def _is_secondary_chat(self, chat_id: str) -> bool:
         return chat_id in self.secondary_chats
 
-    def _locked_agent_for_chat(self, chat_id: str) -> Optional[str]:
-        """Return the agent_id this chat is locked to (secondary), or None."""
-        return self.secondary_chats.get(chat_id)
+    def _locked_agent_for_chat(
+        self, chat_id: str, thread_id: Optional[int] = None
+    ) -> Optional[str]:
+        """Return the agent_id this (chat_id, thread_id) is locked to.
+
+        Topics override the chat-wide default. With ``thread_id=None``,
+        returns the default. Returns ``None`` for primary or unknown chats.
+        """
+        entry = self.secondary_chats.get(chat_id)
+        if not entry:
+            return None
+        if thread_id is not None:
+            topic_agent = entry.get("topics", {}).get(str(thread_id))
+            if topic_agent:
+                return topic_agent
+        return entry.get("default")
+
+    def _topic_already_mapped(self, chat_id: str, thread_id: Optional[int]) -> bool:
+        """True iff this exact (chat_id, thread_id) has an explicit mapping."""
+        if thread_id is None:
+            return chat_id in self.secondary_chats
+        entry = self.secondary_chats.get(chat_id)
+        if not entry:
+            return False
+        return str(thread_id) in entry.get("topics", {})
 
     def _resolved_agent_for_chat(
         self, chat_id: str, thread_id: Optional[int]
@@ -6790,10 +6821,10 @@ class ClaudeTelegramBot:
         """Resolve the bound agent for an incoming message.
 
         Resolution order:
-          1. Secondary chat lock (chats.json) — entire chat tied to one agent
+          1. Secondary chat lock (chats.json) — topic-specific override, then default
           2. Topic-based mapping (frontmatter chat_id+thread_id) — primary chat topics
         """
-        locked = self.secondary_chats.get(chat_id)
+        locked = self._locked_agent_for_chat(chat_id, thread_id)
         if locked:
             agent = load_agent(locked)
             if agent:
@@ -6819,11 +6850,28 @@ class ClaudeTelegramBot:
             cid = str(cid).strip()
             if cid:
                 self.primary_chat_ids.add(cid)
-        for cid, agent_id in (data.get("secondary", {}) or {}).items():
+        # secondary supports two formats:
+        #   legacy v3.49.0: {"<chat_id>": "<agent_id>"}
+        #   v3.50.0+:       {"<chat_id>": {"default": "<agent>", "topics": {"<thread>": "<agent>"}}}
+        # Migration is transparent — legacy strings are normalized into the
+        # dict shape on load. Saving always uses the new format.
+        for cid, val in (data.get("secondary", {}) or {}).items():
             cid = str(cid).strip()
-            agent_id = str(agent_id).strip()
-            if cid and agent_id:
-                self.secondary_chats[cid] = agent_id
+            if not cid:
+                continue
+            if isinstance(val, str):
+                agent_id = val.strip()
+                if agent_id:
+                    self.secondary_chats[cid] = {"default": agent_id, "topics": {}}
+            elif isinstance(val, dict):
+                default = str(val.get("default", "")).strip()
+                topics_raw = val.get("topics", {}) or {}
+                topics: Dict[str, str] = {}
+                for tid, agent in topics_raw.items():
+                    if tid and agent:
+                        topics[str(tid)] = str(agent).strip()
+                if default:
+                    self.secondary_chats[cid] = {"default": default, "topics": topics}
         logger.info(
             "Loaded chats.json: %d primary, %d secondary",
             len(self.primary_chat_ids), len(self.secondary_chats),
@@ -8328,7 +8376,7 @@ class ClaudeTelegramBot:
     def cmd_sessions_list(self) -> None:
         items = self.sessions.list()
         ctx = self._ctx
-        locked_agent = self._locked_agent_for_chat(ctx.chat_id) if ctx else None
+        locked_agent = self._locked_agent_for_chat(ctx.chat_id, ctx.thread_id) if ctx else None
         if locked_agent:
             items = [s for s in items if s.agent == locked_agent]
         if not items:
@@ -8343,7 +8391,7 @@ class ClaudeTelegramBot:
 
     def cmd_switch(self, name: str) -> None:
         ctx = self._ctx
-        locked_agent = self._locked_agent_for_chat(ctx.chat_id) if ctx else None
+        locked_agent = self._locked_agent_for_chat(ctx.chat_id, ctx.thread_id) if ctx else None
         if locked_agent:
             target = self.sessions.sessions.get(name)
             if target and target.agent != locked_agent:
@@ -10202,12 +10250,19 @@ class ClaudeTelegramBot:
 
     # -- Multi-tenant onboarding --
 
-    def _onboard_chat(self, chat_id: str, agent_name: str) -> Tuple[bool, str]:
-        """Bind a secondary chat to an agent.
+    def _onboard_chat(
+        self,
+        chat_id: str,
+        agent_name: str,
+        thread_id: Optional[int] = None,
+    ) -> Tuple[bool, str]:
+        """Bind a secondary chat (or topic) to an agent.
 
-        Pure logic — no message sending. Returns ``(ok, msg)`` where ``msg``
-        is markdown-formatted ready to send to the primary chat. Used by both
-        ``/onboard`` (manual) and the discovery-window invite callbacks.
+        With ``thread_id=None``, sets the chat's *default* agent — bootstrapping
+        the chat as secondary if needed. With ``thread_id`` set, adds (or
+        replaces) a topic-specific override on top of an already-secondary
+        chat. Pure logic — no message sending. Returns ``(ok, msg)`` ready to
+        be relayed to the primary chat.
         """
         chat_id = chat_id.strip()
         agent_name = agent_name.strip().lower()
@@ -10225,9 +10280,19 @@ class ClaudeTelegramBot:
                 f"❌ Chat `{chat_id}` já é primário. "
                 "Remova-o de `TELEGRAM_CHAT_ID` antes de usar como secundário."
             )
-        if chat_id in self.secondary_chats:
-            existing = self.secondary_chats[chat_id]
-            return False, f"❌ Chat `{chat_id}` já está vinculado ao agente `{existing}`."
+        # Topic-binding requires the chat to already be secondary
+        if thread_id is not None and chat_id not in self.secondary_chats:
+            return False, (
+                f"❌ Chat `{chat_id}` ainda não é secundário — vincule o agente "
+                f"default primeiro (`/onboard {chat_id} <nome>`)."
+            )
+        # Default-binding refuses if already bound (use a topic override instead)
+        if thread_id is None and chat_id in self.secondary_chats:
+            existing = self.secondary_chats[chat_id].get("default", "?")
+            return False, (
+                f"❌ Chat `{chat_id}` já está vinculado ao agente `{existing}`. "
+                f"Para um topic específico, use `/onboard {chat_id}:<thread> <agente>`."
+            )
         agent_created = False
         if (VAULT_DIR / agent_name).exists():
             if agent_name not in iter_agent_ids():
@@ -10241,13 +10306,19 @@ class ClaudeTelegramBot:
                 return False, (
                     f"❌ Falha ao criar diretório do agente `{agent_name}`. Veja o log."
                 )
-        self.secondary_chats[chat_id] = agent_name
+        if thread_id is None:
+            self.secondary_chats[chat_id] = {"default": agent_name, "topics": {}}
+            scope_label = "default"
+        else:
+            entry = self.secondary_chats[chat_id]
+            entry.setdefault("topics", {})[str(thread_id)] = agent_name
+            scope_label = f"topic `{thread_id}`"
         self.authorized_ids.add(chat_id)
         self._save_chats_config()
         _ensure_agent_settings(agent_name)
         self._refresh_agent_chat_map()
         msg_lines = [
-            f"✅ Chat `{chat_id}` vinculado ao agente *{agent_name}*.",
+            f"✅ Chat `{chat_id}` ({scope_label}) vinculado ao agente *{agent_name}*.",
             "",
             f"_Permissões restritas: `--permission-mode dontAsk` + allowlist em_",
             f"`~/.claude-bot/agents/{agent_name}/settings.json`",
@@ -10261,15 +10332,11 @@ class ClaudeTelegramBot:
         return True, "\n".join(msg_lines)
 
     def cmd_onboard(self, arg: str) -> None:
-        """Bind a secondary chat to a locked agent (admin-only).
+        """Bind a secondary chat (or topic) to a locked agent (admin-only).
 
-        Usage: ``/onboard <chat_id> <agent_name>``
-
-        Only callable from a primary chat. Creates the agent's vault directory
-        if it doesn't exist, generates the per-agent ``settings.json`` for
-        ``--permission-mode dontAsk``, and persists the binding to
-        ``~/.claude-bot/chats.json``. Subsequent messages from ``<chat_id>``
-        are locked to ``<agent_name>`` and run with restricted permissions.
+        Usage:
+          ``/onboard <chat_id> <agent_name>``                 → set the chat's default agent
+          ``/onboard <chat_id>:<thread_id> <agent_name>``     → override one topic
         """
         ctx = self._ctx
         if not ctx or not self._is_primary_chat(ctx.chat_id):
@@ -10280,14 +10347,25 @@ class ClaudeTelegramBot:
         parts = arg.split()
         if len(parts) != 2:
             self.send_message(
-                "❌ Use: `/onboard <chat_id> <nome_do_agente>`\n"
-                "_Vincula um chat secundário a um agente travado. Em vez disso, "
-                "considere `/discovery [min]` para abrir uma janela de pareamento "
-                "que detecta o chat automaticamente quando o convidado mandar mensagem._"
+                "❌ Use:\n"
+                "• `/onboard <chat_id> <agente>` — define o agente default do chat\n"
+                "• `/onboard <chat_id>:<thread> <agente>` — sobrepõe um topic específico\n\n"
+                "_Em vez disso, prefira `/discovery [min]`: pareamento detecta o chat "
+                "automaticamente quando o convidado mandar mensagem._"
             )
             return
-        chat_id, agent_name = parts[0], parts[1]
-        _, msg = self._onboard_chat(chat_id, agent_name)
+        target, agent_name = parts[0], parts[1]
+        chat_id, thread_id = target, None
+        if ":" in target:
+            chat_id, _, raw_thread = target.partition(":")
+            try:
+                thread_id = int(raw_thread)
+            except ValueError:
+                self.send_message(
+                    f"❌ `thread_id` deve ser numérico (recebido: `{raw_thread}`)."
+                )
+                return
+        _, msg = self._onboard_chat(chat_id, agent_name, thread_id=thread_id)
         self.send_message(msg)
 
     def cmd_onboard_list(self) -> None:
@@ -10303,8 +10381,11 @@ class ClaudeTelegramBot:
             )
             return
         lines = ["🪪 *Chats secundários vinculados*\n"]
-        for cid, agent_id in sorted(self.secondary_chats.items()):
-            lines.append(f"• `{cid}` → *{agent_id}*")
+        for cid, entry in sorted(self.secondary_chats.items()):
+            default = entry.get("default", "?")
+            lines.append(f"• `{cid}` → *{default}* _(default)_")
+            for tid, agent_id in sorted(entry.get("topics", {}).items()):
+                lines.append(f"   ↳ topic `{tid}` → *{agent_id}*")
         self.send_message("\n".join(lines))
 
     # -- Discovery window (multi-tenant pairing mode) --
@@ -10460,6 +10541,67 @@ class ClaudeTelegramBot:
             "notify_msg_id": msg_id,
         }
 
+    def _notify_new_topic_in_secondary(
+        self,
+        chat_id: str,
+        thread_id: int,
+        msg: Dict,
+    ) -> None:
+        """Notify the primary chat that a new topic appeared in a secondary group.
+
+        Triggered the first time the bot sees a (chat_id, thread_id) pair in a
+        secondary chat where that thread isn't explicitly mapped. The message
+        still gets answered by the chat's default agent — this notification
+        just gives the curator a chance to override the topic to a different
+        agent. Dedupes per (chat_id, thread_id).
+        """
+        key = f"{chat_id}:{thread_id}"
+        if key in self._pending_topic_invites:
+            return
+        chat_meta = msg.get("chat", {})
+        chat_title = chat_meta.get("title") or "(grupo)"
+        topic_name = msg.get("forum_topic_created", {}).get("name", "")
+        if not topic_name:
+            # Telegram doesn't ship a per-message topic name; fall back to the
+            # generic label the user can resolve manually.
+            topic_name = f"topic {thread_id}"
+        sender = msg.get("from", {})
+        sender_name = sender.get("username") or sender.get("first_name") or "anônimo"
+        default_agent = self._locked_agent_for_chat(chat_id) or "?"
+        markup = {"inline_keyboard": [[
+            {"text": "➕ Vincular agente", "callback_data": f"topic_invite:pick:{key}"},
+            {"text": "✅ Manter default",  "callback_data": f"topic_invite:keep:{key}"},
+        ]]}
+        text = (
+            f"🧵 *Novo topic em chat secundário*\n\n"
+            f"• Chat: *{chat_title}* (`{chat_id}`)\n"
+            f"• Topic: *{topic_name}* (`{thread_id}`)\n"
+            f"• De: @{sender_name}\n\n"
+            f"_Cai no agente default *{default_agent}*. Quer atribuir outro?_"
+        )
+        target_chat = next(iter(sorted(self.primary_chat_ids)), None)
+        if not target_chat:
+            return
+        payload: Dict[str, Any] = {
+            "chat_id": target_chat,
+            "text": self._sanitize_markdown_v2(text),
+            "parse_mode": "MarkdownV2",
+            "reply_markup": markup,
+        }
+        resp = self.tg_request("sendMessage", payload)
+        notify_msg_id = None
+        if resp and resp.get("ok"):
+            notify_msg_id = resp.get("result", {}).get("message_id")
+        self._pending_topic_invites[key] = {
+            "chat_id": chat_id,
+            "thread_id": thread_id,
+            "chat_title": chat_title,
+            "topic_name": topic_name,
+            "sender": sender_name,
+            "ts": time.time(),
+            "notify_msg_id": notify_msg_id,
+        }
+
     def _scaffold_agent(self, agent_id: str) -> bool:
         """Create a minimal agent directory (vault/<id>/ + required files).
 
@@ -10537,10 +10679,10 @@ class ClaudeTelegramBot:
         """
         ctx = self._ctx
         if ctx and self._is_secondary_chat(ctx.chat_id):
-            agent = self.secondary_chats.get(ctx.chat_id, "?")
+            agent = self._locked_agent_for_chat(ctx.chat_id, ctx.thread_id) or "?"
             self.send_message(
                 f"❌ `{action}` está bloqueado neste chat.\n"
-                f"_Este grupo está travado no agente `{agent}`._"
+                f"_Este chat está travado no agente `{agent}`._"
             )
             return True
         return False
@@ -12248,6 +12390,82 @@ class ClaudeTelegramBot:
 
         self._remove_keyboard(callback)
 
+        if data.startswith("topic_invite:"):
+            # topic_invite:pick:<chat>:<thread>           → show agent picker
+            # topic_invite:bind:<chat>:<thread>:<agent>   → bind topic to agent
+            # topic_invite:new:<chat>:<thread>            → create new agent from topic name
+            # topic_invite:keep:<chat>:<thread>           → keep default, dismiss
+            parts = data.split(":")
+            if len(parts) < 4:
+                self.answer_callback(cb_id, "Callback inválido")
+                return
+            action = parts[1]
+            target_chat = parts[2]
+            try:
+                target_thread = int(parts[3])
+            except ValueError:
+                self.answer_callback(cb_id, "Thread inválida")
+                return
+            key = f"{target_chat}:{target_thread}"
+            pending = self._pending_topic_invites.get(key)
+            if action == "keep":
+                self.answer_callback(cb_id, "Mantido no default")
+                if pending:
+                    self._pending_topic_invites.pop(key, None)
+                return
+            if action == "pick":
+                self.answer_callback(cb_id)
+                agents = list_agents()
+                buttons: List[Dict] = []
+                for a in agents:
+                    icon = a.get("icon", "🤖")
+                    name = a.get("name", a["_id"])
+                    buttons.append({
+                        "text": f"{icon} {name}",
+                        "callback_data": f"topic_invite:bind:{target_chat}:{target_thread}:{a['_id']}",
+                    })
+                rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+                rows.append([
+                    {"text": "➕ Novo agente", "callback_data": f"topic_invite:new:{target_chat}:{target_thread}"},
+                    {"text": "✅ Manter default", "callback_data": f"topic_invite:keep:{target_chat}:{target_thread}"},
+                ])
+                topic_name = pending.get("topic_name", f"topic {target_thread}") if pending else f"topic {target_thread}"
+                self.send_message(
+                    f"🤖 *Topic `{target_thread}`* (_{topic_name}_) — escolha o agente:",
+                    reply_markup={"inline_keyboard": rows},
+                )
+                return
+            if action == "bind":
+                if len(parts) != 5:
+                    self.answer_callback(cb_id, "Callback inválido")
+                    return
+                agent_name = parts[4]
+                self.answer_callback(cb_id, f"Vinculando topic a {agent_name}…")
+                ok, msg = self._onboard_chat(target_chat, agent_name, thread_id=target_thread)
+                self.send_message(msg)
+                if ok:
+                    self._pending_topic_invites.pop(key, None)
+                return
+            if action == "new":
+                self.answer_callback(cb_id, "Criando agente…")
+                raw = (pending.get("topic_name") if pending else "") or ""
+                norm = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+                norm = re.sub(r"[^a-zA-Z0-9]+", "-", norm).strip("-").lower()
+                if not norm:
+                    norm = f"topic-{target_thread}"
+                base = norm
+                suffix = 2
+                while norm in iter_agent_ids():
+                    norm = f"{base}-{suffix}"
+                    suffix += 1
+                ok, msg = self._onboard_chat(target_chat, norm, thread_id=target_thread)
+                self.send_message(msg)
+                if ok:
+                    self._pending_topic_invites.pop(key, None)
+                return
+            self.answer_callback(cb_id, "Ação desconhecida")
+            return
+
         if data.startswith("invite:"):
             # invite:pick:<chat_id>           → show agent picker
             # invite:bind:<chat_id>:<agent>   → run onboard with that agent
@@ -13245,7 +13463,7 @@ class ClaudeTelegramBot:
                         self._ctx = self._get_context(chat_id, thread_id)
 
                         # Process update + onboarding in a thread so polling never blocks
-                        def _handle(u=update, c=self._ctx, new=is_new_topic, ct=chat_type, tid=thread_id, cid=chat_id):
+                        def _handle(u=update, c=self._ctx, new=is_new_topic, ct=chat_type, tid=thread_id, cid=chat_id, raw=msg):
                             try:
                                 self._ctx = c
                                 # Auto-routing for groups (incl. secondary chats locked to one agent)
@@ -13270,6 +13488,18 @@ class ClaudeTelegramBot:
                                             self.send_message(
                                                 "👋 Novo tópico! Escolha um agente para este canal:",
                                                 reply_markup=markup)
+                                    # New topic in secondary chat → notify curator
+                                    # so they can override the default agent
+                                    if (is_secondary and tid is not None
+                                            and new and raw
+                                            and not self._topic_already_mapped(cid, tid)):
+                                        try:
+                                            self._notify_new_topic_in_secondary(cid, tid, raw)
+                                        except Exception as exc:
+                                            logger.error(
+                                                "Topic-invite notify failed for %s:%s: %s",
+                                                cid, tid, exc, exc_info=True,
+                                            )
                                 self._process_update(u)
                             except Exception as exc:
                                 logger.error("Error processing update: %s", exc, exc_info=True)

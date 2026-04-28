@@ -172,10 +172,26 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 
 The bot supports multiple Telegram chats on a single instance — useful for sharing the bot with friends without giving them access to your personal group.
 
-**Model:** 1 chat = 1 agent. Two chat tiers:
+**Model:** secondary chats can host multiple agents — one per Telegram **forum topic** — with a **default** agent answering everywhere a topic isn't explicitly mapped (v3.50.0+). Two chat tiers:
 
 - **Primary chat(s)** — your own group(s). Full access: any agent, all commands, `--dangerously-skip-permissions`. Seeded by `TELEGRAM_CHAT_ID` env var; auto-discovery still adds groups where an authorized user is present.
-- **Secondary chat(s)** — your friends' groups. Each is locked to a single agent. Agent-switching commands (`/agent`, `/agent new`, `/clone`, `/switch <other-agent's-session>`) are blocked. Subprocess runs with `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json`.
+- **Secondary chat(s)** — your friends' groups. Each chat has a **default** agent and an optional map of `topic_id → agent`. Agent-switching commands (`/agent`, `/agent new`, `/clone`, `/switch <other-agent's-session>`) are blocked there. Subprocess runs with `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json`. Curation is admin-only — only the primary chat can create or rebind agents.
+
+**`chats.json` schema (v3.50.0+):**
+```json
+{
+  "primary": ["123"],
+  "secondary": {
+    "-1001234567890": {
+      "default": "carol",
+      "topics": {"100": "carol-coding", "200": "carol-fitness"}
+    }
+  }
+}
+```
+Legacy v3.49 entries (flat `"<chat_id>": "<agent_id>"`) are migrated transparently on load. Saves always use the new format.
+
+**New topics in secondary chats** trigger an automatic notification on the primary chat (no `/discovery` needed — the chat is already authorized). The first message in a new thread always cascades to the chat's default agent; the curator gets a card with `[➕ Vincular agente] [✅ Manter default]` and can pick an existing agent or auto-create one named after the topic title.
 
 **Onboarding flow — preferred path (`/discovery`, v3.49.1+):**
 1. From your **private chat** with the bot, run `/discovery` (default 10min, configurable up to 60min). State is in-memory, expires automatically, and `/discovery` is rejected on group chats so members of your primary group can't open the window.
