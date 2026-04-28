@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.49.0"  # feat: multi-tenant secondary chats (/onboard) with restricted permissions
+BOT_VERSION = "3.49.1"  # feat: /discovery pairing window for multi-tenant onboarding
 
 import hmac
 import hashlib
@@ -957,7 +957,9 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/agent <nome>` — Trocar para agente
 
 👥 *Multi-tenant (chat primário)*
-• `/onboard <chat_id> <nome>` — Vincular chat secundário a um agente travado (cria o agente se não existir)
+• `/discovery [min]` — Abrir janela de pareamento (default 10min, máx 60). Mensagens de chat não autorizado disparam notificação com botões pra vincular agente. Só funciona em chat *privado* primário.
+• `/discovery status` — Ver tempo restante. `/discovery off` — fechar imediatamente.
+• `/onboard <chat_id> <nome>` — Vincular chat secundário a um agente travado (cria o agente se não existir). Forma manual; prefira `/discovery` quando possível.
 • `/onboard list` — Listar chats secundários vinculados
 
 ⚡ *Skills*
@@ -6586,6 +6588,14 @@ class ClaudeTelegramBot:
 
         # Pending dangerous-prompt approvals: {callback_id: {prompt, chat_id, thread_id, user_msg_id, ts}}
         self._pending_approvals: Dict[str, dict] = {}
+        # Multi-tenant discovery window (v3.49.1): when active, mensagens de chats
+        # não autorizados disparam uma notificação no chat primário em vez de
+        # serem ignoradas. Volátil — se o bot reinicia, a janela fecha.
+        self._discovery_until: Optional[float] = None
+        self._discovery_origin: Optional[Tuple[str, Optional[int]]] = None  # (chat_id, thread_id) onde /discovery foi rodado
+        # Convites pendentes durante a janela: chat_id → {chat_title, sender, ts, notify_msg_id}
+        # Dedupe: uma notificação por chat_id enquanto a janela estiver aberta.
+        self._pending_invites: Dict[str, dict] = {}
         # Pending manual pipeline review gates: {review_id: {pipeline_name, step_id, step_name,
         #     time_slot, event: threading.Event, result: Optional[str], feedback: Optional[str],
         #     content_path: str, message_id: Optional[int], dep_step_id: str,
@@ -10192,6 +10202,64 @@ class ClaudeTelegramBot:
 
     # -- Multi-tenant onboarding --
 
+    def _onboard_chat(self, chat_id: str, agent_name: str) -> Tuple[bool, str]:
+        """Bind a secondary chat to an agent.
+
+        Pure logic — no message sending. Returns ``(ok, msg)`` where ``msg``
+        is markdown-formatted ready to send to the primary chat. Used by both
+        ``/onboard`` (manual) and the discovery-window invite callbacks.
+        """
+        chat_id = chat_id.strip()
+        agent_name = agent_name.strip().lower()
+        try:
+            int(chat_id)
+        except ValueError:
+            return False, f"❌ `chat_id` deve ser numérico (recebido: `{chat_id}`)."
+        if not re.match(r"^[a-z0-9-]+$", agent_name):
+            return False, (
+                "❌ Nome do agente inválido. Use apenas `a-z`, `0-9` e `-` "
+                "(ex: `carol`, `bob-dev`)."
+            )
+        if chat_id in self.primary_chat_ids:
+            return False, (
+                f"❌ Chat `{chat_id}` já é primário. "
+                "Remova-o de `TELEGRAM_CHAT_ID` antes de usar como secundário."
+            )
+        if chat_id in self.secondary_chats:
+            existing = self.secondary_chats[chat_id]
+            return False, f"❌ Chat `{chat_id}` já está vinculado ao agente `{existing}`."
+        agent_created = False
+        if (VAULT_DIR / agent_name).exists():
+            if agent_name not in iter_agent_ids():
+                return False, (
+                    f"❌ `vault/{agent_name}/` existe mas não tem "
+                    f"`agent-{agent_name}.md`. Resolva o conflito antes de continuar."
+                )
+        else:
+            agent_created = self._scaffold_agent(agent_name)
+            if not agent_created:
+                return False, (
+                    f"❌ Falha ao criar diretório do agente `{agent_name}`. Veja o log."
+                )
+        self.secondary_chats[chat_id] = agent_name
+        self.authorized_ids.add(chat_id)
+        self._save_chats_config()
+        _ensure_agent_settings(agent_name)
+        self._refresh_agent_chat_map()
+        msg_lines = [
+            f"✅ Chat `{chat_id}` vinculado ao agente *{agent_name}*.",
+            "",
+            f"_Permissões restritas: `--permission-mode dontAsk` + allowlist em_",
+            f"`~/.claude-bot/agents/{agent_name}/settings.json`",
+        ]
+        if agent_created:
+            msg_lines.append("")
+            msg_lines.append(
+                f"🌱 Agente criado em `vault/{agent_name}/` (template mínimo — "
+                f"personalize `agent-{agent_name}.md` e `CLAUDE.md` quando puder)."
+            )
+        return True, "\n".join(msg_lines)
+
     def cmd_onboard(self, arg: str) -> None:
         """Bind a secondary chat to a locked agent (admin-only).
 
@@ -10213,71 +10281,14 @@ class ClaudeTelegramBot:
         if len(parts) != 2:
             self.send_message(
                 "❌ Use: `/onboard <chat_id> <nome_do_agente>`\n"
-                "_Vincula um chat secundário a um agente travado. "
-                "O `chat_id` aparece em `bot.log` quando uma mensagem chega "
-                "de chat não autorizado (procure `Ignoring message from "
-                "unauthorized chat`)._"
+                "_Vincula um chat secundário a um agente travado. Em vez disso, "
+                "considere `/discovery [min]` para abrir uma janela de pareamento "
+                "que detecta o chat automaticamente quando o convidado mandar mensagem._"
             )
             return
-        chat_id, agent_name = parts[0].strip(), parts[1].strip().lower()
-        try:
-            int(chat_id)
-        except ValueError:
-            self.send_message(
-                f"❌ `chat_id` deve ser numérico (recebido: `{chat_id}`)."
-            )
-            return
-        if not re.match(r"^[a-z0-9-]+$", agent_name):
-            self.send_message(
-                "❌ Nome do agente inválido. Use apenas `a-z`, `0-9` e `-` "
-                "(ex: `carol`, `bob-dev`)."
-            )
-            return
-        if chat_id in self.primary_chat_ids:
-            self.send_message(
-                f"❌ Chat `{chat_id}` já é primário. "
-                "Remova-o de `TELEGRAM_CHAT_ID` antes de usar como secundário."
-            )
-            return
-        if chat_id in self.secondary_chats:
-            existing = self.secondary_chats[chat_id]
-            self.send_message(
-                f"❌ Chat `{chat_id}` já está vinculado ao agente `{existing}`."
-            )
-            return
-        agent_created = False
-        if (VAULT_DIR / agent_name).exists():
-            if agent_name not in iter_agent_ids():
-                self.send_message(
-                    f"❌ `vault/{agent_name}/` existe mas não tem "
-                    f"`agent-{agent_name}.md`. Resolva o conflito antes de continuar."
-                )
-                return
-        else:
-            agent_created = self._scaffold_agent(agent_name)
-            if not agent_created:
-                self.send_message(
-                    f"❌ Falha ao criar diretório do agente `{agent_name}`. Veja o log."
-                )
-                return
-        self.secondary_chats[chat_id] = agent_name
-        self.authorized_ids.add(chat_id)
-        self._save_chats_config()
-        _ensure_agent_settings(agent_name)
-        self._refresh_agent_chat_map()
-        msg_lines = [
-            f"✅ Chat `{chat_id}` vinculado ao agente *{agent_name}*.",
-            "",
-            f"_Permissões restritas: `--permission-mode dontAsk` + allowlist em_",
-            f"`~/.claude-bot/agents/{agent_name}/settings.json`",
-        ]
-        if agent_created:
-            msg_lines.append("")
-            msg_lines.append(
-                f"🌱 Agente criado em `vault/{agent_name}/` (template mínimo — "
-                "personalize `agent-{0}.md` e `CLAUDE.md` quando puder).".format(agent_name)
-            )
-        self.send_message("\n".join(msg_lines))
+        chat_id, agent_name = parts[0], parts[1]
+        _, msg = self._onboard_chat(chat_id, agent_name)
+        self.send_message(msg)
 
     def cmd_onboard_list(self) -> None:
         """List secondary chat bindings (admin-only, primary chat)."""
@@ -10295,6 +10306,159 @@ class ClaudeTelegramBot:
         for cid, agent_id in sorted(self.secondary_chats.items()):
             lines.append(f"• `{cid}` → *{agent_id}*")
         self.send_message("\n".join(lines))
+
+    # -- Discovery window (multi-tenant pairing mode) --
+
+    def _discovery_active(self) -> bool:
+        """True when the temporary discovery window is open."""
+        return (
+            self._discovery_until is not None
+            and time.time() < self._discovery_until
+        )
+
+    def _discovery_remaining(self) -> int:
+        """Seconds left in the discovery window (0 if closed)."""
+        if not self._discovery_until:
+            return 0
+        return max(0, int(self._discovery_until - time.time()))
+
+    def cmd_discovery(self, arg: str) -> None:
+        """Open a temporary pairing window for onboarding new chats.
+
+        Usage:
+          ``/discovery``         — open for 10 minutes (default)
+          ``/discovery <N>``     — open for N minutes (1–60)
+          ``/discovery status``  — show remaining time / closed
+          ``/discovery off``     — close immediately
+
+        Restricted to the primary chat in **private mode** so a member of a
+        primary group can't open it for the whole group. While the window is
+        open, mensagens vindas de chat não autorizado disparam uma notificação
+        com botões pra vincular o convite a um agente — em vez do silent
+        ignore padrão.
+        """
+        ctx = self._ctx
+        chat_id = ctx.chat_id if ctx else ""
+        if not self._is_primary_chat(chat_id):
+            self.send_message(
+                "❌ `/discovery` só pode ser usado a partir do chat primário."
+            )
+            return
+        # Reject group/supergroup origins — only private chat allowed
+        # (we don't always know chat_type here, so check via the recorded chat_type
+        # captured in the polling loop; fall back to the negative chat_id heuristic
+        # since Telegram group ids are negative)
+        if chat_id.startswith("-"):
+            self.send_message(
+                "❌ `/discovery` só funciona em chat *privado* com o bot.\n"
+                "_Garante que ninguém num grupo primário possa abrir a janela._"
+            )
+            return
+        arg_norm = (arg or "").strip().lower()
+        if arg_norm == "status":
+            if self._discovery_active():
+                rem = self._discovery_remaining()
+                self.send_message(
+                    f"🟢 *Discovery aberta* — restam {rem // 60}m {rem % 60}s.\n"
+                    f"_Manda alguém escrever no grupo dele e a notificação chega aqui._"
+                )
+            else:
+                self.send_message(
+                    "🔴 *Discovery fechada.*\n"
+                    "_Use `/discovery [min]` para abrir (default 10min)._"
+                )
+            return
+        if arg_norm in ("off", "close", "fechar", "stop"):
+            self._discovery_until = None
+            self._discovery_origin = None
+            self._pending_invites.clear()
+            self.send_message("🔴 Discovery fechada.")
+            return
+        # Parse minutes
+        if arg_norm:
+            try:
+                minutes = int(arg_norm)
+            except ValueError:
+                self.send_message(
+                    "❌ Use: `/discovery [min]` (1 a 60), `/discovery status` ou "
+                    "`/discovery off`."
+                )
+                return
+            if minutes < 1 or minutes > 60:
+                self.send_message("❌ Janela deve ser entre 1 e 60 minutos.")
+                return
+        else:
+            minutes = 10
+        self._discovery_until = time.time() + minutes * 60
+        self._discovery_origin = (chat_id, ctx.thread_id if ctx else None)
+        self._pending_invites.clear()
+        self.send_message(
+            f"🟢 *Discovery aberta por {minutes} min.*\n"
+            f"_Peça pro convidado mandar uma mensagem no grupo dele agora — "
+            f"a notificação chega aqui com botões pra vincular um agente._"
+        )
+
+    def _send_to_origin(self, text: str, reply_markup: Optional[Dict] = None) -> Optional[int]:
+        """Send a message to the chat where /discovery was opened.
+
+        Returns the message_id so we can track and edit the notification.
+        Falls back to the first primary chat if origin is somehow lost.
+        """
+        origin = self._discovery_origin
+        if not origin:
+            target_chat = next(iter(sorted(self.primary_chat_ids)), None)
+            target_thread = None
+        else:
+            target_chat, target_thread = origin
+        if not target_chat:
+            return None
+        payload = {
+            "chat_id": target_chat,
+            "text": self._sanitize_markdown_v2(text),
+            "parse_mode": "MarkdownV2",
+        }
+        if target_thread is not None:
+            payload["message_thread_id"] = target_thread
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        resp = self.tg_request("sendMessage", payload)
+        if resp and resp.get("ok"):
+            return resp.get("result", {}).get("message_id")
+        return None
+
+    def _notify_unknown_chat(self, msg: Dict) -> None:
+        """Notify the primary chat that a stranger tried to message the bot.
+
+        Called from the polling loop when ``_discovery_active()`` is True and
+        ``chat_id`` isn't in ``authorized_ids``. Dedupes per chat_id so a
+        single notification covers all messages in that conversation while
+        the window is open.
+        """
+        chat_meta = msg.get("chat", {})
+        chat_id = str(chat_meta.get("id", ""))
+        if not chat_id or chat_id in self._pending_invites:
+            return
+        chat_title = chat_meta.get("title") or chat_meta.get("username") or "(privado)"
+        chat_type = chat_meta.get("type", "?")
+        sender = msg.get("from", {})
+        sender_name = sender.get("username") or sender.get("first_name") or "anônimo"
+        markup = {"inline_keyboard": [[
+            {"text": "➕ Vincular agente", "callback_data": f"invite:pick:{chat_id}"},
+            {"text": "🚫 Dispensar",       "callback_data": f"invite:dismiss:{chat_id}"},
+        ]]}
+        text = (
+            f"🆕 *Mensagem de chat não autorizado*\n\n"
+            f"• Chat: *{chat_title}* (`{chat_id}`, {chat_type})\n"
+            f"• De: @{sender_name}\n\n"
+            f"_Discovery aberta — clique para vincular este chat a um agente._"
+        )
+        msg_id = self._send_to_origin(text, reply_markup=markup)
+        self._pending_invites[chat_id] = {
+            "chat_title": chat_title,
+            "sender": sender_name,
+            "ts": time.time(),
+            "notify_msg_id": msg_id,
+        }
 
     def _scaffold_agent(self, agent_id: str) -> bool:
         """Create a minimal agent directory (vault/<id>/ + required files).
@@ -11936,6 +12100,7 @@ class ClaudeTelegramBot:
                 "/dryrun": lambda: self.cmd_dry_run(arg),
                 "/agent": lambda: self.cmd_agent(arg),
                 "/onboard": lambda: (self.cmd_onboard_list() if arg.strip().lower() == "list" else self.cmd_onboard(arg)),
+                "/discovery": lambda: self.cmd_discovery(arg),
                 "/skill": lambda: self.cmd_skill(arg),
                 "/audio": lambda: self.cmd_audio(),
                 "/voice": lambda: self.cmd_voice(arg),
@@ -12082,6 +12247,79 @@ class ClaudeTelegramBot:
             return
 
         self._remove_keyboard(callback)
+
+        if data.startswith("invite:"):
+            # invite:pick:<chat_id>           → show agent picker
+            # invite:bind:<chat_id>:<agent>   → run onboard with that agent
+            # invite:new:<chat_id>            → derive agent name from chat title, run onboard
+            # invite:dismiss:<chat_id>        → discard pending notification
+            parts = data.split(":", 3)
+            if len(parts) < 3:
+                self.answer_callback(cb_id, "Callback inválido")
+                return
+            action = parts[1]
+            target_chat = parts[2]
+            pending = self._pending_invites.get(target_chat)
+            if action == "dismiss":
+                self.answer_callback(cb_id, "Dispensado")
+                if pending:
+                    self._pending_invites.pop(target_chat, None)
+                return
+            if action == "pick":
+                self.answer_callback(cb_id)
+                agents = list_agents()
+                rows: List[List[Dict]] = []
+                buttons: List[Dict] = []
+                for a in agents:
+                    icon = a.get("icon", "🤖")
+                    name = a.get("name", a["_id"])
+                    buttons.append({
+                        "text": f"{icon} {name}",
+                        "callback_data": f"invite:bind:{target_chat}:{a['_id']}",
+                    })
+                rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+                rows.append([
+                    {"text": "➕ Novo agente",  "callback_data": f"invite:new:{target_chat}"},
+                    {"text": "🚫 Dispensar",     "callback_data": f"invite:dismiss:{target_chat}"},
+                ])
+                title = pending.get("chat_title", "?") if pending else "?"
+                self.send_message(
+                    f"🤖 *Vincular `{target_chat}`* (_{title}_) — escolha o agente:",
+                    reply_markup={"inline_keyboard": rows},
+                )
+                return
+            if action == "bind":
+                if len(parts) != 4:
+                    self.answer_callback(cb_id, "Callback inválido")
+                    return
+                agent_name = parts[3]
+                self.answer_callback(cb_id, f"Vinculando a {agent_name}…")
+                ok, msg = self._onboard_chat(target_chat, agent_name)
+                self.send_message(msg)
+                if ok:
+                    self._pending_invites.pop(target_chat, None)
+                return
+            if action == "new":
+                self.answer_callback(cb_id, "Criando agente…")
+                # Derive a vault-safe agent name from the chat title (or fallback)
+                raw = (pending.get("chat_title") if pending else "") or ""
+                norm = unicodedata.normalize("NFKD", raw).encode("ascii", "ignore").decode("ascii")
+                norm = re.sub(r"[^a-zA-Z0-9]+", "-", norm).strip("-").lower()
+                if not norm:
+                    norm = f"guest-{target_chat.lstrip('-')[-6:] or 'unknown'}"
+                # Avoid collision with existing agents
+                base = norm
+                suffix = 2
+                while norm in iter_agent_ids():
+                    norm = f"{base}-{suffix}"
+                    suffix += 1
+                ok, msg = self._onboard_chat(target_chat, norm)
+                self.send_message(msg)
+                if ok:
+                    self._pending_invites.pop(target_chat, None)
+                return
+            self.answer_callback(cb_id, "Ação desconhecida")
+            return
 
         if data.startswith("audio:"):
             locale = data.split(":", 1)[1]
@@ -12988,6 +13226,14 @@ class ClaudeTelegramBot:
                                 self._authorize_chat(chat_id)
                                 logger.info("Auto-authorized group %s via user %s", chat_id, user_id)
                             else:
+                                # Discovery window: unknown chat + window open
+                                # → notify primary chat with onboarding buttons
+                                # instead of silently ignoring.
+                                if self._discovery_active() and msg:
+                                    try:
+                                        self._notify_unknown_chat(msg)
+                                    except Exception as exc:
+                                        logger.error("Discovery notify failed: %s", exc, exc_info=True)
                                 logger.debug("Ignoring message from unauthorized chat %s", chat_id)
                                 continue
 

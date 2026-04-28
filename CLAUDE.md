@@ -177,10 +177,17 @@ The bot supports multiple Telegram chats on a single instance — useful for sha
 - **Primary chat(s)** — your own group(s). Full access: any agent, all commands, `--dangerously-skip-permissions`. Seeded by `TELEGRAM_CHAT_ID` env var; auto-discovery still adds groups where an authorized user is present.
 - **Secondary chat(s)** — your friends' groups. Each is locked to a single agent. Agent-switching commands (`/agent`, `/agent new`, `/clone`, `/switch <other-agent's-session>`) are blocked. Subprocess runs with `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json`.
 
-**Onboarding flow** (run from primary chat):
-1. The friend creates a Telegram group and adds the bot. The bot logs `Ignoring message from unauthorized chat -100…` to `bot.log`.
-2. You run `/onboard <chat_id> <agent_name>` in your primary chat. If the agent doesn't exist, a minimal scaffold is created at `vault/<agent_name>/` (hub file, CLAUDE.md, sub-folders + index files). The chat ID is persisted to `~/.claude-bot/chats.json`.
-3. Friend's group is now bound. Their messages activate the locked agent automatically; agent's vault is isolated under `vault/<agent_name>/`.
+**Onboarding flow — preferred path (`/discovery`, v3.49.1+):**
+1. From your **private chat** with the bot, run `/discovery` (default 10min, configurable up to 60min). State is in-memory, expires automatically, and `/discovery` is rejected on group chats so members of your primary group can't open the window.
+2. Friend sends any message in their group. The bot detects the unknown chat, dedupes per `chat_id`, and notifies the chat where you opened the window with the group title, sender username, and `[➕ Vincular agente] [🚫 Dispensar]` buttons.
+3. Click `Vincular agente` → pick an existing agent, or `➕ Novo agente` (auto-derives a vault-safe id from the group title; collisions get `-2`, `-3` suffixes). The shared `_onboard_chat` helper persists to `chats.json` and confirms.
+
+Outside the discovery window the bot returns to silent-ignore for unknown chats — zero exposure surface.
+
+**Onboarding flow — manual fallback:**
+1. Friend creates a Telegram group and adds the bot. The bot logs `Ignoring message from unauthorized chat -100…` to `bot.log`.
+2. You read the chat ID from the log and run `/onboard <chat_id> <agent_name>` in your primary chat. If the agent doesn't exist, a minimal scaffold is created at `vault/<agent_name>/`.
+3. Friend's group is bound. Messages activate the locked agent automatically; the vault is isolated under `vault/<agent_name>/`.
 
 **Per-agent permission profile.** When `/onboard` runs, it generates `~/.claude-bot/agents/<agent>/settings.json` with sensible defaults: allow file ops anywhere (cwd already pins it to the agent's vault), allow common safe Bash builtins, deny `Read/Edit/Write` against other agents' vault paths and against `~/.claude-bot/`, `**/.env`, `**/sessions.json`, `**/chats.json`. Edit the file to tighten or relax — the bot reads it fresh on each subprocess spawn.
 
