@@ -131,10 +131,17 @@ The SYSTEM_PROMPT instructs Claude to scan `Lessons/` before similar tasks. Test
 
 ## Watchdog
 
-`bot-watchdog.sh` runs via launchd every 60s (`com.claudebot.bot-watchdog.plist`):
-- If the bot is not running: restarts via `launchctl start` and notifies on Telegram
-- If the bot came back: sends recovery message
-- Uses flag file (`~/.claude-bot/.watchdog-notified`) to notify only once per downtime
+`bot-watchdog.sh` runs via launchd every 60s (`com.claudebot.watchdog.plist`). Two flag files in `~/.claude-bot/`:
+- `.watchdog-notified` — set when bot is down and alert was sent; cleared on recovery
+- `.watchdog-disabled` — if exists, watchdog exits silently (maintenance mode)
+
+Restart order: `launchctl kickstart gui/<uid>/com.claudebot.bot` first; fallback to `launchctl bootstrap` if service not registered. **Do not use `launchctl start`** — deprecated on Darwin 24+.
+
+Disable/enable via Telegram: `/watchdog off` / `/watchdog on`. Or via shell: `touch`/`rm` the disable flag.
+
+## Restart mechanism
+
+`scripts/bot-self-restart.sh` is called by `/restart`. Uses `launchctl kickstart -k` (atomic kill+restart, Darwin 24+ idiom). Falls back to `bootout`/`bootstrap`. **Do not use `launchctl load/unload`** — deprecated and unreliable with `set -e` (caused restarts to silently fail on Darwin 25.x). Polls for a new PID (max 40s) before confirming.
 
 ## Knowledge Graph (Graphify)
 

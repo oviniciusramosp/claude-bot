@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.51.0"  # fix: persist user message on transient runner failures
+BOT_VERSION = "3.52.0"  # feat: /watchdog command + reliable restart via kickstart -k
 
 import hmac
 import hashlib
@@ -150,6 +150,8 @@ VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 AGENTS_SETTINGS_DIR = DATA_DIR / "agents"
 INFLIGHT_DIR = DATA_DIR / "inflight"
+WATCHDOG_NOTIFIED_FLAG = DATA_DIR / ".watchdog-notified"
+WATCHDOG_DISABLE_FLAG  = DATA_DIR / ".watchdog-disabled"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
 
@@ -934,6 +936,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 🔧 *Controle*
 • `/restart` — Reiniciar o bot (confirma via Telegram quando voltar)
+• `/watchdog [on|off]` — Ativar/desativar watchdog de auto-reinício
 • `/stop` — Cancelar execução atual
 • `/status` — Info da sessão e processo
 • `/timeout <seg>` — Alterar timeout (padrão 600s)
@@ -8617,6 +8620,18 @@ class ClaudeTelegramBot:
             close_fds=True,
         )
 
+    def cmd_watchdog(self, action: str = "") -> None:
+        action = action.strip().lower()
+        if action == "off":
+            WATCHDOG_DISABLE_FLAG.touch()
+            self.send_message("Watchdog desativado. Use `/watchdog on` para reativar.")
+        elif action == "on":
+            WATCHDOG_DISABLE_FLAG.unlink(missing_ok=True)
+            self.send_message("Watchdog ativado.")
+        else:
+            status = "desativado" if WATCHDOG_DISABLE_FLAG.exists() else "ativo"
+            self.send_message(f"Watchdog: *{status}*")
+
     def cmd_restart_agent(self) -> None:
         """Force-restore the session's preferred model after a rate-limit fallback.
 
@@ -12371,6 +12386,7 @@ class ClaudeTelegramBot:
                 "/clear": lambda: self.cmd_clear(),
                 "/restart": lambda: self.cmd_restart(),
                 "/restart-agent": lambda: self.cmd_restart_agent(),
+                "/watchdog": lambda: self.cmd_watchdog(arg),
                 "/important": lambda: self.cmd_important(),
                 "/save": lambda: self.cmd_important(),
                 "/routine": lambda: self.cmd_routine(arg),

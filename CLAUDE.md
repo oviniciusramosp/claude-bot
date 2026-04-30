@@ -32,6 +32,8 @@ User ↔ Telegram API ↔ claude-fallback-bot.py ↔ Claude Code CLI (subprocess
 | `claude-bot.sh` | Service manager — install/uninstall/start/stop/restart/status/logs |
 | `com.claudebot.bot.plist` | launchd template for the bot (uses `__HOME__`/`__SCRIPT_DIR__` placeholders) |
 | `com.claudebot.menubar.plist` | launchd template for the menu bar app |
+| `scripts/bot-self-restart.sh` | Restart script called by `/restart` — uses `launchctl kickstart -k` |
+| `bot-watchdog.sh` | Watchdog — checks every 60s, restarts bot if down, notifies via Telegram |
 
 ### Runtime Data
 
@@ -157,6 +159,36 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `#voice` (in message) | One-shot voice response (audio only) |
 | `/onboard <chat_id> <agent>` | (Primary chat only) Bind a secondary chat to a locked agent. See "Multi-tenant secondary chats". |
 | `/onboard list` | (Primary chat only) List secondary chat bindings. |
+
+## Restart and Watchdog
+
+### `/restart` command — `scripts/bot-self-restart.sh`
+
+Called by the bot's `/restart` Telegram command. Uses `launchctl kickstart -k gui/<uid>/com.claudebot.bot` (atomic kill+restart on modern macOS). Falls back to `bootout`/`bootstrap` if the service is not registered.
+
+- Touches `~/.claude-bot/.watchdog-notified` to suppress watchdog alarms during the restart window
+- Polls for a new PID (max 40s) and confirms via Telegram when the new process is up
+- **Do not use `launchctl load/unload`** — deprecated on Darwin 24+ and unreliable with `set -e`
+
+To restart the bot manually from Claude Code:
+```bash
+bash /Users/viniciusramos/claude-bot/scripts/bot-self-restart.sh
+```
+
+### Watchdog — `bot-watchdog.sh`
+
+Runs via launchd every 60s (`com.claudebot.watchdog.plist`). Checks `pgrep` for the bot process:
+- **Bot running + flag set** → flag cleared + "voltou a funcionar" notification
+- **Bot down + no flag** → flag set + restart attempt + "Bot caiu!" notification
+- **Bot down + flag set** → silent (already notified, waiting)
+
+Restart order: `launchctl kickstart` first (service registered), fallback to `launchctl bootstrap` (service unregistered after failed restart).
+
+**Disable/enable:**
+- Via Telegram: `/watchdog off` / `/watchdog on` / `/watchdog` (status)
+- Via shell: `touch ~/.claude-bot/.watchdog-disabled` / `rm ~/.claude-bot/.watchdog-disabled`
+
+Useful when doing manual maintenance to avoid spurious alerts and auto-restarts.
 
 ## Development Guidelines
 
