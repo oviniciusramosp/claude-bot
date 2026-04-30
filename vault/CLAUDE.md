@@ -169,13 +169,14 @@ README (root hub)
 | Tooling | none (terminal) | README |
 
 **Files that are NOT graph nodes** (excluded by `vault-graph-builder.py`):
-- Daily journal entries (`Agents/<id>/Journal/YYYY-MM-DD.md`) — ephemeral chronological logs
-- Pipeline workspace data (`Agents/<id>/workspace/**`) — runtime outputs
-- Bot reactions (`Agents/<id>/Reactions/**`) — webhook config, not knowledge
-- Routine execution history (`Agents/<id>/Routines/.history/**`) — churn-y log rollups
-- Agent metadata (`Agents/<id>/agent.md`) and instructions (`Agents/<id>/CLAUDE.md`) — parsed directly by the bot / Claude CLI, not browsed in the graph
+- Daily journal entries (`<agent>/Journal/YYYY-MM-DD.md`) — ephemeral chronological logs
+- Bot reactions (`<agent>/Reactions/**`) — webhook config, not knowledge
+- Routine execution history (`<agent>/Routines/.history/**`) — churn-y log rollups
+- Agent instructions (`<agent>/CLAUDE.md`) — parsed directly by Claude CLI, not browsed in the graph
 
 These files exist on disk but are deliberately not part of the knowledge graph. They MUST NOT contain wikilinks — adding `[[]]` here pollutes Obsidian's graph view via dangling edges and risks leaking to the LLM when read as prompt context.
+
+**Temp branch (`<agent>/agent-temp.md`) — runtime files ARE graph nodes.** Pipeline workspace outputs (`<agent>/.workspace/data/**/*.md`) and the rolling context (`<agent>/.context.md`) are linked via `[[<agent>/agent-temp|Temp]]` so Obsidian distinguishes intentional ephemera from broken/unlinked leaves. Authors of these files (pipeline harness, context writer) inject the parent link automatically. The `agent-temp.md` index itself is one branch off the agent hub, parallel to `Notes`/`Routines`/`Skills`/`Lessons`.
 
 **Core principle: not every mention needs to be a `[[link]]`.** Links exist to create connections IN the Obsidian graph. If the connection doesn't add visual value, don't link. Use plain text.
 

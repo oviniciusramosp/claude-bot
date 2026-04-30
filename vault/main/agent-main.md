@@ -20,3 +20,4 @@ personality: Helpful general-purpose assistant
 - [[main/Lessons/agent-lessons|Lessons]]
 - [[main/Notes/agent-notes|Notes]]
 - [[main/CLAUDE|CLAUDE]]
+- [[main/agent-temp|Temp]]

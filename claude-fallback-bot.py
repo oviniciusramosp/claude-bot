@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.52.2"  # fix: auto-extracted notes use path-qualified parent link (resolves filename collision across agents)
+BOT_VERSION = "3.53.0"  # feat: agent-temp branch — pipeline data files auto-link to per-agent Temp index for clean Obsidian graph
 
 import hmac
 import hashlib
@@ -1487,6 +1487,35 @@ def _promote_durable_concept_to_notes(
     except OSError as exc:
         logger.error("Failed to promote concept %s to Notes/: %s", slug, exc)
         return None
+
+
+def _inject_temp_parent_link(path: Path, agent_id: str) -> None:
+    """Prepend `[[<agent>/agent-temp|Temp]]` to a runtime data file.
+
+    Used by the pipeline executor after every step write so that Obsidian's
+    graph keeps `.workspace/data/**` files linked to the per-agent Temp index
+    (instead of showing them as orphans).
+    Idempotent — does nothing if the link is already present. Preserves YAML
+    frontmatter when present.
+    """
+    if not agent_id:
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    link = f"[[{agent_id}/agent-temp|Temp]]"
+    if link in text:
+        return
+    m = re.match(r"(?s)^(---\n.*?\n---\n)", text)
+    if m:
+        new_text = m.group(1) + "\n" + link + "\n" + text[m.end():]
+    else:
+        new_text = link + "\n\n" + text
+    try:
+        path.write_text(new_text, encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Failed to inject temp parent link in %s: %s", path, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -5726,6 +5755,8 @@ class PipelineExecutor:
                 # No output at all — write empty file as marker
                 output_file.write_text("", encoding="utf-8")
 
+            _inject_temp_parent_link(output_file, step.agent or self.task.agent or MAIN_AGENT_ID)
+
             with self._lock:
                 self._step_outputs[step.id] = output
                 self._step_status[step.id] = "completed"
@@ -5877,7 +5908,9 @@ class PipelineExecutor:
                 # Persist the latest output every iteration so a crash mid-loop
                 # leaves the most recent result on disk for debugging.
                 try:
-                    (data_dir / step.resolved_filename).write_text(output, encoding="utf-8")
+                    loop_path = data_dir / step.resolved_filename
+                    loop_path.write_text(output, encoding="utf-8")
+                    _inject_temp_parent_link(loop_path, step.agent or self.task.agent or MAIN_AGENT_ID)
                 except OSError as ose:
                     logger.error("Pipeline %s: step %s could not write loop output: %s",
                                  self.task.name, step.id, ose)
