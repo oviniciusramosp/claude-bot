@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 HomeBridge exposes each HomeKit service separately; backend must group by `name` field to map to physical devices

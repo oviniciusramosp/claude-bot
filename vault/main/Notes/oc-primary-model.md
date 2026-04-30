@@ -7,6 +7,5 @@ updated: 2026-04-17
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 OC default model is `anthropic/claude-sonnet-4-6`; first fallback is `anthropic/claude-opus-4-6`

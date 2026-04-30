@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Z.ai payloads must suppress thinking tokens via `params.thinking: "off"` in model catalog
 
 ## Update 2026-04-16

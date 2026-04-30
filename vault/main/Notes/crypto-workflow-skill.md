@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Full pipeline context skill at `~/.openclaw/workspace/skills/crypto-workflow/SKILL.md`; self-updates on 10 defined triggers.
 
 ## Update 2026-04-16

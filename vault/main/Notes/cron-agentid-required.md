@@ -7,6 +7,5 @@ updated: 2026-04-17
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Jobs sem agentId roteiam silenciosamente para main/Jarvis — sempre declarar agentId explícito

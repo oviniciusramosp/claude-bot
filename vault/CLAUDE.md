@@ -223,7 +223,7 @@ Each `[[wikilink]]` adds an edge to the Obsidian graph. Fewer edges = a more nav
 
 **1. Complete frontmatter** (see above).
 
-**2. First line of body = link to parent index:** Routine → `[[Routines]]`, Note → `[[Notes]]`. **Exception: Skills DO NOT link to parent index** — Skills.md links to the skills, not the other way around.
+**2. First line of body = link to parent index, path-qualified:** Routine → `[[<agent>/Routines/agent-routines|Routines]]`, Note → `[[<agent>/Notes/agent-notes|Notes]]`, Lesson → `[[<agent>/Lessons/agent-lessons|Lessons]]`. The path prefix is **required** because every agent has its own `agent-notes.md`/`agent-routines.md`/etc. — bare `[[agent-notes]]` is ambiguous and Obsidian resolves it to a single file across the whole vault, leaving the others without inlinks. **Exception: Skills DO NOT link to parent index** — Skills.md links to the skills, not the other way around.
 
 **3. Cross-links only for real dependencies.** When in doubt, don't link.
 

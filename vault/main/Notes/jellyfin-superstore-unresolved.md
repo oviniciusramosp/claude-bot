@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Superstore not recognized by Jellyfin; cause unknown; investigation never completed across 3+ sessions
 
 ## Update 2026-04-16

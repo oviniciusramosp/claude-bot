@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 LaunchAgent at `~/Library/LaunchAgents/com.jarvis.dashboard.plist` keeps server alive; always use `launchctl stop/start` to restart
 
 ## Update 2026-04-16

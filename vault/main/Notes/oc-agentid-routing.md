@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 cron jobs without agentId silently route to main/Jarvis instead of intended agent

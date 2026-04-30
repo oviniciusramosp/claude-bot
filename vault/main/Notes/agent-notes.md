@@ -17,6 +17,7 @@ tags: [index, notes]
 - [[main/Notes/btc-preco-matinal-routine|btc-preco-matinal-routine]] — Daily 8:30 BTC price alert at `~/claude-bot/vault/Routines/btc-preco-matinal.md`, sends to chat_id 6948798151 via Claudinho bot
 - [[main/Notes/concurrent-context-writes|concurrent-context-writes]] — `.context.md` is written by multiple parallel sessions; re-read before write is insufficient under high contention — deliver inline and let 
 - [[main/Notes/context-file-write-conflict|context-file-write-conflict]] — Background bot process modifies .context.md between Read and Write; use Bash heredoc to force-overwrite instead of Edit/Write tools
+- [[main/Notes/control-server-auth|control-server-auth]] — Control server uses `X-Bot-Token` header (not `Authorization: Bearer`) for all API calls to `127.0.0.1:27182`
 - [[main/Notes/create-agent-skill-location|create-agent-skill-location]] — Skill instructions live at `vault/main/Skills/create-agent.md`
 - [[main/Notes/cron-agentid-null-routing|cron-agentid-null-routing]] — null agentId in cron jobs routes to main/Jarvis — always set explicit agentId per pipeline
 - [[main/Notes/cron-agentid-required|cron-agentid-required]] — Jobs sem agentId roteiam silenciosamente para main/Jarvis — sempre declarar agentId explícito
@@ -74,8 +75,10 @@ tags: [index, notes]
 - [[main/Notes/palmeiras-daily-single-agent|palmeiras-daily-single-agent]] — Palmeiras daily is single-agent (no spawns); model must be set in cron payload, not spawn call
 - [[main/Notes/palmeiras-pipeline-model-split|palmeiras-pipeline-model-split]] — Scout=Haiku, Escritor=Opus, Editor=Sonnet, Revisor=Sonnet; Opus needed because Escritor does raw web_fetch
 - [[main/Notes/palmeiras-pipeline-spawn-models|palmeiras-pipeline-spawn-models]] — Scout=Haiku, Escritor=Opus, Editor=Sonnet, Revisor=Sonnet, Publisher=Sonnet
+- [[main/Notes/phantom-session-consolidation|phantom-session-consolidation]] — Agents created via /onboard and auto-activated immediately have no CLI conversation history; background consolidation will always fail with 
 - [[main/Notes/python-rumps-path|python-rumps-path]] — rumps requires Python 3.9 at `/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Con
 - [[main/Notes/python39-for-rumps|python39-for-rumps]] — rumps requires Python 3.9 from CLI tools: `/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/P
+- [[main/Notes/run-routine-sh|run-routine-sh]] — `bash scripts/run-routine.sh <name>` lets any Claude subprocess trigger a bot routine via the control server at port 27182 using `~/.claude-
 - [[main/Notes/sessions-spawn-model-precedence|sessions-spawn-model-precedence]] — spawn-level model > cron payload model > agent model > agents.defaults — most granular wins
 - [[main/Notes/sf-symbols-appkit|sf-symbols-appkit]] — Set menu bar icon via `self._status_item.button().setImage_()` and menu item icons via `item._menuitem.setImage_()` using `NSImage.imageWith
 - [[main/Notes/subagent-freeze-pattern|subagent-freeze-pattern]] — Tarefas de investigação Jellyfin via subagentes travam ~40min sem output; usar Bash direto obrigatoriamente

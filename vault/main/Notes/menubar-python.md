@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 rumps requires Python 3.9 from CLI tools, not Homebrew Python

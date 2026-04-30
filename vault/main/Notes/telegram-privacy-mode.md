@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 BotFather privacy mode must be disabled AND bot re-added to group for it to receive all non-command messages
 
 ## Update 2026-04-16

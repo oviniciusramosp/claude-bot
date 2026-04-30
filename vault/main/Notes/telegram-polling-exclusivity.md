@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Only one process can call `getUpdates` per bot token; concurrent pollers cause 409 Conflict
 
 ## Update 2026-04-16

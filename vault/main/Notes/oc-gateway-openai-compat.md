@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 OC Gateway exposes OpenAI-compatible `/v1/chat/completions` on port 18789 with bearer token auth and SSE streaming

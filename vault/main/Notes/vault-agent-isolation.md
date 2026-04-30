@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Agent dirs detected by presence of `agent-<dirname>.md`; no cross-agent inheritance
 
 ## Update 2026-04-16

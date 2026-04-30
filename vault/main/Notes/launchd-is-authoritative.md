@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 `com.vr.claude-bot-menubar` LaunchAgent owns the menubar process — manual launches cause duplicate instances

@@ -7,6 +7,5 @@ updated: 2026-04-17
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 launchd plist `com.vr.claude-bot-menubar` is the only process manager for the menubar app — never start manually with nohup

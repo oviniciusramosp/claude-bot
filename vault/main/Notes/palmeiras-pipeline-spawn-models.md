@@ -7,6 +7,5 @@ updated: 2026-04-17
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Scout=Haiku, Escritor=Opus, Editor=Sonnet, Revisor=Sonnet, Publisher=Sonnet

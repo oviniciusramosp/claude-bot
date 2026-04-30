@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Series library at /Volumes/SSD_VR4/Media/series/, movies at /Volumes/SSD_VR4/Media/movies/

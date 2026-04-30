@@ -7,8 +7,7 @@ updated: 2026-04-23
 tags: [oss, radar, watchlist, monitoring]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 ## Active watches
 
 - **hermes-agent PR #2044** — `fix(agent): prevent silent context loss when mid-turn compression`

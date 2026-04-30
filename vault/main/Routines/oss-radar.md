@@ -20,8 +20,8 @@ steps:
     name: "GitHub activity collection"
     model: haiku
     prompt_file: steps/collect.md
-    timeout: 180
-    inactivity_timeout: 120
+    timeout: 360
+    inactivity_timeout: 180
     retry: 1
 
   - id: analyze

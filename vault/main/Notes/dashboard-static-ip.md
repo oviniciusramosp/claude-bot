@@ -7,6 +7,5 @@ updated: 2026-04-17
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Mac mini Wi-Fi set to static `192.168.68.125/24` gw `192.168.68.1` via `networksetup -setmanual`.

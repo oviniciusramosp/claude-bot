@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Background bot process modifies .context.md between Read and Write; use Bash heredoc to force-overwrite instead of Edit/Write tools

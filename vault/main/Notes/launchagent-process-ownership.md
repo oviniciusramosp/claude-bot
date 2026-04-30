@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 `com.jarvis.dashboard` LaunchAgent owns the server process; use `launchctl stop/start` not manual `node server.js`

@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Scout=Haiku, Escritor=Opus, Editor=Sonnet, Revisor=Sonnet; Opus needed because Escritor does raw web_fetch

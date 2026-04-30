@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Cenário Pessimista 6-8 frases, O Que Monitorar 6-9 frases — sem repetição de seções anteriores
 
 ## Update 2026-04-17

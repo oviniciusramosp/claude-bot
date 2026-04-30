@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Menubar app at `~/claude-bot/claude-bot-menubar.py`; managed exclusively by launchd `com.vr.claude-bot-menubar`

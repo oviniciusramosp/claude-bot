@@ -10,6 +10,13 @@ tags: [index, journal]
 # Journal (main)
 
 <!-- vault-query:start filter="type=journal" scope="main/Journal" sort="-stem" format="- [[{link}|{stem}]] — {description}" -->
+- [[main/Journal/2026-04-30|2026-04-30]] — 
+- [[main/Journal/2026-04-29|2026-04-29]] — mexc-bot agent created, v3.50.1 consolidation error message fix, oss-radar pipeline ran.
+- [[main/Journal/2026-04-28|2026-04-28]] — Check-in pós-compactação, oss-radar pipeline, context files updated for main and parmeirense agents.
+- [[main/Journal/2026-04-27|2026-04-27]] — 
+- [[main/Journal/2026-04-26|2026-04-26]] — Vault health routine, oss-radar pipeline (GitHub + relevance report), update-check.
+- [[main/Journal/2026-04-25|2026-04-25]] — 
+- [[main/Journal/2026-04-24|2026-04-24]] — pending: no entries yet
 - [[main/Journal/2026-04-23|2026-04-23]] — WalletRadar IP debug (static .125 vs old DHCP .102), bot restart needed after claude-fallback-bot.py changes.
 - [[main/Journal/2026-04-22|2026-04-22]] — Routine and pipeline runs: vault-health, vault-rebuild, oss-radar, update-check. No active sessions.
 - [[main/Journal/2026-04-21|2026-04-21]] — 

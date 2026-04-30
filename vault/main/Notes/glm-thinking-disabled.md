@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Always pass `thinking: {type: "disabled"}` via `extra_body` for glm-5.1 to avoid burning tokens on reasoning_content
 
 ## Update 2026-04-17

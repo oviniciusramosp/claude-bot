@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Three consecutive tool timeouts investigating Jellyfin — avoid long-running subagent chains for this task; use direct Bash commands instead
 
 ## Update 2026-04-16

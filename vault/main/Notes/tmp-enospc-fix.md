@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 `rm -rf /private/tmp/claude-501/` clears ENOSPC that breaks Claude Code Bash tool on macOS.

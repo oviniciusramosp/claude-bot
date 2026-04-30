@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Correct login endpoint is `/api/auth/login` (not `/api/sign-in`); credentials in `~/.homebridge/auth.json`

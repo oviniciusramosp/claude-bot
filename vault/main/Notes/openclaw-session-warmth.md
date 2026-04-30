@@ -7,8 +7,7 @@ updated: 2026-04-23
 tags: [oss, radar, openclaw, performance, architecture, claude-cli, research]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 ## The PR
 
 - **Repo:** openclaw/openclaw

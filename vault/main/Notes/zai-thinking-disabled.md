@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 GLM 5.1 must always receive `{"thinking":{"type":"disabled"}}` via `extra_body` or it burns tokens on reasoning_content.
 
 ## Update 2026-04-16

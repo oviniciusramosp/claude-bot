@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Agent directories detected solely by presence of `agent-<dirname>.md` file
 
 ## Update 2026-04-16

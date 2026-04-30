@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 `/api/transmission/files/:id` calls Transmission RPC `torrent-get` with `files` field; `videosTotal`/`videosCompleted` computed server-side, stripped before response

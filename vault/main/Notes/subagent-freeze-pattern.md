@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Tarefas de investigação Jellyfin via subagentes travam ~40min sem output; usar Bash direto obrigatoriamente

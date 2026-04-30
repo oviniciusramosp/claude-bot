@@ -7,6 +7,5 @@ updated: 2026-04-17
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 7 termos proibidos: `halving`, `histórico`, `sem precedentes`, `hawkish`, `dovish`, `bear case`, superlativos não verificados

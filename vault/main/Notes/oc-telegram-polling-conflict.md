@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 Only one process can call Telegram `getUpdates` per bot token; `claude-fallback-bot.py` and OC gateway share the same token, causing 409 errors

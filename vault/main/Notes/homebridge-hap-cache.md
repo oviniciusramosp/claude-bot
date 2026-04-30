@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 `/api/accessories` returns `[]` until HAP scan runs; use `/api/accessories/layout` as immediate fallback
 
 ## Update 2026-04-16

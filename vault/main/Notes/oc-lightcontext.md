@@ -7,8 +7,7 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 `lightContext: true` in cron payload skips full agent bootstrap, saves tokens on frequent/simple runs
 
 ## Update 2026-04-16

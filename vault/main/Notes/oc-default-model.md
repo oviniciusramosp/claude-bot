@@ -7,6 +7,5 @@ updated: 2026-04-16
 tags: [note, auto-extracted, main]
 ---
 
-[[agent-notes]]
-
+[[main/Notes/agent-notes|Notes]]
 OC primary model is `zai/glm-5.1`; fallback chain: codex → opus → flash → jarvis-local
