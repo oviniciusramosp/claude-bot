@@ -7040,8 +7040,100 @@ class ClaudeTelegramBot:
 
     # -- Startup recovery --------------------------------------------------
 
+    def _inflight_path(self, key: Optional[str]) -> Path:
+        """Return the inflight marker path for a given session_id or chat_id key.
+
+        Falls back to 'unknown' when neither is available — better than dropping
+        the marker entirely. Filename is the urlsafe-stripped key so chat_ids
+        starting with '-' (Telegram supergroups) don't trip path parsing.
+        """
+        safe = "".join(c if (c.isalnum() or c in "-_") else "_" for c in (str(key) if key else "unknown"))
+        return INFLIGHT_DIR / f"{safe}.json"
+
+    def _write_inflight(self, *, key: Optional[str], prompt: str,
+                        chat_id: Optional[str], thread_id: Optional[str],
+                        model: Optional[str], agent_id: Optional[str],
+                        session_id: Optional[str]) -> Optional[Path]:
+        """Persist an inflight prompt marker. Best-effort — log on IOError, never raise.
+
+        Returns the file path on success so the caller can unlink it after
+        successful runner completion. Returns None on failure (caller treats
+        the absence as 'no marker to clear').
+        """
+        try:
+            INFLIGHT_DIR.mkdir(parents=True, exist_ok=True)
+            path = self._inflight_path(session_id or key or chat_id)
+            payload = {
+                "prompt": prompt,
+                "chat_id": str(chat_id) if chat_id is not None else None,
+                "thread_id": str(thread_id) if thread_id is not None else None,
+                "model": model,
+                "agent_id": agent_id,
+                "session_id": session_id,
+                "ts": time.time(),
+            }
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)
+            return path
+        except (OSError, IOError) as exc:
+            logger.error("Failed to write inflight marker: %s", exc)
+            return None
+
+    def _clear_inflight(self, path: Path) -> None:
+        """Remove an inflight marker. Best-effort — log on failure, never raise."""
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            logger.error("Failed to clear inflight marker %s: %s", path, exc)
+
+    def _recover_inflight_prompts(self) -> None:
+        """Notify the user about prompts that didn't complete before a crash/restart.
+
+        Implementation note: notify-and-clear (not full replay). Replaying would
+        require reconstructing ThreadContext, ensuring the right session is
+        active, choosing the right model, etc. — easy to get subtly wrong and
+        risk double-billing. Notifying instead lets the user decide whether to
+        resend, fully aware that the previous attempt died.
+        """
+        if not INFLIGHT_DIR.exists():
+            return
+        try:
+            files = sorted(INFLIGHT_DIR.glob("*.json"))
+        except OSError as exc:
+            logger.error("Failed to list inflight dir: %s", exc)
+            return
+        for path in files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                logger.error("Failed to read inflight marker %s: %s", path, exc)
+                self._clear_inflight(path)
+                continue
+            prompt = (data.get("prompt") or "").strip()
+            chat_id = data.get("chat_id")
+            thread_id = data.get("thread_id")
+            preview = prompt[:80] + ("…" if len(prompt) > 80 else "")
+            try:
+                self.send_message(
+                    f"⚠️ Mensagem anterior não foi processada (crash/restart) — reenviando: {preview}",
+                    chat_id=chat_id,
+                    thread_id=thread_id,
+                )
+            except Exception as exc:
+                logger.error("Failed to notify inflight recovery for %s: %s", path, exc)
+            self._clear_inflight(path)
+
     def _recover_on_startup(self) -> None:
         """Resume interrupted pipelines/routines and clean up orphaned messages."""
+        # Phase 0: Notify user about inflight prompts (interactive turns that
+        # were spawned but didn't finalize before a crash/restart).
+        try:
+            self._recover_inflight_prompts()
+        except Exception as exc:
+            logger.error("Inflight recovery failed: %s", exc)
+
         # Phase 1: Clean up orphaned Telegram messages
         self._cleanup_orphaned_messages()
 
@@ -11531,6 +11623,11 @@ class ClaudeTelegramBot:
                         time.sleep(3)
                     if scaled_backoff > 0:
                         time.sleep(scaled_backoff)
+                    # Clear our own marker — the recursive retry will write
+                    # its own fresh marker (or, if _retry>0, won't, but the
+                    # outer guarantee is satisfied either way).
+                    if inflight_file is not None:
+                        self._clear_inflight(inflight_file)
                     self._run_claude_prompt(
                         prompt,
                         _retry=_retry + 1,
@@ -11589,6 +11686,8 @@ class ClaudeTelegramBot:
                             session.model = next_model
                             self.sessions.save()
                             self.send_message(notice)
+                            if inflight_file is not None:
+                                self._clear_inflight(inflight_file)
                             # Recursive call: use session.model (already updated),
                             # drop _fallback_model so the persisted value wins.
                             self._run_claude_prompt(
@@ -11612,6 +11711,8 @@ class ClaudeTelegramBot:
                             f"⚠️ *Fallback:* `{current_model}` → `{next_model}` "
                             f"(exit {runner.exit_code})\n`{excerpt}`"
                         )
+                        if inflight_file is not None:
+                            self._clear_inflight(inflight_file)
                         self._run_claude_prompt(
                             prompt,
                             _retry=0,
