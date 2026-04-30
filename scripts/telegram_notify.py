@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send a Telegram message to the correct topic for a given agent.
+"""Send a Telegram message (or photo album) to the correct topic for an agent.
 
 Resolves chat_id and thread_id from the agent's frontmatter file,
 ensuring a single source of truth for routing.
@@ -15,6 +15,8 @@ Usage:
     python3 telegram_notify.py --text "Hello" --parse-mode Markdown
     echo "message body" | python3 telegram_notify.py --stdin
     python3 telegram_notify.py --stdin --silent
+    python3 telegram_notify.py --images a.png,b.png "Caption for album"
+    python3 telegram_notify.py --images one.png "Single photo caption"
 
 Environment (all injected by bot harness into every subprocess):
     TELEGRAM_NOTIFY     — absolute path to this script (use instead of hardcoded path)
@@ -26,15 +28,20 @@ Environment (all injected by bot harness into every subprocess):
 
 import argparse
 import json
+import mimetypes
 import os
 import sys
 import urllib.request
 import urllib.parse
+import uuid
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
 VAULT_DIR = PROJECT_DIR / "vault"
+
+# Telegram allows up to 10 media items per sendMediaGroup call.
+MEDIA_GROUP_MAX = 10
 
 
 def _load_env_file(path: Path) -> None:
@@ -167,9 +174,140 @@ def send_message(token: str, chat_id: str, text: str,
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _build_multipart(fields: dict, files: list) -> tuple[bytes, str]:
+    """Hand-build a multipart/form-data body.
+
+    fields: dict of str -> str (regular form fields).
+    files:  list of (field_name, filename, content_bytes, content_type).
+    Returns (body_bytes, content_type_header).
+    """
+    boundary = f"----telegramNotify{uuid.uuid4().hex}"
+    crlf = b"\r\n"
+    body_parts: list[bytes] = []
+    boundary_bytes = boundary.encode()
+
+    for name, value in fields.items():
+        if value is None:
+            continue
+        body_parts.append(b"--" + boundary_bytes + crlf)
+        body_parts.append(
+            f'Content-Disposition: form-data; name="{name}"'.encode() + crlf
+        )
+        body_parts.append(crlf)
+        body_parts.append(str(value).encode("utf-8") + crlf)
+
+    for field_name, filename, content, ctype in files:
+        body_parts.append(b"--" + boundary_bytes + crlf)
+        disp = (
+            f'Content-Disposition: form-data; name="{field_name}"; '
+            f'filename="{filename}"'
+        ).encode() + crlf
+        body_parts.append(disp)
+        body_parts.append(f"Content-Type: {ctype}".encode() + crlf)
+        body_parts.append(crlf)
+        body_parts.append(content + crlf)
+
+    body_parts.append(b"--" + boundary_bytes + b"--" + crlf)
+    body = b"".join(body_parts)
+    content_type = f"multipart/form-data; boundary={boundary}"
+    return body, content_type
+
+
+def send_photo(token: str, chat_id: str, image_path: Path,
+               caption: str = None, thread_id: int = None,
+               parse_mode: str = None,
+               disable_notification: bool = False) -> dict:
+    """Send a single photo via sendPhoto."""
+    fields: dict = {"chat_id": chat_id}
+    if thread_id is not None:
+        fields["message_thread_id"] = str(thread_id)
+    if caption:
+        fields["caption"] = caption
+    if parse_mode:
+        fields["parse_mode"] = parse_mode
+    if disable_notification:
+        fields["disable_notification"] = "true"
+
+    content = image_path.read_bytes()
+    ctype = mimetypes.guess_type(str(image_path))[0] or "application/octet-stream"
+    files = [("photo", image_path.name, content, ctype)]
+
+    body, content_type = _build_multipart(fields, files)
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", content_type)
+    req.add_header("Content-Length", str(len(body)))
+
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def send_media_group(token: str, chat_id: str, image_paths: list,
+                     caption: str = None, thread_id: int = None,
+                     parse_mode: str = None,
+                     disable_notification: bool = False) -> dict:
+    """Send 2-10 photos as an album via sendMediaGroup.
+
+    Caption (if provided) attaches to the first item only — Telegram's convention.
+    """
+    if not (2 <= len(image_paths) <= MEDIA_GROUP_MAX):
+        raise ValueError(
+            f"sendMediaGroup requires 2..{MEDIA_GROUP_MAX} images, got {len(image_paths)}"
+        )
+
+    media_array = []
+    files = []
+    for idx, path in enumerate(image_paths):
+        attach_name = f"file{idx}"
+        item = {"type": "photo", "media": f"attach://{attach_name}"}
+        if idx == 0 and caption:
+            item["caption"] = caption
+            if parse_mode:
+                item["parse_mode"] = parse_mode
+        media_array.append(item)
+
+        content = path.read_bytes()
+        ctype = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        files.append((attach_name, path.name, content, ctype))
+
+    fields: dict = {
+        "chat_id": chat_id,
+        "media": json.dumps(media_array),
+    }
+    if thread_id is not None:
+        fields["message_thread_id"] = str(thread_id)
+    if disable_notification:
+        fields["disable_notification"] = "true"
+
+    body, content_type = _build_multipart(fields, files)
+    url = f"https://api.telegram.org/bot{token}/sendMediaGroup"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", content_type)
+    req.add_header("Content-Length", str(len(body)))
+
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _parse_image_paths(spec: str) -> list[Path]:
+    """Parse a comma-separated list of image paths and validate existence."""
+    paths = []
+    for raw in spec.split(","):
+        p = raw.strip()
+        if not p:
+            continue
+        path = Path(p).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Image not found: {path}")
+        paths.append(path)
+    if not paths:
+        raise ValueError("--images: no valid paths provided")
+    return paths
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Send Telegram message to agent's topic",
+        description="Send Telegram message (or photo album) to agent's topic",
         epilog="Agent is auto-detected from AGENT_ID env var or CWD if --agent is omitted.",
     )
     parser.add_argument("--agent", default=None,
@@ -179,24 +317,27 @@ def main():
     parser.add_argument("--parse-mode", choices=["Markdown", "MarkdownV2", "HTML"],
                         default=None, help="Telegram parse mode")
     parser.add_argument("--silent", action="store_true", help="Disable notification sound")
+    parser.add_argument("--images", default=None,
+                        help="Comma-separated image paths. 1 image -> sendPhoto; "
+                             "2-10 -> sendMediaGroup; 11+ chunked.")
     parser.add_argument("message", nargs="?", default=None,
-                        help="Message text (positional alternative to --text)")
+                        help="Message text / caption (positional alternative to --text)")
     args = parser.parse_args()
 
-    # Resolve message text
+    # Resolve message text / caption (optional when sending images)
+    text = None
     if args.stdin:
         text = sys.stdin.read().strip()
     elif args.text:
         text = args.text
     elif args.message:
         text = args.message
-    else:
-        print("Error: provide message text, --text, or --stdin", file=sys.stderr)
-        sys.exit(1)
 
-    if not text:
-        print("Error: empty message", file=sys.stderr)
-        sys.exit(1)
+    if not args.images:
+        if not text:
+            print("Error: provide message text, --text, or --stdin (or --images)",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Resolve agent (auto-detect if not explicit)
     try:
@@ -221,6 +362,47 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Image path: dispatch to sendPhoto / sendMediaGroup (with chunking).
+    if args.images:
+        try:
+            paths = _parse_image_paths(args.images)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Chunk into groups of MEDIA_GROUP_MAX. Caption attaches to the
+        # first chunk's first item; subsequent chunks have no caption.
+        chunks = [paths[i:i + MEDIA_GROUP_MAX]
+                  for i in range(0, len(paths), MEDIA_GROUP_MAX)]
+        first = True
+        for chunk in chunks:
+            chunk_caption = text if first else None
+            if len(chunk) == 1:
+                result = send_photo(
+                    token, chat_id, chunk[0],
+                    caption=chunk_caption,
+                    thread_id=thread_id,
+                    parse_mode=args.parse_mode,
+                    disable_notification=args.silent,
+                )
+            else:
+                result = send_media_group(
+                    token, chat_id, chunk,
+                    caption=chunk_caption,
+                    thread_id=thread_id,
+                    parse_mode=args.parse_mode,
+                    disable_notification=args.silent,
+                )
+            if not result.get("ok"):
+                print(f"Error: {result}", file=sys.stderr)
+                sys.exit(1)
+            first = False
+
+        print(f"Sent {len(paths)} image(s) in {len(chunks)} call(s) "
+              f"to chat={chat_id} thread={thread_id} (agent={agent_id})")
+        return
+
+    # Text-only path
     result = send_message(token, chat_id, text,
                           thread_id=thread_id,
                           parse_mode=args.parse_mode,

@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.50.0"  # feat: topic-aware secondary chats — one chat, multiple agents per topic
+BOT_VERSION = "3.51.0"  # fix: persist user message on transient runner failures
 
 import hmac
 import hashlib
@@ -149,6 +149,7 @@ LOG_FILE = DATA_DIR / "bot.log"
 VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 AGENTS_SETTINGS_DIR = DATA_DIR / "agents"
+INFLIGHT_DIR = DATA_DIR / "inflight"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
 
@@ -900,7 +901,8 @@ SYSTEM_PROMPT = (
     "Line breaks are only allowed between paragraphs or sections, never within a sentence. "
     "Use emojis to highlight important parts of your responses "
     "(e.g. ✅ for success, ❌ for errors, ⚠️ for warnings, 📁 for files, 🔧 for fixes, "
-    "📝 for notes, 🚀 for deployments)."
+    "📝 for notes, 🚀 for deployments). "
+    "NEVER wrap URLs in backtick code formatting — always use markdown links `[text](url)` or bare URLs."
 )
 
 HELP_TEXT = """🤖 *Claude Code Telegram Bot*
@@ -7856,12 +7858,19 @@ class ClaudeTelegramBot:
         pos = 0
         n = len(text)
 
+        _url_re = re.compile(r'^https?://\S+$')
+
         while pos < n:
-            # Inline code: ` ... ` — leave contents unescaped
+            # Inline code: ` ... ` — leave contents unescaped, but convert bare URLs to links
             if text[pos] == '`':
                 end = text.find('`', pos + 1)
                 if end != -1:
-                    result.append(text[pos:end + 1])
+                    inner = text[pos + 1:end]
+                    if _url_re.match(inner.strip()):
+                        url = inner.strip()
+                        result.append(f'[{url}]({url})')
+                    else:
+                        result.append(text[pos:end + 1])
                     pos = end + 1
                     continue
                 else:
@@ -9369,15 +9378,21 @@ class ClaudeTelegramBot:
                     agent_id=old_agent or MAIN_AGENT_ID,
                 )
                 if bg_runner.exit_code != 0 or bg_runner.error_text:
+                    err = bg_runner.error_text or bg_runner.result_text[:200]
                     logger.error(
                         "Background consolidation failed (exit=%s): %s",
                         bg_runner.exit_code,
-                        bg_runner.error_text or bg_runner.result_text[:200],
+                        err,
                     )
-                    self.send_message(
-                        "⚠️ Falha ao salvar sessão anterior no Journal (segundo plano). "
-                        "Veja o log para detalhes."
-                    )
+                    if "No conversation found with session ID" in err:
+                        self.send_message(
+                            f"⚠️ Sessão anterior (`{old_session_id[:8]}…`) não foi consolidada no Journal: "
+                            "o histórico da conversa não existe mais no Claude CLI (sessão expirada ou nunca iniciada interativamente)."
+                        )
+                    else:
+                        self.send_message(
+                            f"⚠️ Falha ao consolidar sessão anterior no Journal (segundo plano): `{err[:200]}`"
+                        )
                 else:
                     logger.info(
                         "Background consolidation complete for session %s",
@@ -11414,6 +11429,21 @@ class ClaudeTelegramBot:
         # + per-agent settings.json instead of --dangerously-skip-permissions
         restricted = bool(ctx and self._is_secondary_chat(ctx.chat_id))
 
+        # Persist the prompt to disk BEFORE spawning the subprocess so a
+        # SIGKILL / nested-session crash / watchdog restart between here and
+        # the post-run unlink doesn't silently lose the user's message.
+        # Replayed on next startup by _recover_inflight_prompts().
+        inflight_key = effective_session_id or session.session_id or (ctx.chat_id if ctx else None)
+        inflight_file = self._write_inflight(
+            key=inflight_key,
+            prompt=raw_user_prompt,
+            chat_id=(ctx.chat_id if ctx else self._chat_id),
+            thread_id=(ctx.thread_id if ctx else None),
+            model=effective_model,
+            agent_id=session.agent or MAIN_AGENT_ID,
+            session_id=effective_session_id,
+        ) if not _retry and not routine_mode else None
+
         # Start runner thread FIRST — before any blocking network I/O
         runner_thread = threading.Thread(
             target=runner.run,
@@ -11604,6 +11634,13 @@ class ClaudeTelegramBot:
 
         # Process queued messages for this context
         self._process_pending()
+
+        # User-facing turn ended normally (finalize sent something or surfaced
+        # an error). Drop the inflight marker so the next startup doesn't
+        # replay the prompt. Crashes between runner spawn and here leave the
+        # marker in place — see _recover_inflight_prompts().
+        if inflight_file is not None:
+            self._clear_inflight(inflight_file)
 
     def _watchdog(self, runner: ClaudeRunner,
                   no_output_timeout: int = 90,
