@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.52.0"  # feat: /watchdog command + reliable restart via kickstart -k
+BOT_VERSION = "3.52.1"  # fix: auto-extracted notes use [[agent-notes]] parent link (was dangling [[Notes]])
 
 import hmac
 import hashlib
@@ -1479,7 +1479,7 @@ def _promote_durable_concept_to_notes(
                 f"updated: {today}\n"
                 f"tags: [note, auto-extracted, {agent_id}]\n"
                 f"---\n\n"
-                f"[[Notes]]\n\n"
+                f"[[agent-notes]]\n\n"
                 f"{summary}\n"
             )
             path.write_text(text, encoding="utf-8")
