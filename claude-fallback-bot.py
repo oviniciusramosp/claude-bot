@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.60.0"  # feat: streaming UX — tool calls (Bash/Read/Edit/…) moved into the Reasoning toggle so they no longer pollute the main message; per-tool emojis (⚙️ Bash, 📖 Read, ✏️ Edit, 🔎 Grep, 🌐 WebFetch, …) replace the generic 🔧. Also: Stop button acks before runner.cancel() so the Telegram spinner doesn't hang during the 3-5s SIGINT→TERM→KILL escalation; Reasoning toggle acks in parallel with edit_message
+BOT_VERSION = "3.60.1"  # feat: skip-cascade Telegram message includes root-cause step + reason ("Motivo: ... (step: writer)") via _find_skip_root_cause; user no longer has to dig into bot.log to know WHY the pipeline skipped publication
 
 import hmac
 import hashlib
@@ -7777,6 +7777,35 @@ class PipelineExecutor:
         lines.append(status)
         return "\n".join(lines)
 
+    def _find_skip_root_cause(self) -> Optional[Tuple[str, str]]:
+        """Find the step that ORIGINATED the NO_REPLY cascade (not cascade victims).
+
+        Two patterns trigger a cascade:
+          1. Script/validate/publish step that emits ``status: skipped`` in its
+             JSON status report → reason is in self._skip_reasons (NOT prefixed
+             with "upstream").
+          2. LLM step whose output is the NO_REPLY sentinel → status stays
+             "completed" but output matches _is_no_reply_output(); we surface a
+             generic reason since the LLM didn't structure an explanation.
+
+        Cascade victims (reason starts with "upstream returned NO_REPLY" or
+        "upstream skipped (NO_REPLY cascade)") are skipped — we want the origin.
+
+        Returns (step_name, reason_text) of the FIRST step in DAG order that
+        matches pattern 1 or 2, or None when there's no skip-cascade origin.
+        """
+        for step in self.task.steps:
+            status = self._step_status.get(step.id)
+            output = self._step_outputs.get(step.id, "")
+            if status == "skipped":
+                reason = self._skip_reasons.get(step.id, "")
+                if reason and not reason.startswith("upstream"):
+                    return (step.name, reason)
+            elif status == "completed" and _is_no_reply_output(output):
+                return (step.name,
+                        "step returned NO_REPLY — nothing to publish")
+        return None
+
     def _compute_savings_summary(self) -> Optional[str]:
         """Return a short Markdown line showing how many steps were auto-skipped
         via the NO_REPLY early-exit and which models that saved, or None when
@@ -7819,9 +7848,18 @@ class PipelineExecutor:
             # the user can tell which agent's pipeline finished at a glance.
             agent = load_agent(_agent_id_or_main(self.task.agent))
             icon = (agent.get("icon", "🔗") if agent else "🔗")
+            # Surface WHY the cascade started — the reason line is what the
+            # user actually needs ("source convergence < 2", "no fresh items",
+            # etc) so they don't have to dig into bot.log to understand the skip.
+            root = self._find_skip_root_cause()
+            cause_line = ""
+            if root is not None:
+                step_name, reason = root
+                short = reason if len(reason) <= 200 else reason[:200].rstrip() + "…"
+                cause_line = f"\n_Motivo: {short} (step: {step_name})_"
             msg = (
                 f"{icon} *{self.task.title}*\n"
-                f"{summary}\n"
+                f"{summary}{cause_line}\n"
                 f"_Elapsed: {mins}m{secs:02d}s_"
             )
             self.bot.send_message(
