@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.55.2"  # refactor: split _execute_step into type dispatcher (extract _execute_llm_step), add stubs for script/validate/publish handlers (gated behind PIPELINE_V2_ENABLED + pipeline_version>=2; v1 path unchanged)
+BOT_VERSION = "3.56.0"  # feat: pipeline v2 script step handler — subprocess execution with hard timeout, stdout capture, JSON status report parsing, PIPELINE_* and STEP_OVERRIDE_* env vars, _record_step_failure/_apply_status_report/_build_step_subprocess_env helpers, _run_id per pipeline run
 
 import hmac
 import hashlib
@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import secrets
+import shlex
 import signal
 import shutil
 import subprocess
@@ -2431,6 +2432,71 @@ def _overrides_to_env_vars(merged: Dict) -> Dict[str, str]:
         else:
             env[env_key] = json.dumps(val)
     return env
+
+
+def _parse_status_report(stdout: str, exit_code: int, output_file: Path) -> Dict:
+    """Parse a script/validate/publish step's stdout into a normalized status report.
+
+    Contract (Pipeline v2 spec § 3.2): the LAST non-empty line of stdout SHOULD
+    be a JSON object with at minimum a ``status`` field. Recognized statuses
+    are ``ready``, ``skipped``, ``failed``. Optional fields: ``output_file``,
+    ``reason``, ``feedback`` (validators), ``metrics``, ``metadata``.
+
+    Fallback ladder when the last line is not valid JSON (defensive — scripts
+    should comply with the contract, but the executor must still behave
+    reasonably with a non-compliant subprocess):
+
+    - exit 0 + non-empty output_file → ready
+    - exit 0 + empty/missing output_file → skipped
+    - exit != 0 → failed (reason includes the exit code)
+
+    Returns a dict with always-present keys: status, output_file, reason.
+    Other fields preserved if the parsed JSON included them.
+    """
+    last_line = ""
+    for line in reversed(stdout.splitlines()):
+        if line.strip():
+            last_line = line.strip()
+            break
+
+    parsed: Optional[Dict] = None
+    if last_line:
+        try:
+            candidate = json.loads(last_line)
+            if isinstance(candidate, dict) and "status" in candidate:
+                parsed = candidate
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    if parsed is not None:
+        # Normalize required fields with sensible defaults
+        if "output_file" not in parsed:
+            parsed["output_file"] = (
+                str(output_file) if output_file.exists() and output_file.stat().st_size > 0
+                else None
+            )
+        if "reason" not in parsed:
+            parsed["reason"] = ""
+        return parsed
+
+    # Fallback when subprocess didn't emit a JSON status line
+    if exit_code == 0:
+        if output_file.exists() and output_file.stat().st_size > 0:
+            return {
+                "status": "ready",
+                "output_file": str(output_file),
+                "reason": "exit 0 with non-empty output_file (synthesized)",
+            }
+        return {
+            "status": "skipped",
+            "output_file": None,
+            "reason": "exit 0 but output_file empty or missing (synthesized)",
+        }
+    return {
+        "status": "failed",
+        "output_file": None,
+        "reason": f"exit code {exit_code} (no JSON status report)",
+    }
 
 
 def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
@@ -5549,6 +5615,26 @@ class PipelineExecutor:
         # Path locking: output_filename → step_id holding the write lock.
         # Prevents two parallel steps from writing to the same output file.
         self._output_file_locks: Dict[str, str] = {}
+        # --- Pipeline v2 (v3.56+) state ---
+        # Stable per-run id used by script env vars (PIPELINE_RUN_ID), the
+        # /ack <run_id> command (commit 9), and the agent-temp.md failure
+        # block (commit 8). Format: "<unix-ts>-<6 hex chars>".
+        self._run_id: str = f"{int(time.time())}-{secrets.token_hex(3)}"
+        # Per-step runtime overrides resolved by validate_overrides() in the
+        # caller (commit 9 wires this from /run --overrides and the agent NL parser).
+        self.applied_overrides: Dict[str, Dict] = (
+            getattr(task, "applied_overrides", None) or {}
+        )
+        # Idempotency tracking for publish steps (commit 6) — prevents double-send.
+        self._publish_history: Dict[Tuple[str, str, str], bool] = {}
+        self._publish_emitted: bool = False
+        # Validator feedback loop tracking (commit 5) — caps retries at 1 per
+        # spec § 2.3 to prevent infinite loops. Maps validator step id → count.
+        self._validate_feedback_retries: Dict[str, int] = {}
+        # Validator feedback texts queued for upstream LLM step on retry.
+        # Map: upstream step id → feedback string. Read by _build_step_prompt
+        # (commit 5) which appends the block to the next attempt's prompt.
+        self._validation_feedback: Dict[str, str] = {}
 
     def _compute_step_timings(self) -> Dict[str, int]:
         """Compute per-step durations (seconds) from recorded timestamps.
@@ -6007,16 +6093,193 @@ class PipelineExecutor:
             )
         self._execute_llm_step(step, data_dir)
 
-    def _execute_script_step(self, step: PipelineStep, data_dir: Path) -> None:
-        """Execute a type:script pipeline step.
+    def _record_step_failure(self, step: PipelineStep, attempt: int, reason: str) -> None:
+        """Mark a step as failed with the given reason. Releases output-file lock.
 
-        Phase 1 commit 4 will implement this. Currently raises NotImplementedError
-        so v2 pipelines that opt in get a clear, fail-loud error rather than
-        silently degrading to LLM execution.
+        Used by script/validate/publish handlers (Pipeline v2) to record errors
+        consistently with the LLM path's exception handler. Truncates reason to
+        200 chars for sessions.json compatibility.
         """
-        raise NotImplementedError(
-            f"script step handler arrives in Phase 1 commit 4 (step={step.id})"
+        truncated = reason[:200]
+        with self._lock:
+            self._step_errors[step.id] = truncated
+            self._step_status[step.id] = "failed"
+            self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+            if self._output_file_locks.get(step.resolved_filename) == step.id:
+                del self._output_file_locks[step.resolved_filename]
+        self.state.set_step_status(
+            self.task.name, self.task.time_slot, step.id, "failed",
+            error=truncated, attempt=attempt,
         )
+        logger.error("Pipeline %s: step %s failed: %s", self.task.name, step.id, truncated)
+
+    def _apply_status_report(self, step: PipelineStep, attempt: int, report: Dict) -> None:
+        """Translate a parsed status report into executor state.
+
+        Mirrors the LLM path's success/error handling so script/validate/publish
+        steps integrate seamlessly with the rest of the DAG (cascade-skip,
+        retry, NO_REPLY propagation, etc).
+        """
+        status = report.get("status", "failed")
+        output_file_str = report.get("output_file")
+        output_file_path = Path(output_file_str) if output_file_str else None
+        reason = report.get("reason", "") or ""
+
+        if status == "ready":
+            output_text = ""
+            if output_file_path and output_file_path.exists():
+                try:
+                    output_text = output_file_path.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.warning(
+                        "Pipeline %s step %s: could not read output_file %s: %s",
+                        self.task.name, step.id, output_file_path, exc,
+                    )
+                _inject_temp_parent_link(
+                    output_file_path, step.agent or self.task.agent or MAIN_AGENT_ID,
+                )
+            with self._lock:
+                self._step_outputs[step.id] = output_text
+                self._step_status[step.id] = "completed"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "completed", attempt=attempt,
+            )
+            logger.info("Pipeline %s: step %s completed", self.task.name, step.id)
+        elif status == "skipped":
+            with self._lock:
+                self._step_status[step.id] = "skipped"
+                self._skip_reasons[step.id] = reason or "step reported skipped"
+                self._step_outputs[step.id] = ""
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "skipped",
+                error=(reason[:200] if reason else None), attempt=attempt,
+            )
+            logger.info("Pipeline %s: step %s skipped (%s)",
+                        self.task.name, step.id, reason or "no reason given")
+        else:
+            # Unknown or "failed" status
+            self._record_step_failure(
+                step, attempt, reason or f"step reported status={status!r}",
+            )
+
+    def _build_step_subprocess_env(self, step: PipelineStep, data_dir: Path,
+                                    output_file_path: Path) -> Dict[str, str]:
+        """Build the env dict for a script/validate/publish subprocess.
+
+        Includes PIPELINE_* metadata, STEP_DATA_DIR alias (Q14), and
+        STEP_OVERRIDE_* env vars derived from the per-step resolved overrides.
+        Strips CLAUDECODE so the subprocess doesn't think it's a nested Claude
+        session.
+        """
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        env.update({
+            "PIPELINE_NAME": self.task.name,
+            "PIPELINE_AGENT": str(step.agent or self.task.agent or MAIN_AGENT_ID),
+            "PIPELINE_DATA_DIR": str(data_dir),
+            "STEP_DATA_DIR": str(data_dir),  # Q14 — alias for convenience
+            "PIPELINE_STEP_ID": step.id,
+            "PIPELINE_STEP_OUTPUT_FILE": str(output_file_path),
+            "PIPELINE_RUN_ID": self._run_id,
+            "PIPELINE_TIME_SLOT": self.task.time_slot,
+        })
+        merged = _merge_overrides_for_step(step, self.applied_overrides)
+        env.update(_overrides_to_env_vars(merged))
+        return env
+
+    def _execute_script_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute a type:script pipeline step (Pipeline v2).
+
+        Spawns ``step.command`` as a subprocess with a hard timeout
+        (``step.timeout``) — no inactivity timeout per Q9 (scripts are
+        deterministic and non-conversational). Stdout's last non-empty line
+        is parsed as a JSON status report; preceding lines are logged.
+        Stderr lines are logged at WARNING. Subprocess gets PIPELINE_* and
+        STEP_OVERRIDE_* env vars but cannot import claude-fallback-bot.py
+        (Q5: scripts are isolated side-effects).
+
+        Telegram leak prevention: the captured stdout NEVER reaches Telegram
+        directly — only the contents of ``output_file`` (per the 3-condition
+        gate documented in spec § 7.1) flow through publish steps.
+        """
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+
+        if not step.command:
+            self._record_step_failure(
+                step, attempt,
+                f"script step {step.id!r} has no `command:` — fix the pipeline YAML",
+            )
+            return
+
+        self.state.set_step_status(
+            self.task.name, self.task.time_slot, step.id, "running", attempt=attempt,
+        )
+        logger.info(
+            "Pipeline %s: script step %s starting (cmd=%r, attempt=%d, timeout=%ds)",
+            self.task.name, step.id, step.command, attempt, step.timeout,
+        )
+
+        output_file_path = data_dir / step.resolved_filename
+        env = self._build_step_subprocess_env(step, data_dir, output_file_path)
+
+        try:
+            cmd = shlex.split(step.command)
+        except ValueError as exc:
+            self._record_step_failure(
+                step, attempt, f"script command parse error: {exc}",
+            )
+            return
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                cwd=str(self.workspace),
+                text=True,
+            )
+        except (OSError, FileNotFoundError) as exc:
+            self._record_step_failure(
+                step, attempt, f"failed to spawn script: {exc}",
+            )
+            return
+
+        try:
+            stdout, stderr = proc.communicate(timeout=step.timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            self._record_step_failure(
+                step, attempt,
+                f"script step {step.id!r} exceeded {step.timeout}s hard timeout",
+            )
+            return
+
+        # Log stdout (excluding the last line which is the status report) and stderr.
+        # Stdout NEVER reaches Telegram — only the output_file contents do, via
+        # publish steps. This is the script-side half of the leak prevention gate.
+        stdout_lines = stdout.splitlines()
+        for line in stdout_lines[:-1]:
+            if line.strip():
+                logger.info("[%s/%s/stdout] %s", self.task.name, step.id, line)
+        for line in stderr.splitlines():
+            if line.strip():
+                logger.warning("[%s/%s/stderr] %s", self.task.name, step.id, line)
+
+        report = _parse_status_report(stdout, proc.returncode, output_file_path)
+        self._apply_status_report(step, attempt, report)
 
     def _execute_validate_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute a type:validate pipeline step.

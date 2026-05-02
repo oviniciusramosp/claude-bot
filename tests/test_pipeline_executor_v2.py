@@ -163,14 +163,8 @@ class DispatcherTests(DispatcherTestBase):
 
 
 class StubsRaiseTests(DispatcherTestBase):
-    """The stub handlers raise NotImplementedError so v2 opt-in is fail-loud."""
-
-    def test_script_stub_raises(self):
-        step = self._make_step(type="script")
-        ex = self._make_executor([step], pipeline_version=2)
-        with self.assertRaises(NotImplementedError) as cm:
-            ex._execute_script_step(step, Path("/tmp"))
-        self.assertIn("commit 4", str(cm.exception))
+    """The remaining stubs (validate, publish) raise NotImplementedError until
+    commits 5 and 6. Script is implemented in commit 4 (this commit)."""
 
     def test_validate_stub_raises(self):
         step = self._make_step(type="validate")
@@ -185,6 +179,248 @@ class StubsRaiseTests(DispatcherTestBase):
         with self.assertRaises(NotImplementedError) as cm:
             ex._execute_publish_step(step, Path("/tmp"))
         self.assertIn("commit 6", str(cm.exception))
+
+
+class ScriptStepHandlerTests(DispatcherTestBase):
+    """_execute_script_step subprocess execution + status report parsing."""
+
+    def setUp(self):
+        # Each test gets its own data dir + temp scripts dir
+        self.data_dir = Path(tempfile.mkdtemp(prefix="pv2-script-data-"))
+        self.scripts_dir = Path(tempfile.mkdtemp(prefix="pv2-script-fixtures-"))
+
+    def _write_script(self, name: str, body: str) -> Path:
+        p = self.scripts_dir / name
+        p.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        p.chmod(0o755)
+        return p
+
+    def test_no_command_fails_loud(self):
+        step = self._make_step("noop", type="script", command="")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["noop"], "failed")
+        self.assertIn("no `command:`", ex._step_errors["noop"])
+
+    def test_script_writes_file_and_reports_ready(self):
+        # Script writes the output file and prints status JSON on its last line
+        script = self._write_script(
+            "writer.py",
+            'import os, sys\n'
+            'p = os.environ["PIPELINE_STEP_OUTPUT_FILE"]\n'
+            'open(p, "w").write("hello world")\n'
+            'print("doing some work...")\n'
+            'print(\'{"status": "ready", "output_file": "\' + p + \'"}\')\n'
+        )
+        step = self._make_step("writer", type="script",
+                               command=f"python3 {script}",
+                               output_file="writer.md")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["writer"], "completed")
+        self.assertEqual(ex._step_outputs["writer"], "hello world")
+        # Output file persists in data_dir
+        self.assertTrue((self.data_dir / "writer.md").exists())
+
+    def test_script_fallback_ready_when_no_json(self):
+        # Script writes file but doesn't print JSON status — fallback ladder
+        # synthesizes ready when exit=0 + non-empty file.
+        script = self._write_script(
+            "no_json.py",
+            'import os\n'
+            'p = os.environ["PIPELINE_STEP_OUTPUT_FILE"]\n'
+            'open(p, "w").write("data")\n'
+            'print("just chatty stdout, no JSON")\n'
+        )
+        step = self._make_step("nj", type="script",
+                               command=f"python3 {script}",
+                               output_file="nj.md")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["nj"], "completed")
+
+    def test_script_fallback_skipped_when_no_output(self):
+        # Script exits 0 but writes no file → skipped (defensive fallback)
+        script = self._write_script(
+            "noop.py",
+            'print("nothing to do")\n'
+        )
+        step = self._make_step("noop2", type="script",
+                               command=f"python3 {script}")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["noop2"], "skipped")
+
+    def test_script_explicit_skipped_status(self):
+        script = self._write_script(
+            "skip.py",
+            'print(\'{"status": "skipped", "reason": "nothing matched filter"}\')\n'
+        )
+        step = self._make_step("skip", type="script",
+                               command=f"python3 {script}")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["skip"], "skipped")
+        self.assertIn("nothing matched", ex._skip_reasons.get("skip", ""))
+
+    def test_script_failure_when_exit_nonzero(self):
+        script = self._write_script(
+            "fail.py",
+            'import sys\n'
+            'sys.exit(7)\n'
+        )
+        step = self._make_step("fail", type="script",
+                               command=f"python3 {script}")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["fail"], "failed")
+        self.assertIn("exit code 7", ex._step_errors["fail"])
+
+    def test_script_explicit_failed_status(self):
+        script = self._write_script(
+            "boom.py",
+            'print(\'{"status": "failed", "reason": "API down"}\')\n'
+            'import sys; sys.exit(1)\n'
+        )
+        step = self._make_step("boom", type="script",
+                               command=f"python3 {script}")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["boom"], "failed")
+        self.assertIn("API down", ex._step_errors["boom"])
+
+    def test_script_hard_timeout_kills_process(self):
+        script = self._write_script(
+            "slow.py",
+            'import time\n'
+            'time.sleep(30)\n'
+            'print(\'{"status": "ready"}\')\n'
+        )
+        step = self._make_step("slow", type="script",
+                               command=f"python3 {script}",
+                               timeout=1)
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["slow"], "failed")
+        self.assertIn("hard timeout", ex._step_errors["slow"])
+
+    def test_script_receives_pipeline_env_vars(self):
+        # Script verifies PIPELINE_NAME, PIPELINE_STEP_ID, PIPELINE_RUN_ID,
+        # STEP_DATA_DIR are all set
+        script = self._write_script(
+            "env_check.py",
+            'import os, json\n'
+            'p = os.environ["PIPELINE_STEP_OUTPUT_FILE"]\n'
+            'data = {k: os.environ.get(k, "MISSING") for k in '
+            '["PIPELINE_NAME", "PIPELINE_AGENT", "PIPELINE_DATA_DIR", '
+            '"STEP_DATA_DIR", "PIPELINE_STEP_ID", "PIPELINE_RUN_ID"]}\n'
+            'open(p, "w").write(json.dumps(data))\n'
+            'print(\'{"status": "ready"}\')\n'
+        )
+        step = self._make_step("envcheck", type="script",
+                               command=f"python3 {script}",
+                               agent="main",
+                               output_file="env.json")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["envcheck"], "completed")
+        import json as _json
+        env_data = _json.loads(ex._step_outputs["envcheck"])
+        self.assertEqual(env_data["PIPELINE_NAME"], "test-pipe")
+        self.assertEqual(env_data["PIPELINE_STEP_ID"], "envcheck")
+        self.assertEqual(env_data["STEP_DATA_DIR"], str(self.data_dir))
+        # PIPELINE_DATA_DIR is the alias source (Q14)
+        self.assertEqual(env_data["PIPELINE_DATA_DIR"], str(self.data_dir))
+        # run_id format: timestamp-hex
+        self.assertRegex(env_data["PIPELINE_RUN_ID"], r"^\d+-[0-9a-f]{6}$")
+
+    def test_script_receives_overrides_as_env_vars(self):
+        script = self._write_script(
+            "ovr_check.py",
+            'import os, json\n'
+            'p = os.environ["PIPELINE_STEP_OUTPUT_FILE"]\n'
+            'open(p, "w").write(os.environ.get("STEP_OVERRIDE_FOCUS_ASSET", "NONE"))\n'
+            'print(\'{"status": "ready"}\')\n'
+        )
+        step = self._make_step(
+            "ovrcheck", type="script",
+            command=f"python3 {script}",
+            accepts_overrides={"focus_asset": {"type": "string"}},
+            output_file="ovr.txt",
+        )
+        ex = self._make_executor([step], pipeline_version=2)
+        # Apply override
+        ex.applied_overrides = {"ovrcheck": {"focus_asset": "ETH"}}
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["ovrcheck"], "completed")
+        self.assertEqual(ex._step_outputs["ovrcheck"], "ETH")
+
+    def test_script_invalid_command_fails_loud(self):
+        step = self._make_step("bogus", type="script",
+                               command="/nonexistent/path/script.sh")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_script_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["bogus"], "failed")
+        self.assertIn("failed to spawn", ex._step_errors["bogus"])
+
+
+class ParseStatusReportTests(unittest.TestCase):
+    """Module-level _parse_status_report() helper."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pv2-parsereport-"))
+        cls.bot_mod = load_bot_module(tmp_home=cls.tmp)
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="pv2-parsework-"))
+        self.out = self.work / "out.md"
+
+    def test_explicit_json_ready(self):
+        report = self.bot_mod._parse_status_report(
+            stdout='log line\n{"status": "ready", "output_file": "/tmp/x"}',
+            exit_code=0,
+            output_file=self.out,
+        )
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["output_file"], "/tmp/x")
+
+    def test_fallback_ready_exit0_with_file(self):
+        self.out.write_text("data")
+        report = self.bot_mod._parse_status_report(
+            stdout="just logs", exit_code=0, output_file=self.out,
+        )
+        self.assertEqual(report["status"], "ready")
+        self.assertEqual(report["output_file"], str(self.out))
+
+    def test_fallback_skipped_exit0_no_file(self):
+        report = self.bot_mod._parse_status_report(
+            stdout="nothing", exit_code=0, output_file=self.out,
+        )
+        self.assertEqual(report["status"], "skipped")
+
+    def test_fallback_failed_nonzero_exit(self):
+        report = self.bot_mod._parse_status_report(
+            stdout="error", exit_code=2, output_file=self.out,
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertIn("exit code 2", report["reason"])
+
+    def test_explicit_failed_overrides_exit0(self):
+        report = self.bot_mod._parse_status_report(
+            stdout='{"status": "failed", "reason": "validation error"}',
+            exit_code=0,
+            output_file=self.out,
+        )
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["reason"], "validation error")
+
+    def test_invalid_json_falls_through_to_ladder(self):
+        self.out.write_text("data")
+        report = self.bot_mod._parse_status_report(
+            stdout="not-json{{{", exit_code=0, output_file=self.out,
+        )
+        self.assertEqual(report["status"], "ready")  # fallback to file-based ready
 
 
 if __name__ == "__main__":
