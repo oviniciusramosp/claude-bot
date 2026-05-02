@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.59.0"  # feat: pipeline v2 HTTP /routine/run accepts `overrides` JSON field with full validation; new scripts/run_pipeline.py shell helper for cron/agent/webhook callers (Phase 3 of v2 rollout)
+BOT_VERSION = "3.59.1"  # fix: .env loader recognizes PIPELINE_V2_ENABLED so the flag can ship via vault config (was previously only readable via shell env / launchd EnvironmentVariables)
 
 import hmac
 import hashlib
@@ -80,6 +80,8 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("SHOW_SIGNATURE", _v)
             elif _k == "CODEX_PATH":
                 os.environ.setdefault("CODEX_PATH", _v)
+            elif _k == "PIPELINE_V2_ENABLED":
+                os.environ.setdefault("PIPELINE_V2_ENABLED", _v)
 # Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
 MODEL_FALLBACK_CHAIN = [
     m.strip() for m in
