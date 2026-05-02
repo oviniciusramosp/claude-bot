@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.58.0"  # feat: pipeline v2 failure injection — _append/collect/clear pipeline_failure blocks in vault/<agent>/agent-temp.md serialized by per-agent threading.Lock, _session_start_recall surfaces them as ## Pipeline status prefix, executor auto-clears on successful re-run (Q1)
+BOT_VERSION = "3.58.1"  # feat: pipeline v2 /ack <run_id> slash command + /run --overrides JSON parsing — manual clear-by-run-id for failure blocks (Q1) + runtime override delivery from caller via validate_overrides → PipelineTask.applied_overrides → executor handlers
 
 import hmac
 import hashlib
@@ -968,6 +968,8 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/routine delete <nome>` — Deletar rotina/pipeline (move arquivos para Lixeira)
 • `/review` — Inspecionar rotina/pipeline (etapas, modelo, agendamento)
 • `/run [nome]` — Executar rotina/pipeline manualmente
+• `/run <pipeline> --overrides '<json>'` — Disparar pipeline v2 com overrides (`{"step": {"attr": "val"}}`)
+• `/ack <run_id>` — Limpar bloco de falha de pipeline do `agent-temp.md`
 • `/dry-run <pipeline> [step,...]` — Simular pipeline com steps retornando NO_REPLY (previsão de skip/economia, sem rodar Claude)
 
 🤖 *Agentes*
@@ -3253,11 +3255,19 @@ class RoutineScheduler:
                 logger.error("Error checking routine %s: %s", md_file.name, exc)
 
     def _enqueue_pipeline_from_file(self, md_file: Path, fm: Dict, body: str,
-                                     routine_name: str, model: str, t_str: str) -> None:
-        """Parse pipeline steps and enqueue as PipelineTask."""
+                                     routine_name: str, model: str, t_str: str,
+                                     applied_overrides: Optional[Dict] = None) -> None:
+        """Parse pipeline steps and enqueue as PipelineTask.
+
+        Pipeline v2: ``applied_overrides`` flows through to ``task.applied_overrides``
+        for runtime override delivery. Already validated by the caller via
+        ``validate_overrides`` before reaching this method.
+        """
         task = _parse_pipeline_task(md_file, fm, body, routine_name, model, t_str)
         if task is None:
             return
+        if applied_overrides:
+            task.applied_overrides = applied_overrides
         steps_info = [{"id": s.id, "output_type": s.output_type} for s in task.steps]
         _src = str(md_file.relative_to(VAULT_DIR)) if VAULT_DIR in md_file.parents else md_file.name
         self.state.set_pipeline_status(routine_name, t_str, "running", steps_init=steps_info,
@@ -10298,6 +10308,35 @@ class ClaudeTelegramBot:
         else:
             self.send_message("❌ Nenhuma sessão ativa.")
 
+    def cmd_ack(self, arg: str) -> None:
+        """Clear a pipeline_failure block from the current agent's agent-temp.md
+        by run_id (Pipeline v2, Q1 manual-clear path).
+
+        Usage: ``/ack <run_id>`` where run_id is the literal id printed in the
+        ## Pipeline status block injected at session start. Format is
+        ``<unix-timestamp>-<6 hex chars>`` (e.g. 1714680000-abc123).
+        """
+        arg = arg.strip()
+        if not arg:
+            self.send_message("❌ Use: `/ack <run_id>`")
+            return
+        run_id = arg.split()[0]
+        if not re.match(r"^\d+-[0-9a-fA-F]{6}$", run_id):
+            self.send_message(
+                f"❌ run_id inválido: `{run_id}`. "
+                "Formato esperado: `<timestamp>-<6 hex>` (ex: `1714680000-abc123`)."
+            )
+            return
+        session = self._get_session()
+        agent_id = (session.agent if session else None) or MAIN_AGENT_ID
+        cleared = _clear_pipeline_failure_block(agent_id, run_id)
+        if cleared:
+            self.send_message(f"✅ Bloco `{run_id}` removido de `{agent_id}/agent-temp.md`.")
+        else:
+            self.send_message(
+                f"❌ Nenhum bloco encontrado para `{run_id}` em `{agent_id}/agent-temp.md`."
+            )
+
     def cmd_restart(self) -> None:
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts", "bot-self-restart.sh")
         if not os.path.isfile(script):
@@ -11569,11 +11608,44 @@ class ClaudeTelegramBot:
     # -- Run command (manual trigger) --
 
     def cmd_run(self, arg: str) -> None:
-        """Manually trigger a routine or pipeline by name."""
+        """Manually trigger a routine or pipeline by name.
+
+        Pipeline v2: supports ``/run <name> --overrides '<json>'`` to pass
+        runtime overrides per step:
+
+            /run crypto-ta-analise --overrides '{"analyst": {"focus_asset": "ETH"}}'
+
+        Overrides are validated against each step's accepts_overrides schema
+        before the pipeline starts. Validation errors return a friendly message
+        with the offending step/attr.
+        """
         arg = arg.strip()
         if not arg:
             self._run_list_keyboard()
             return
+
+        # Pipeline v2: parse --overrides flag
+        overrides_json: Optional[str] = None
+        if "--overrides" in arg:
+            head, _, tail = arg.partition("--overrides")
+            arg = head.strip()
+            overrides_json = tail.strip()
+            # Strip surrounding quotes if present
+            if (overrides_json.startswith("'") and overrides_json.endswith("'")) or \
+               (overrides_json.startswith('"') and overrides_json.endswith('"')):
+                overrides_json = overrides_json[1:-1]
+        applied_overrides: Optional[Dict] = None
+        if overrides_json:
+            try:
+                applied_overrides = json.loads(overrides_json)
+            except json.JSONDecodeError as exc:
+                self.send_message(f"❌ `--overrides` JSON inválido: `{str(exc)[:120]}`")
+                return
+            if not isinstance(applied_overrides, dict):
+                self.send_message(
+                    "❌ `--overrides` deve ser um objeto JSON `{step_id: {attr: value}}`."
+                )
+                return
 
         name = arg.replace(".md", "").strip()
         session = self._get_session()
@@ -11605,9 +11677,24 @@ class ClaudeTelegramBot:
         routine_type = str(fm.get("type", "routine"))
 
         if routine_type == "pipeline":
+            # Pipeline v2: validate overrides against the parsed task's schema
+            # BEFORE enqueueing so the user sees errors immediately.
+            if applied_overrides is not None:
+                preview_task = _parse_pipeline_task(md_file, fm, body, name, model, time_slot)
+                if preview_task is None:
+                    self.send_message(f"❌ Falha ao parsear pipeline `{name}` para validação de overrides.")
+                    return
+                try:
+                    applied_overrides = validate_overrides(preview_task, applied_overrides)
+                except OverrideValidationError as exc:
+                    self.send_message(f"❌ Override inválido: `{str(exc)[:200]}`")
+                    return
             self.scheduler._enqueue_pipeline_from_file(
-                md_file, fm, body, name, model, time_slot)
-            self.send_message(f"🚀 Pipeline `{name}` disparada manualmente.")
+                md_file, fm, body, name, model, time_slot,
+                applied_overrides=applied_overrides,
+            )
+            override_note = " (com overrides)" if applied_overrides else ""
+            self.send_message(f"🚀 Pipeline `{name}` disparada manualmente{override_note}.")
         else:
             self.routine_state.set_status(name, time_slot, "running")
             _effort_raw = str(fm.get("effort", "")).lower().strip()
@@ -14084,6 +14171,7 @@ class ClaudeTelegramBot:
                 "/routine": lambda: self.cmd_routine(arg),
                 "/review": lambda: self.cmd_review(),
                 "/run": lambda: self.cmd_run(arg),
+                "/ack": lambda: self.cmd_ack(arg),
                 "/dry-run": lambda: self.cmd_dry_run(arg),
                 "/dryrun": lambda: self.cmd_dry_run(arg),
                 "/agent": lambda: self.cmd_agent(arg),

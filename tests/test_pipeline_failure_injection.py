@@ -243,5 +243,156 @@ class SessionStartRecallIntegrationTests(unittest.TestCase):
         self.assertNotIn("FAILED", result)  # skip is lighter wording
 
 
+class CmdAckSlashCommandTests(unittest.TestCase):
+    """The /ack <run_id> command clears a pipeline_failure block by run_id (Q1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pv2-ack-"))
+        cls.bot = load_bot_module(tmp_home=cls.tmp)
+        ensure_agent_layout(cls.bot.VAULT_DIR, "main")
+
+    def setUp(self):
+        path = self.bot._pipeline_failure_block_path("main")
+        if path.exists():
+            path.unlink()
+
+    def _make_bot(self):
+        """Construct a minimal ClaudeTelegramBot with mocked Telegram + session."""
+        b = self.bot.ClaudeTelegramBot()
+        b.send_message = MagicMock()
+        # Mock active session to control current agent
+        session = MagicMock()
+        session.agent = "main"
+        session.name = "test-session"
+        b._get_session = MagicMock(return_value=session)
+        return b
+
+    def test_ack_no_arg_shows_usage(self):
+        b = self._make_bot()
+        b.cmd_ack("")
+        b.send_message.assert_called_once()
+        msg = b.send_message.call_args[0][0]
+        self.assertIn("/ack <run_id>", msg)
+
+    def test_ack_invalid_format_shows_error(self):
+        b = self._make_bot()
+        b.cmd_ack("not-a-valid-id")
+        msg = b.send_message.call_args[0][0]
+        self.assertIn("inválido", msg)
+        self.assertIn("timestamp", msg)
+
+    def test_ack_unknown_run_id_friendly_error(self):
+        b = self._make_bot()
+        b.cmd_ack("1714680000-abc123")
+        msg = b.send_message.call_args[0][0]
+        self.assertIn("Nenhum bloco encontrado", msg)
+        self.assertIn("1714680000-abc123", msg)
+
+    def test_ack_existing_block_clears_and_confirms(self):
+        self.bot._append_pipeline_failure_block(
+            "main", "failure",
+            {"pipeline": "p1", "step": "s1", "ran_at": "x", "run_id": "1714680000-abc123"},
+        )
+        b = self._make_bot()
+        b.cmd_ack("1714680000-abc123")
+        msg = b.send_message.call_args[0][0]
+        self.assertIn("removido", msg)
+        # Block actually cleared
+        self.assertEqual(self.bot._collect_pipeline_failure_blocks("main"), [])
+
+    def test_ack_in_handler_map(self):
+        """/ack registered in handler_map (smoke test for command dispatch)."""
+        # Build minimal env to access handler_map. We can grep the source as a
+        # simpler check that the dispatch entry exists.
+        src = Path("/Users/viniciusramos/claude-bot/claude-fallback-bot.py").read_text()
+        self.assertIn('"/ack": lambda: self.cmd_ack(arg)', src)
+
+    def test_ack_in_help_text(self):
+        self.assertIn("/ack", self.bot.HELP_TEXT)
+
+
+class CmdRunOverridesTests(unittest.TestCase):
+    """/run --overrides '<json>' parses and validates before enqueueing."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pv2-cmdrun-"))
+        cls.bot = load_bot_module(tmp_home=cls.tmp)
+        ensure_agent_layout(cls.bot.VAULT_DIR, "main")
+        cls.routines = cls.bot.VAULT_DIR / "main" / "Routines"
+        cls.routines.mkdir(parents=True, exist_ok=True)
+
+    def _seed_pipeline(self, name="ovr-pipe"):
+        body = (
+            "```pipeline\n"
+            "steps:\n"
+            "  - id: analyst\n"
+            "    name: Analyst\n"
+            "    model: sonnet\n"
+            "    prompt: do analysis\n"
+            "    accepts_overrides:\n"
+            "      focus_asset:\n"
+            "        type: string\n"
+            "        enum: [BTC, ETH, SOL]\n"
+            "        default: BTC\n"
+            "```"
+        )
+        md = self.routines / f"{name}.md"
+        md.write_text("---\ntitle: T\ntype: pipeline\nenabled: true\n---\n" + body, encoding="utf-8")
+        return md
+
+    def _make_bot(self):
+        b = self.bot.ClaudeTelegramBot()
+        b.send_message = MagicMock()
+        session = MagicMock()
+        session.agent = "main"
+        session.name = "test"
+        b._get_session = MagicMock(return_value=session)
+        # Mock the enqueue path so we can capture what was passed
+        b.scheduler = MagicMock()
+        b._active_pipelines = set()
+        b._active_pipelines_lock = threading.Lock()
+        b._routine_contexts = {}
+        b._routine_contexts_lock = threading.Lock()
+        return b
+
+    def test_run_invalid_overrides_json_fails_loud(self):
+        self._seed_pipeline("p1")
+        b = self._make_bot()
+        b.cmd_run("p1 --overrides '{not json}'")
+        msg = b.send_message.call_args[0][0]
+        self.assertIn("inválido", msg)
+        b.scheduler._enqueue_pipeline_from_file.assert_not_called()
+
+    def test_run_overrides_validation_error_friendly(self):
+        self._seed_pipeline("p2")
+        b = self._make_bot()
+        # Pass enum-violation override
+        b.cmd_run('p2 --overrides \'{"analyst": {"focus_asset": "DOGE"}}\'')
+        msg = b.send_message.call_args[0][0]
+        self.assertIn("Override inválido", msg)
+        b.scheduler._enqueue_pipeline_from_file.assert_not_called()
+
+    def test_run_valid_overrides_passes_through_to_enqueue(self):
+        self._seed_pipeline("p3")
+        b = self._make_bot()
+        b.cmd_run('p3 --overrides \'{"analyst": {"focus_asset": "ETH"}}\'')
+        b.scheduler._enqueue_pipeline_from_file.assert_called_once()
+        kwargs = b.scheduler._enqueue_pipeline_from_file.call_args.kwargs
+        applied = kwargs.get("applied_overrides")
+        self.assertIsNotNone(applied)
+        self.assertEqual(applied["analyst"]["focus_asset"], "ETH")
+
+    def test_run_no_overrides_works_unchanged(self):
+        self._seed_pipeline("p4")
+        b = self._make_bot()
+        b.cmd_run("p4")
+        b.scheduler._enqueue_pipeline_from_file.assert_called_once()
+        # applied_overrides may be None for non-v2 caller path
+        kwargs = b.scheduler._enqueue_pipeline_from_file.call_args.kwargs
+        self.assertIsNone(kwargs.get("applied_overrides"))
+
+
 if __name__ == "__main__":
     unittest.main()
