@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.58.2"  # feat: dashboards render precomputed PipelineDisplayStatus (Idle/Scheduled/Running/Success/Failed/Skipped) — web (JS) + ClaudeBotManager (Swift) mirror the Python enum and fall back to legacy status when display_status missing on older state entries
+BOT_VERSION = "3.59.0"  # feat: pipeline v2 HTTP /routine/run accepts `overrides` JSON field with full validation; new scripts/run_pipeline.py shell helper for cron/agent/webhook callers (Phase 3 of v2 rollout)
 
 import hmac
 import hashlib
@@ -14913,6 +14913,9 @@ class ClaudeTelegramBot:
                     if self.path == "/routine/run":
                         name = body.get("name", "")
                         time_slot = body.get("time_slot", "now")
+                        # Pipeline v2: optional `overrides` field validates and
+                        # flows to PipelineTask.applied_overrides.
+                        raw_overrides = body.get("overrides")
                         md_file = _find_routine_file(name)
                         if md_file is None:
                             self._respond(404, {"error": "routine not found"})
@@ -14924,10 +14927,34 @@ class ClaudeTelegramBot:
                         owning_agent = md_file.parent.parent.name if md_file.parent.parent.parent == VAULT_DIR else MAIN_AGENT_ID
                         # Check if this is a pipeline
                         if str(fm.get("type", "routine")) == "pipeline":
+                            applied_overrides: Optional[Dict] = None
+                            if raw_overrides is not None:
+                                if not isinstance(raw_overrides, dict):
+                                    self._respond(400, {
+                                        "error": "overrides must be a JSON object {step_id: {attr: val}}",
+                                    })
+                                    return
+                                preview = _parse_pipeline_task(
+                                    md_file, fm, routine_body, name,
+                                    str(fm.get("model", "sonnet")), time_slot,
+                                )
+                                if preview is None:
+                                    self._respond(400, {"error": "pipeline parse failed for override validation"})
+                                    return
+                                try:
+                                    applied_overrides = validate_overrides(preview, raw_overrides)
+                                except OverrideValidationError as exc:
+                                    self._respond(400, {"error": f"override validation failed: {exc}"})
+                                    return
                             bot.scheduler._enqueue_pipeline_from_file(
                                 md_file, fm, routine_body, name,
-                                str(fm.get("model", "sonnet")), time_slot)
-                            self._respond(200, {"ok": True, "type": "pipeline"})
+                                str(fm.get("model", "sonnet")), time_slot,
+                                applied_overrides=applied_overrides,
+                            )
+                            self._respond(200, {
+                                "ok": True, "type": "pipeline",
+                                "overrides_applied": applied_overrides or {},
+                            })
                             return
                         _effort_raw = str(fm.get("effort", "")).lower().strip()
                         task = RoutineTask(
