@@ -162,16 +162,289 @@ class DispatcherTests(DispatcherTestBase):
             llm.assert_not_called()
 
 
-class StubsRaiseTests(DispatcherTestBase):
-    """The remaining stub (publish) raises NotImplementedError until commit 6.
-    Script and validate are implemented (commits 4 and 5)."""
+class PublishStepHandlerTests(DispatcherTestBase):
+    """_execute_publish_step + sink registry + 3-condition Telegram leak gate."""
 
-    def test_publish_stub_raises(self):
-        step = self._make_step(type="publish")
+    def setUp(self):
+        self.data_dir = Path(tempfile.mkdtemp(prefix="pv2-publish-data-"))
+        self.scripts_dir = Path(tempfile.mkdtemp(prefix="pv2-publish-fixtures-"))
+
+    def _write_script(self, name: str, body: str) -> Path:
+        p = self.scripts_dir / name
+        p.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        p.chmod(0o755)
+        return p
+
+    def _seed_upstream_output(self, ex, upstream_id: str, content: str = "upstream output"):
+        upstream = ex._steps_by_id[upstream_id]
+        target = self.data_dir / upstream.resolved_filename
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def test_no_publishes_fails_loud(self):
+        step = self._make_step("send", type="publish", sink="file")
         ex = self._make_executor([step], pipeline_version=2)
-        with self.assertRaises(NotImplementedError) as cm:
-            ex._execute_publish_step(step, Path("/tmp"))
-        self.assertIn("commit 6", str(cm.exception))
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "failed")
+        self.assertIn("publishes", ex._step_errors["send"])
+
+    def test_no_sink_fails_loud(self):
+        upstream = self._make_step("writer")
+        step = self._make_step("send", type="publish", publishes="writer")
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "failed")
+        self.assertIn("`sink:`", ex._step_errors["send"])
+
+    def test_unknown_sink_fails_loud(self):
+        upstream = self._make_step("writer")
+        step = self._make_step("send", type="publish", publishes="writer", sink="bogus")
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "failed")
+        self.assertIn("unknown sink", ex._step_errors["send"])
+
+    def test_unknown_upstream_fails_loud(self):
+        step = self._make_step("send", type="publish", publishes="bogus", sink="file")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "failed")
+        self.assertIn("unknown upstream", ex._step_errors["send"])
+
+    def test_no_command_emits_upstream_directly_via_file_sink(self):
+        upstream = self._make_step("writer")
+        dest = Path(tempfile.mkdtemp(prefix="pv2-dest-")) / "out.md"
+        step = self._make_step("send", type="publish", publishes="writer",
+                               sink="file", sink_config={"dest": str(dest)})
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer", content="hello world")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "completed")
+        self.assertTrue(dest.exists())
+        self.assertEqual(dest.read_text(), "hello world")
+        self.assertTrue(ex._publish_emitted)
+
+    def test_command_transforms_then_sink_emits(self):
+        # Script reads upstream, uppercases content, writes output_file, prints status
+        script = self._write_script(
+            "uppercase.py",
+            'import os\n'
+            'src = os.environ["PIPELINE_PUBLISH_TARGET"]\n'
+            'dst = os.environ["PIPELINE_STEP_OUTPUT_FILE"]\n'
+            'open(dst, "w").write(open(src).read().upper())\n'
+            'print(\'{"status": "ready"}\')\n'
+        )
+        upstream = self._make_step("writer")
+        dest = Path(tempfile.mkdtemp(prefix="pv2-dest-")) / "out.md"
+        step = self._make_step(
+            "send", type="publish", publishes="writer", sink="file",
+            command=f"python3 {script}",
+            output_file="transformed.md",
+            sink_config={"dest": str(dest)},
+        )
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer", content="hello")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "completed")
+        self.assertEqual(dest.read_text(), "HELLO")
+
+    def test_3_condition_gate_blocks_chatty_script_stdout(self):
+        """The CRITICAL invariant: a script's stdout NEVER reaches the sink.
+
+        Even if a publish script prints "send this to telegram!" to stdout,
+        the sink only ever receives the contents of output_file.
+        """
+        script = self._write_script(
+            "leaky.py",
+            'import os\n'
+            'dst = os.environ["PIPELINE_STEP_OUTPUT_FILE"]\n'
+            'open(dst, "w").write("file content (legitimate)")\n'
+            'print("LEAKED STRING THAT MUST NOT REACH USER")\n'
+            'print(\'{"status": "ready"}\')\n'
+        )
+        upstream = self._make_step("writer")
+        dest = Path(tempfile.mkdtemp(prefix="pv2-dest-")) / "out.md"
+        step = self._make_step(
+            "send", type="publish", publishes="writer", sink="file",
+            command=f"python3 {script}",
+            output_file="leaky.md",
+            sink_config={"dest": str(dest)},
+        )
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer", content="upstream")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "completed")
+        # Sink emitted FILE content, NOT stdout
+        self.assertEqual(dest.read_text(), "file content (legitimate)")
+        self.assertNotIn("LEAKED STRING", dest.read_text())
+
+    def test_script_status_skipped_blocks_emission(self):
+        """Status=skipped from the script must NOT trigger sink emission."""
+        script = self._write_script(
+            "skip.py",
+            'print(\'{"status": "skipped", "reason": "nothing to publish"}\')\n'
+        )
+        upstream = self._make_step("writer")
+        dest = Path(tempfile.mkdtemp(prefix="pv2-dest-")) / "skipped.md"
+        step = self._make_step(
+            "send", type="publish", publishes="writer", sink="file",
+            command=f"python3 {script}",
+            sink_config={"dest": str(dest)},
+        )
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "skipped")
+        self.assertFalse(dest.exists())  # nothing written
+        self.assertFalse(ex._publish_emitted)
+
+    def test_idempotency_within_run(self):
+        """Same publish step called twice in same run only emits once."""
+        upstream = self._make_step("writer")
+        dest_dir = Path(tempfile.mkdtemp(prefix="pv2-dest-"))
+        dest = dest_dir / "out.md"
+        step = self._make_step("send", type="publish", publishes="writer",
+                               sink="file", sink_config={"dest": str(dest)})
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer", content="first")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(dest.read_text(), "first")
+        # Modify upstream, retry
+        self._seed_upstream_output(ex, "writer", content="second-attempt")
+        # Reset step status to pending to simulate retry
+        ex._step_status["send"] = "pending"
+        ex._execute_publish_step(step, self.data_dir)
+        # Idempotent: dest still has "first", not "second-attempt"
+        self.assertEqual(dest.read_text(), "first")
+
+    def test_telegram_sink_calls_bot_send_message_with_file_content(self):
+        upstream = self._make_step("writer")
+        step = self._make_step("send", type="publish", publishes="writer", sink="telegram")
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer", content="post body")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "completed")
+        ex.bot.send_message.assert_called_once()
+        # The first positional arg should be the file content (NOT stdout, since no command)
+        call_args = ex.bot.send_message.call_args
+        sent_text = call_args[0][0] if call_args[0] else call_args[1].get("text")
+        self.assertEqual(sent_text, "post body")
+
+    def test_telegram_sink_records_publish_emitted(self):
+        upstream = self._make_step("writer")
+        step = self._make_step("send", type="publish", publishes="writer", sink="telegram")
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer", content="hello")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertTrue(ex._publish_emitted)
+        self.assertTrue(ex._publish_history.get((ex._run_id, "telegram", "send")))
+
+    def test_telegram_sink_failure_marks_step_failed(self):
+        upstream = self._make_step("writer")
+        step = self._make_step("send", type="publish", publishes="writer", sink="telegram")
+        ex = self._make_executor([upstream, step], pipeline_version=2)
+        ex.bot.send_message.side_effect = RuntimeError("Telegram API down")
+        self._seed_upstream_output(ex, "writer", content="hello")
+        ex._execute_publish_step(step, self.data_dir)
+        self.assertEqual(ex._step_status["send"], "failed")
+        self.assertIn("Telegram API down", ex._step_errors["send"])
+
+    def test_custom_sink_via_register_decorator(self):
+        called_with: Dict[str, Any] = {}
+
+        @self.bot_mod.register_sink("custom_test_sink")
+        def my_sink(executor, step, content_path, sink_config):
+            called_with["content"] = content_path.read_text()
+            called_with["config"] = dict(sink_config)
+            return {"emitted": True, "sink": "custom_test_sink"}
+
+        try:
+            upstream = self._make_step("writer")
+            step = self._make_step("send", type="publish", publishes="writer",
+                                   sink="custom_test_sink",
+                                   sink_config={"my_param": "value"})
+            ex = self._make_executor([upstream, step], pipeline_version=2)
+            self._seed_upstream_output(ex, "writer", content="payload")
+            ex._execute_publish_step(step, self.data_dir)
+            self.assertEqual(ex._step_status["send"], "completed")
+            self.assertEqual(called_with["content"], "payload")
+            self.assertEqual(called_with["config"], {"my_param": "value"})
+        finally:
+            self.bot_mod.PIPELINE_V2_SINKS.pop("custom_test_sink", None)
+
+    def test_sink_returning_emitted_false_marks_failed(self):
+        @self.bot_mod.register_sink("always_fail_sink")
+        def fail_sink(executor, step, content_path, sink_config):
+            return {"emitted": False, "error": "configured to always fail"}
+
+        try:
+            upstream = self._make_step("writer")
+            step = self._make_step("send", type="publish", publishes="writer",
+                                   sink="always_fail_sink")
+            ex = self._make_executor([upstream, step], pipeline_version=2)
+            self._seed_upstream_output(ex, "writer")
+            ex._execute_publish_step(step, self.data_dir)
+            self.assertEqual(ex._step_status["send"], "failed")
+            self.assertIn("always fail", ex._step_errors["send"])
+        finally:
+            self.bot_mod.PIPELINE_V2_SINKS.pop("always_fail_sink", None)
+
+    def test_sink_raising_exception_marks_failed(self):
+        @self.bot_mod.register_sink("raising_sink")
+        def boom(executor, step, content_path, sink_config):
+            raise ValueError("ouch")
+
+        try:
+            upstream = self._make_step("writer")
+            step = self._make_step("send", type="publish", publishes="writer",
+                                   sink="raising_sink")
+            ex = self._make_executor([upstream, step], pipeline_version=2)
+            self._seed_upstream_output(ex, "writer")
+            ex._execute_publish_step(step, self.data_dir)
+            self.assertEqual(ex._step_status["send"], "failed")
+            self.assertIn("raised unexpectedly", ex._step_errors["send"])
+        finally:
+            self.bot_mod.PIPELINE_V2_SINKS.pop("raising_sink", None)
+
+
+class BuiltinSinksTests(unittest.TestCase):
+    """telegram, file, notion built-in sinks are pre-registered."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pv2-sinks-"))
+        cls.bot_mod = load_bot_module(tmp_home=cls.tmp)
+
+    def test_telegram_sink_registered(self):
+        self.assertIn("telegram", self.bot_mod.PIPELINE_V2_SINKS)
+
+    def test_file_sink_registered(self):
+        self.assertIn("file", self.bot_mod.PIPELINE_V2_SINKS)
+
+    def test_notion_sink_registered(self):
+        self.assertIn("notion", self.bot_mod.PIPELINE_V2_SINKS)
+
+    def test_file_sink_requires_dest(self):
+        sink = self.bot_mod.PIPELINE_V2_SINKS["file"]
+        result = sink(MagicMock(), MagicMock(), Path("/tmp/x"), {})
+        self.assertFalse(result["emitted"])
+        self.assertIn("dest", result["error"])
+
+    def test_telegram_sink_handles_missing_bot(self):
+        sink = self.bot_mod.PIPELINE_V2_SINKS["telegram"]
+        executor = MagicMock()
+        executor.bot = None
+        executor.ctx = None
+        # Need a real file
+        tmp_file = Path(tempfile.mktemp(suffix=".md"))
+        tmp_file.write_text("content")
+        try:
+            result = sink(executor, MagicMock(), tmp_file, {})
+            self.assertFalse(result["emitted"])
+        finally:
+            tmp_file.unlink(missing_ok=True)
 
 
 class ValidateStepHandlerTests(DispatcherTestBase):

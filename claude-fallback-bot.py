@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.56.1"  # feat: pipeline v2 validate step + feedback retry loop — _execute_validate_step with on_failure=fail|warn|feedback, _validation_feedback dict surfacing into _build_step_prompt for upstream rerun (capped at 1 retry per spec § 2.3); LLM prompt now also receives applied_overrides as structured suffix
+BOT_VERSION = "3.57.0"  # feat: pipeline v2 publish step + sink registry — PIPELINE_V2_SINKS dict + register_sink decorator + built-in telegram/file/notion sinks; 3-condition gate enforces structural Telegram leak prevention (declared sink + status=ready + content from output_file); idempotency tracked per (run_id, sink, step) in _publish_history
 
 import hmac
 import hashlib
@@ -2432,6 +2432,138 @@ def _overrides_to_env_vars(merged: Dict) -> Dict[str, str]:
         else:
             env[env_key] = json.dumps(val)
     return env
+
+
+# ---------------------------------------------------------------------------
+# Pipeline v2 — sink registry for publish steps (v3.57+)
+# ---------------------------------------------------------------------------
+# A "sink" is the destination of a publish step's emission. Sinks isolate
+# external side-effects (Telegram, Notion, file write, HTTP) from the LLM
+# steps that produced the content. Pipeline v2's spec § 8 mandates that
+# only `publish` steps talk to the outside world — see the 3-condition gate
+# in _execute_publish_step.
+#
+# Each sink is `(executor, step, content_path, sink_config) -> dict`. The
+# returned dict MUST include `emitted: bool` and SHOULD include `sink: str`
+# plus any sink-specific metadata (`dest` for file, `url` for http, etc).
+# Sinks must NOT raise — they should catch their own errors and return
+# `{emitted: False, error: "..."}` so the publisher can record + continue.
+
+PIPELINE_V2_SINKS: Dict[str, Any] = {}
+
+
+def register_sink(name: str):
+    """Decorator that registers a publish-step sink handler.
+
+    Usage:
+        @register_sink("my_sink")
+        def my_sink(executor, step, content_path, sink_config):
+            ...
+            return {"emitted": True, "sink": "my_sink"}
+    """
+    def deco(fn):
+        PIPELINE_V2_SINKS[name] = fn
+        return fn
+    return deco
+
+
+@register_sink("telegram")
+def _sink_telegram(executor: Any, step: "PipelineStep",
+                   content_path: Path, sink_config: Dict) -> Dict:
+    """Send file content as a Telegram message via executor's bot+ctx.
+
+    Honors ``sink_config['silent']`` (default False) → disable_notification.
+    Honors ``sink_config['parse_mode']`` (default MarkdownV2 from bot.send_message).
+    """
+    if not content_path.exists():
+        return {"emitted": False, "sink": "telegram",
+                "error": f"content file missing: {content_path}"}
+    try:
+        text = content_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"emitted": False, "sink": "telegram", "error": f"read failed: {exc}"}
+    if not text.strip():
+        return {"emitted": False, "sink": "telegram", "error": "content empty"}
+    bot = getattr(executor, "bot", None)
+    ctx = getattr(executor, "ctx", None)
+    if bot is None or ctx is None:
+        return {"emitted": False, "sink": "telegram", "error": "no bot/ctx on executor"}
+    try:
+        kwargs = {
+            "chat_id": getattr(ctx, "chat_id", None),
+            "thread_id": getattr(ctx, "thread_id", None),
+            "disable_notification": bool(sink_config.get("silent", False)),
+        }
+        parse_mode = sink_config.get("parse_mode")
+        if parse_mode is not None:
+            kwargs["parse_mode"] = parse_mode
+        bot.send_message(text, **kwargs)
+        return {"emitted": True, "sink": "telegram"}
+    except Exception as exc:
+        return {"emitted": False, "sink": "telegram", "error": str(exc)}
+
+
+@register_sink("file")
+def _sink_file(executor: Any, step: "PipelineStep",
+               content_path: Path, sink_config: Dict) -> Dict:
+    """Copy file to ``sink_config['dest']``. Relative paths resolve under VAULT_DIR.
+
+    Use cases: persist publish step output to a stable location outside the
+    pipeline data dir (e.g., a vault `Notes/` file, an export folder).
+    """
+    dest_str = sink_config.get("dest")
+    if not dest_str:
+        return {"emitted": False, "sink": "file", "error": "sink_config.dest required"}
+    dest = Path(str(dest_str)).expanduser()
+    if not dest.is_absolute():
+        dest = VAULT_DIR / dest
+    if not content_path.exists():
+        return {"emitted": False, "sink": "file",
+                "error": f"content file missing: {content_path}"}
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(content_path), str(dest))
+        return {"emitted": True, "sink": "file", "dest": str(dest)}
+    except Exception as exc:
+        return {"emitted": False, "sink": "file", "error": str(exc)}
+
+
+@register_sink("notion")
+def _sink_notion(executor: Any, step: "PipelineStep",
+                 content_path: Path, sink_config: Dict) -> Dict:
+    """Shell out to a Notion publishing script.
+
+    The actual API call lives in the user-supplied script (default
+    ``scripts/notion_blocks.py``) so the sink itself stays declarative.
+    The script reads ``content_path`` and the sink_config keys via env vars
+    (PIPELINE_PUBLISH_TARGET, PIPELINE_PUBLISH_SINK_CONFIG_JSON).
+    """
+    script = sink_config.get("script", "scripts/notion_blocks.py")
+    if not content_path.exists():
+        return {"emitted": False, "sink": "notion",
+                "error": f"content file missing: {content_path}"}
+    script_path = Path(script)
+    if not script_path.is_absolute():
+        script_path = Path(__file__).resolve().parent / script_path
+    if not script_path.exists():
+        return {"emitted": False, "sink": "notion",
+                "error": f"sink script missing: {script_path}"}
+    env = os.environ.copy()
+    env["PIPELINE_PUBLISH_TARGET"] = str(content_path)
+    env["PIPELINE_PUBLISH_SINK_CONFIG_JSON"] = json.dumps(sink_config)
+    try:
+        result = subprocess.run(
+            ["python3", str(script_path)],
+            env=env, capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            return {"emitted": True, "sink": "notion", "stdout": result.stdout[:500]}
+        return {"emitted": False, "sink": "notion",
+                "error": f"script exit {result.returncode}: {result.stderr[:200]}"}
+    except subprocess.TimeoutExpired:
+        return {"emitted": False, "sink": "notion", "error": "script exceeded 120s timeout"}
+    except Exception as exc:
+        return {"emitted": False, "sink": "notion", "error": str(exc)}
 
 
 def _parse_status_report(stdout: str, exit_code: int, output_file: Path) -> Dict:
@@ -6458,14 +6590,183 @@ class PipelineExecutor:
         )
 
     def _execute_publish_step(self, step: PipelineStep, data_dir: Path) -> None:
-        """Execute a type:publish pipeline step.
+        """Execute a type:publish pipeline step (Pipeline v2).
 
-        Phase 1 commit 6 will implement this with the sink registry and the
-        Telegram leak-prevention 3-condition gate.
+        Two modes:
+          1. **With command** — script transforms upstream content into
+             ``output_file``, then sink emits the transformed file.
+          2. **Without command** — sink emits the upstream's output file
+             directly (no transformation).
+
+        The 3-CONDITION GATE for emission (spec § 7.1, the structural
+        Telegram-leak guard):
+          (a) ``step.sink`` is declared — checked here
+          (b) status report is ``ready`` (or no-command + upstream succeeded)
+          (c) content sent to sink comes from the OUTPUT FILE, never from
+              stdout. The script's stdout is logs only — even if a script
+              prints "send this to telegram!" it cannot reach the user.
+
+        Idempotency: tracked per ``(run_id, sink, step_id)`` in
+        ``self._publish_history``. A retry of the same step in the same
+        pipeline run will not double-publish.
         """
-        raise NotImplementedError(
-            f"publish step handler arrives in Phase 1 commit 6 (step={step.id})"
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+
+        target_id = step.publishes or step.reviews
+        if not target_id:
+            self._record_step_failure(
+                step, attempt,
+                f"publish step {step.id!r} has no `publishes:` (or `reviews:`)",
+            )
+            return
+        upstream = self._steps_by_id.get(target_id)
+        if upstream is None:
+            self._record_step_failure(
+                step, attempt,
+                f"publish step {step.id!r} references unknown upstream {target_id!r}",
+            )
+            return
+        if not step.sink:
+            self._record_step_failure(
+                step, attempt,
+                f"publish step {step.id!r} has no `sink:` declared",
+            )
+            return
+        if step.sink not in PIPELINE_V2_SINKS:
+            self._record_step_failure(
+                step, attempt,
+                f"publish step {step.id!r}: unknown sink {step.sink!r} "
+                f"(registered: {sorted(PIPELINE_V2_SINKS.keys())})",
+            )
+            return
+
+        self.state.set_step_status(
+            self.task.name, self.task.time_slot, step.id, "running", attempt=attempt,
         )
+        logger.info(
+            "Pipeline %s: publish step %s starting (publishes=%s, sink=%s, attempt=%d)",
+            self.task.name, step.id, target_id, step.sink, attempt,
+        )
+
+        # Idempotency check
+        idem_key = (self._run_id, step.sink, step.id)
+        if self._publish_history.get(idem_key):
+            logger.info(
+                "Pipeline %s: publish step %s already emitted to sink %s in run %s — skipping",
+                self.task.name, step.id, step.sink, self._run_id,
+            )
+            with self._lock:
+                self._step_outputs[step.id] = "(already published in this run)"
+                self._step_status[step.id] = "completed"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "completed", attempt=attempt,
+            )
+            return
+
+        output_file_path = data_dir / step.resolved_filename
+        upstream_output_path = data_dir / upstream.resolved_filename
+
+        if step.command:
+            # Transform mode: script reads upstream, writes output_file, prints status.
+            env = self._build_step_subprocess_env(step, data_dir, output_file_path)
+            env["PIPELINE_PUBLISH_TARGET"] = str(upstream_output_path)
+            env["PIPELINE_PUBLISH_SINK"] = step.sink
+            env["PIPELINE_PUBLISH_SINK_CONFIG_JSON"] = json.dumps(step.sink_config or {})
+            try:
+                cmd = shlex.split(step.command)
+            except ValueError as exc:
+                self._record_step_failure(step, attempt, f"publish command parse error: {exc}")
+                return
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=env, cwd=str(self.workspace), text=True,
+                )
+            except (OSError, FileNotFoundError) as exc:
+                self._record_step_failure(step, attempt, f"failed to spawn publisher: {exc}")
+                return
+            try:
+                stdout, stderr = proc.communicate(timeout=step.timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    stdout, stderr = proc.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    stdout, stderr = "", ""
+                self._record_step_failure(
+                    step, attempt,
+                    f"publish step {step.id!r} exceeded {step.timeout}s hard timeout",
+                )
+                return
+            for line in stdout.splitlines()[:-1]:
+                if line.strip():
+                    logger.info("[%s/%s/stdout] %s", self.task.name, step.id, line)
+            for line in stderr.splitlines():
+                if line.strip():
+                    logger.warning("[%s/%s/stderr] %s", self.task.name, step.id, line)
+            report = _parse_status_report(stdout, proc.returncode, output_file_path)
+            if report.get("status") != "ready":
+                # Script reported skipped or failed — don't emit to sink.
+                self._apply_status_report(step, attempt, report)
+                return
+            content_path = output_file_path
+        else:
+            # No-command mode: emit upstream's file directly.
+            if not upstream_output_path.exists():
+                self._record_step_failure(
+                    step, attempt,
+                    f"publish {step.id!r}: upstream {target_id!r} output missing at {upstream_output_path}",
+                )
+                return
+            content_path = upstream_output_path
+
+        # CONDITION (c): content_path is always a real file at this point.
+        # Sink CANNOT receive raw stdout from the script — only the file's bytes.
+        sink_fn = PIPELINE_V2_SINKS[step.sink]
+        try:
+            result = sink_fn(self, step, content_path, step.sink_config or {})
+        except Exception as exc:
+            self._record_step_failure(
+                step, attempt, f"sink {step.sink!r} raised unexpectedly: {exc}",
+            )
+            return
+        if not isinstance(result, dict):
+            self._record_step_failure(
+                step, attempt,
+                f"sink {step.sink!r} returned {type(result).__name__}, expected dict",
+            )
+            return
+
+        emitted = bool(result.get("emitted"))
+        if emitted:
+            self._publish_history[idem_key] = True
+            self._publish_emitted = True
+            summary = f"emitted to {step.sink}"
+            if "dest" in result:
+                summary += f" → {result['dest']}"
+            with self._lock:
+                self._step_outputs[step.id] = summary
+                self._step_status[step.id] = "completed"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "completed", attempt=attempt,
+            )
+            logger.info(
+                "Pipeline %s: publish step %s → %s emitted",
+                self.task.name, step.id, step.sink,
+            )
+        else:
+            err = result.get("error", "unknown sink error")
+            self._record_step_failure(
+                step, attempt, f"sink {step.sink!r} emission failed: {err}",
+            )
 
     def _execute_llm_step(self, step: PipelineStep, data_dir: Path) -> None:
         """Execute an LLM-type pipeline step using ClaudeRunner.
