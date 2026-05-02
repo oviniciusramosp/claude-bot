@@ -7,7 +7,6 @@ struct LogViewerView: View {
     @State private var searchText = ""
     @State private var autoScroll = true
     @State private var scrollProxy: ScrollViewProxy? = nil
-    @State private var tailTimer: Timer? = nil
 
     private var filtered: [LogEntry] {
         entries.filter { entry in
@@ -77,15 +76,9 @@ struct LogViewerView: View {
                 .onAppear {
                     scrollProxy = proxy
                     entries = appState.recentLogs
-                    tailTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { _ in
-                        DispatchQueue.main.async {
-                            entries = appState.recentLogs
-                        }
-                    }
                 }
-                .onDisappear {
-                    tailTimer?.invalidate()
-                    tailTimer = nil
+                .onChange(of: appState.recentLogs.count) { _, _ in
+                    entries = appState.recentLogs
                 }
                 .onChange(of: filtered.count) { _, _ in
                     if autoScroll, let last = filtered.last {

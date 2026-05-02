@@ -10,7 +10,8 @@ tags: [index, journal]
 # Journal (main)
 
 <!-- vault-query:start filter="type=journal" scope="main/Journal" sort="-stem" format="- [[{link}|{stem}]] — {description}" -->
-- [[main/Journal/2026-04-30|2026-04-30]] — 
+- [[main/Journal/2026-05-01|2026-05-01]] — Bot v3.53 vault graph fixes, agent-temp branch, watchdog startup notification restricted to primary chats, mexcbot dashboard mobile polish, OSS radar pipeline, skill audit.
+- [[main/Journal/2026-04-30|2026-04-30]] — oss-radar timeout fix and re-run; OSS Radar analysis for claude-bot improvements; Obsidian orphan fix (path-qualified parent links, agent-temp branch); v3.52.1 → v3.53.0.
 - [[main/Journal/2026-04-29|2026-04-29]] — mexc-bot agent created, v3.50.1 consolidation error message fix, oss-radar pipeline ran.
 - [[main/Journal/2026-04-28|2026-04-28]] — Check-in pós-compactação, oss-radar pipeline, context files updated for main and parmeirense agents.
 - [[main/Journal/2026-04-27|2026-04-27]] — 

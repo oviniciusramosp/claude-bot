@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.53.0"  # feat: agent-temp branch — pipeline data files auto-link to per-agent Temp index for clean Obsidian graph
+BOT_VERSION = "3.55.0"  # feat: pipeline v2 scaffolding — StepType enum, type/accepts_overrides/command/validates/publishes/sink fields, pipeline_version frontmatter, PIPELINE_V2_ENABLED flag (additive, zero behavior change without flag + opt-in)
 
 import hmac
 import hashlib
@@ -154,6 +154,18 @@ WATCHDOG_NOTIFIED_FLAG = DATA_DIR / ".watchdog-notified"
 WATCHDOG_DISABLE_FLAG  = DATA_DIR / ".watchdog-disabled"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
+
+# ---------------------------------------------------------------------------
+# Pipeline v2 feature flag (v3.55+)
+# ---------------------------------------------------------------------------
+# Pipeline v2 introduces typed steps (script/validate/publish/gate), explicit
+# I/O contracts, runtime overrides, and structural Telegram leak prevention.
+# Enabled per-pipeline via `pipeline_version: 2` in YAML frontmatter AND this
+# env var. When OFF, even pipelines declaring `pipeline_version: 2` fall back
+# to the v1 code path so the rollout can be staged. See
+# vault/main/Notes/pipeline-v2-spec.md for the full design.
+PIPELINE_V2_ENABLED = os.environ.get("PIPELINE_V2_ENABLED", "false").lower() in ("1", "true", "yes", "on")
+
 
 # ---------------------------------------------------------------------------
 # Per-agent path resolution (v3.1 layout)
@@ -1234,6 +1246,39 @@ def _is_no_reply_output(text: Optional[str]) -> bool:
     return normalized == "NOREPLY"
 
 
+class StepType(str, Enum):
+    """Semantic type of a pipeline step (v3.55+, Pipeline v2).
+
+    String-valued so YAML round-trips cleanly. Default is LLM for back-compat
+    with v1 pipelines that have no `type:` field. The dispatcher in
+    `PipelineExecutor._execute_step` only routes to non-LLM handlers when the
+    pipeline declares `pipeline_version: 2` AND `PIPELINE_V2_ENABLED` is set.
+    """
+    LLM = "llm"
+    SCRIPT = "script"
+    VALIDATE = "validate"
+    PUBLISH = "publish"
+    GATE = "gate"
+
+    @classmethod
+    def from_yaml(cls, value: Any, default: str = "llm") -> "StepType":
+        """Parse a YAML value into a StepType. Falls back to ``default`` with a
+        WARNING when the value is unknown so a typo never silently turns a
+        validate step into an llm one."""
+        if value is None or value == "":
+            return cls(default)
+        normalized = str(value).strip().lower()
+        try:
+            return cls(normalized)
+        except ValueError:
+            logger.warning(
+                "Unknown step type %r in pipeline YAML — falling back to %s. "
+                "Valid types: %s",
+                value, default, ", ".join(t.value for t in cls),
+            )
+            return cls(default)
+
+
 @dataclass
 class PipelineStep:
     id: str
@@ -1270,6 +1315,19 @@ class PipelineStep:
     # for steps with side effects that must run even when upstream found
     # nothing (cleanup, heartbeat log, state reset, etc.).
     skip_on_no_reply: bool = True
+    # --- Pipeline v2 (v3.55+) — typed step extensions ---
+    # Default `type=llm` makes every existing v1 step fall through to the
+    # legacy LLM execution path. New types are dispatched in `_execute_step`
+    # only when `task.pipeline_version >= 2 AND PIPELINE_V2_ENABLED`.
+    type: str = "llm"  # one of StepType members; validated at parse via StepType.from_yaml
+    accepts_overrides: dict = field(default_factory=dict)  # schema declaring runtime override attrs
+    command: str = ""  # shell command for type=script|validate|publish (empty for llm/gate)
+    validates: Optional[str] = None  # upstream step id this validate step checks
+    publishes: Optional[str] = None  # upstream step id this publish step delivers
+    reviews: Optional[str] = None  # alias of publishes; reserved for review-style sinks
+    sink: Optional[str] = None  # sink registry name for type=publish (telegram, notion, file, ...)
+    sink_config: dict = field(default_factory=dict)  # per-sink configuration passed to handler
+    on_failure: str = "fail"  # fail | warn | feedback (validate steps only; "feedback" reruns upstream)
 
     @property
     def resolved_filename(self) -> str:
@@ -1293,6 +1351,9 @@ class PipelineTask:
     minimal_context: bool = False
     voice: bool = False
     effort: Optional[str] = None
+    # --- Pipeline v2 (v3.55+) ---
+    pipeline_version: int = 1  # 2 opts the pipeline into v2 dispatch (also requires PIPELINE_V2_ENABLED)
+    applied_overrides: dict = field(default_factory=dict)  # {step_id: {attr: val}} merged at runtime by caller
 
 
 # ---------------------------------------------------------------------------
@@ -1487,6 +1548,15 @@ def _promote_durable_concept_to_notes(
     except OSError as exc:
         logger.error("Failed to promote concept %s to Notes/: %s", slug, exc)
         return None
+
+
+def _strip_temp_parent_link(text: str) -> str:
+    """Remove injected `[[agent/agent-temp|Temp]]` wikilink from output text.
+
+    Pipeline workspace files carry this link for Obsidian's graph, but it must
+    never leak into Telegram messages.
+    """
+    return re.sub(r"^\[\[[\w-]+/agent-temp\|Temp\]\]\n*", "", text)
 
 
 def _inject_temp_parent_link(path: Path, agent_id: str) -> None:
@@ -2138,6 +2208,25 @@ def _iter_routine_files() -> List[Path]:
     return results
 
 
+def _parse_overrides_schema(raw: Any) -> dict:
+    """Pass-through parser for the `accepts_overrides` YAML field on a step.
+
+    In Phase 1 (v3.55) this just normalizes to a dict — the actual schema
+    validation against runtime overrides lives in `validate_overrides()`
+    (commit 2). Returns {} when the field is missing or not a dict (with a
+    warning for the invalid case).
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "accepts_overrides must be a dict, got %s — ignoring",
+            type(raw).__name__,
+        )
+        return {}
+    return dict(raw)
+
+
 def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
                          routine_name: str, model: str, time_slot: str) -> Optional[PipelineTask]:
     """Parse a pipeline Markdown file into a PipelineTask.
@@ -2231,6 +2320,30 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         _np_raw = str(s.get("loop_on_no_progress", "abort")).lower().strip()
         loop_np = _np_raw if _np_raw in ("abort", "continue") else "abort"
         _raw_timeout = int(s.get("timeout", 1200))
+        # --- Pipeline v2 fields (default-safe; only used when pipeline_version >= 2) ---
+        _step_type = StepType.from_yaml(s.get("type"), default="llm").value
+        _step_engine = str(s.get("engine", "claude"))
+        # Q15: engine field only meaningful for type:llm steps
+        if _step_type != "llm" and _step_engine != "claude":
+            logger.warning(
+                "Pipeline %s step %s: type=%s with engine=%s — engine is only "
+                "meaningful for type:llm steps and will be ignored",
+                routine_name, step_id, _step_type, _step_engine,
+            )
+        _on_failure_raw = str(s.get("on_failure", "fail")).strip().lower() or "fail"
+        if _on_failure_raw not in ("fail", "warn", "feedback"):
+            logger.warning(
+                "Pipeline %s step %s: unknown on_failure=%r — falling back to 'fail'",
+                routine_name, step_id, _on_failure_raw,
+            )
+            _on_failure_raw = "fail"
+        _sink_config_raw = s.get("sink_config")
+        if _sink_config_raw is not None and not isinstance(_sink_config_raw, dict):
+            logger.warning(
+                "Pipeline %s step %s: sink_config must be a dict, got %s — ignoring",
+                routine_name, step_id, type(_sink_config_raw).__name__,
+            )
+            _sink_config_raw = None
         steps.append(PipelineStep(
             id=step_id,
             name=str(s.get("name", step_id)),
@@ -2244,7 +2357,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             output_to_telegram=(raw_output == "telegram"),
             output_type=out_type,
             output_file=s.get("output_file") or None,
-            engine=str(s.get("engine", "claude")),
+            engine=_step_engine,
             effort=_step_effort if _step_effort in ("low", "medium", "high", "max") else None,
             loop_until=loop_until,
             loop_max_iterations=loop_max,
@@ -2254,6 +2367,15 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             input_file=s.get("input_file", "").strip() if is_manual else "",
             tunnel=str(s.get("tunnel", "true")).lower() != "false",
             skip_on_no_reply=str(s.get("skip_on_no_reply", "true")).lower() != "false",
+            type=_step_type,
+            accepts_overrides=_parse_overrides_schema(s.get("accepts_overrides")),
+            command=str(s.get("command", "")).strip(),
+            validates=str(s.get("validates")).strip() if s.get("validates") else None,
+            publishes=str(s.get("publishes")).strip() if s.get("publishes") else None,
+            reviews=str(s.get("reviews")).strip() if s.get("reviews") else None,
+            sink=str(s.get("sink")).strip() if s.get("sink") else None,
+            sink_config=_sink_config_raw or {},
+            on_failure=_on_failure_raw,
         ))
 
     if not steps:
@@ -2290,6 +2412,22 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
                 return None
 
     _effort_raw = str(fm.get("effort", "")).lower().strip()
+    # --- Pipeline v2 opt-in marker (v3.55+) ---
+    _pv_raw = fm.get("pipeline_version", 1)
+    try:
+        _pipeline_version = int(_pv_raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Pipeline %s: invalid pipeline_version=%r — defaulting to 1",
+            routine_name, _pv_raw,
+        )
+        _pipeline_version = 1
+    if _pipeline_version >= 2 and not PIPELINE_V2_ENABLED:
+        logger.warning(
+            "Pipeline %s declares pipeline_version=%d but PIPELINE_V2_ENABLED "
+            "env var is off — falling back to v1 code path",
+            routine_name, _pipeline_version,
+        )
     return PipelineTask(
         name=routine_name,
         title=str(fm.get("title", routine_name)),
@@ -2301,6 +2439,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         minimal_context=bool(fm.get("context") == "minimal"),
         voice=bool(fm.get("voice", False)),
         effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+        pipeline_version=_pipeline_version,
     )
 
 
@@ -5297,20 +5436,37 @@ class PipelineExecutor:
         )
         soft_success = all_soft and not has_hard_skip and not all_completed
 
+        # When the publish/output step skipped, no user-visible result was
+        # produced — surface this as "skipped" in the timeline rather than
+        # "completed".  Prefer `output: telegram` steps; fall back to the last
+        # step in the list for pipelines without an explicit telegram output.
+        telegram_steps = [s for s in self.task.steps if s.output_to_telegram]
+        if telegram_steps:
+            output_skipped = all(
+                self._step_status.get(s.id) == "skipped" for s in telegram_steps
+            )
+        elif self.task.steps:
+            output_skipped = self._step_status.get(self.task.steps[-1].id) == "skipped"
+        else:
+            output_skipped = False
+
         if all_completed or soft_success:
+            final_status = "skipped" if (soft_success and output_skipped) else "completed"
             if checkpoint_ref:
                 vault_checkpoint_drop(checkpoint_ref)
-            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "completed")
+            self.state.set_pipeline_status(self.task.name, self.task.time_slot, final_status)
             self._finalize_progress(success=True, elapsed=elapsed)
             self._notify_success(elapsed)
             _append_execution_report(
                 agent=self.task.agent, kind="pipeline", name=self.task.name,
-                status="completed", elapsed=elapsed,
+                status=final_status, elapsed=elapsed,
                 steps=[(s.name, self._step_status.get(s.id, "pending")) for s in self.task.steps],
                 step_timings=self._compute_step_timings(),
                 data_dir=f"workspace/data/{self.task.name}/",
             )
-            if soft_success:
+            if final_status == "skipped":
+                logger.info("Pipeline %s skipped (output step did not run, NO_REPLY cascade) in %ds", self.task.name, elapsed)
+            elif soft_success:
                 logger.info("Pipeline %s soft-completed (NO_REPLY cascade) in %ds", self.task.name, elapsed)
             else:
                 logger.info("Pipeline %s completed in %ds", self.task.name, elapsed)
@@ -6430,13 +6586,13 @@ class PipelineExecutor:
         output_text = None
         for step in self.task.steps:
             if step.output_to_telegram and step.id in self._step_outputs:
-                output_text = self._step_outputs[step.id]
+                output_text = _strip_temp_parent_link(self._step_outputs[step.id])
                 break
         # Fallback: last completed step's output (skip output: none steps)
         if output_text is None:
             for step in reversed(self.task.steps):
                 if step.id in self._step_outputs and step.output_type != "none":
-                    output_text = self._step_outputs[step.id]
+                    output_text = _strip_temp_parent_link(self._step_outputs[step.id])
                     break
 
         # NO_REPLY from the output step means nothing worth reporting — silent success
@@ -13570,7 +13726,7 @@ class ClaudeTelegramBot:
             logger.error("Failed to start webhook server: %s", exc)
 
     def _notify_startup(self) -> None:
-        for cid in self.authorized_ids:
+        for cid in self.primary_chat_ids:
             if not cid.startswith("-"):  # private chats only, not groups
                 self.tg_request("sendMessage", {"chat_id": cid, "text": "🟢 Bot online"})
 

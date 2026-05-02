@@ -11,8 +11,9 @@ struct DashboardView: View {
                     ActiveRunnersCard(count: appState.activeRunners)
                 }
                 HStack(alignment: .top, spacing: Spacing.xl) {
-                    ClaudeUsageCard().frame(maxHeight: .infinity)
-                    ZAIUsageCard().frame(maxHeight: .infinity)
+                    ClaudeUsageCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ZAIUsageCard().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    GPTUsageCard().frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
                 TodayRoutinesCard()
             }
@@ -483,6 +484,152 @@ struct ZAIUsageCard: View {
     }
 }
 
+// MARK: - GPT Usage Card
+
+struct GPTUsageCard: View {
+    @EnvironmentObject var appState: AppState
+
+    private var usage: GPTUsage { appState.gptUsage }
+
+    // How far through the current ISO week we are (Mon=0 … Sun=1).
+    // Used as the reference marker on the WeeklySegmentBar.
+    private var weekReferencePercent: Double {
+        let cal = Calendar.current
+        let now = Date()
+        let weekday = cal.component(.weekday, from: now)
+        let dayIndex = (weekday - 2 + 7) % 7
+        let hour   = cal.component(.hour,   from: now)
+        let minute = cal.component(.minute, from: now)
+        return (Double(dayIndex) + (Double(hour) * 60 + Double(minute)) / 1440.0) / 7.0
+    }
+
+    var body: some View {
+        GlassCard(padding: Spacing.xl) {
+            VStack(alignment: .leading, spacing: Spacing.md) {
+                cardHeader("OpenAI Usage", symbol: "sparkle.magnifyingglass")
+
+                if !usage.isConfigured {
+                    notConfiguredView
+                } else {
+                    activeView
+                }
+            }
+        }
+    }
+
+    // Shown whenever the Codex binary is present.
+    // ChatGPT Plus is flat-rate so there is no quota percentage to track —
+    // the bar stays at 0 and only the week-position reference marker is shown,
+    // matching ZAI's planInfoView behaviour for visual consistency.
+    private var activeView: some View {
+        VStack(alignment: .leading, spacing: Spacing.md) {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundStyle(Color(red: 0.204, green: 0.780, blue: 0.349))
+                    .font(.title3)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ChatGPT Plus · Codex")
+                        .font(.callout.bold())
+                }
+            }
+
+            WeeklySegmentBar(
+                percent: 0,
+                referencePercent: weekReferencePercent,
+                barColor: Color(red: 0.118, green: 0.533, blue: 1.0)
+            )
+
+            paceRow
+            renewRow
+            statChips
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var paceRow: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "gauge.open.with.lines.needle.33percent")
+            Text("Flat-rate · \(Int(weekReferencePercent * 100))% through this week")
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+    }
+
+    private var renewRow: some View {
+        let nextMonday: Date = {
+            let cal = Calendar(identifier: .iso8601)
+            let now = Date()
+            // Next Monday at 00:00 local time
+            var comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: now)
+            comps.weekOfYear = (comps.weekOfYear ?? 0) + 1
+            comps.weekday = 2  // Monday
+            comps.hour = 0; comps.minute = 0; comps.second = 0
+            return cal.date(from: comps) ?? now.addingTimeInterval(7 * 24 * 3600)
+        }()
+        let dayName: String = {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US")
+            f.dateFormat = "EEEE"
+            return f.string(from: nextMonday)
+        }()
+        let timeStr: String = {
+            let f = DateFormatter(); f.dateFormat = "HH:mm"; return f.string(from: nextMonday)
+        }()
+        let remaining: String = {
+            let secs = Int(max(0, nextMonday.timeIntervalSinceNow))
+            let d = secs / 86400
+            let h = (secs % 86400) / 3600
+            if d > 0 { return "\(d)d \(h)h" }
+            return "\(h)h"
+        }()
+        return HStack(spacing: 4) {
+            Image(systemName: "arrow.clockwise.circle")
+            Text("Renew \(dayName) \(timeStr) (\(remaining))")
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(Color(red: 0.447, green: 0.447, blue: 0.447))
+    }
+
+    private var statChips: some View {
+        HStack(spacing: 5) {
+            DashboardChip(symbol: SidebarItem.agents.symbol,      value: gptAgentCount)
+            DashboardChip(symbol: SidebarItem.routines.symbol,    value: gptRoutineCount)
+            DashboardChip(symbol: "checklist",                    value: gptStepCount)
+            DashboardChip(symbol: "bubble.left.and.bubble.right", value: gptSessionCount)
+        }
+    }
+
+    private var gptAgentCount: Int {
+        appState.agents.filter { $0.model.hasPrefix("gpt") }.count
+    }
+    private var gptRoutineCount: Int {
+        appState.routines.filter { r in
+            r.model.hasPrefix("gpt") || r.pipelineStepDefs.contains(where: { $0.model.hasPrefix("gpt") })
+        }.count
+    }
+    private var gptStepCount: Int {
+        appState.routines.reduce(0) { acc, r in
+            acc + r.pipelineStepDefs.filter { $0.model.hasPrefix("gpt") }.count
+        }
+    }
+    private var gptSessionCount: Int {
+        appState.sessions.sessions.values.filter { $0.model.hasPrefix("gpt") }.count
+    }
+
+    private var notConfiguredView: some View {
+        VStack(spacing: Spacing.sm) {
+            Image(systemName: "terminal.fill")
+                .font(.title2).foregroundStyle(.tertiary)
+            Text("Not Connected")
+                .font(.callout).foregroundStyle(.tertiary)
+            Text("Set CODEX_PATH in Settings")
+                .font(.system(size: 10)).foregroundStyle(.quaternary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, Spacing.sm)
+    }
+}
+
 // MARK: - Today's Routines Card
 
 struct TodayRoutinesCard: View {
@@ -491,7 +638,7 @@ struct TodayRoutinesCard: View {
     private var autoExecutions: [RoutineExecution] {
         appState.routines
             .flatMap { $0.todayExecutions }
-            .filter { $0.timeSlot != "dry-run" }
+            .filter { $0.timeSlot != "dry-run" && !$0.timeSlot.hasPrefix("manual-") }
     }
 
     private var todayWeekdayAbbr: String {
@@ -509,7 +656,7 @@ struct TodayRoutinesCard: View {
         for routine in appState.routines where routine.enabled {
             let allDays = routine.schedule.days.contains("*") || routine.schedule.days.isEmpty
             guard allDays || routine.schedule.days.contains(todayAbbr) else { continue }
-            for time in routine.schedule.times {
+            for time in routine.schedule.times where time != "manual" {
                 let exec = routine.todayExecutions.first { $0.timeSlot == time }
                 entries.append((routine: routine, time: time, execution: exec))
             }
@@ -683,7 +830,8 @@ struct TimelineRow: View {
         case .completed: "checkmark.circle.fill"
         case .failed:    "xmark.circle.fill"
         case .running:   "arrow.trianglehead.2.clockwise"
-        case .pending, .skipped: "clock"
+        case .pending:   "clock"
+        case .skipped:   "forward.fill"
         }
     }
 

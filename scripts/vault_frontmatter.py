@@ -419,12 +419,75 @@ def serialize_frontmatter(
     return "\n".join(out)
 
 
+def _parse_indented_yaml(lines: List[str], reference_indent: int) -> Dict[str, Any]:
+    """Parse a list of YAML lines at ``reference_indent`` columns into a dict.
+
+    Supports nested dicts (key with no value followed by more-indented children).
+    Used by parse_pipeline_body to handle v3.55+ nested fields like
+    accepts_overrides and sink_config. Inline lists ([a, b, c]) and scalars are
+    delegated to _parse_yaml_value.
+
+    Note: does NOT handle multi-line YAML lists (key:\\n  - a\\n  - b). Pipeline
+    YAML uses inline list syntax instead.
+    """
+    result: Dict[str, Any] = {}
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent < reference_indent:
+            # Out of our scope — caller resumes from here
+            break
+        if indent > reference_indent:
+            # Stray over-indented line — skip (defensive)
+            i += 1
+            continue
+        stripped = line.strip()
+        if ":" not in stripped:
+            i += 1
+            continue
+        colon = stripped.index(":")
+        key = stripped[:colon].strip()
+        val = stripped[colon + 1:].strip()
+        if val:
+            result[key] = _parse_yaml_value(val)
+            i += 1
+        else:
+            # Empty value → check if next non-empty line is more-indented (nested dict)
+            child_start = i + 1
+            child_end = child_start
+            child_indent: Optional[int] = None
+            while child_end < len(lines):
+                cl = lines[child_end]
+                if not cl.strip():
+                    child_end += 1
+                    continue
+                ci = len(cl) - len(cl.lstrip())
+                if ci <= reference_indent:
+                    break
+                if child_indent is None:
+                    child_indent = ci
+                child_end += 1
+            if child_indent is not None and child_indent > reference_indent:
+                result[key] = _parse_indented_yaml(lines[child_start:child_end], child_indent)
+                i = child_end
+            else:
+                # Empty value with no children → null
+                result[key] = None
+                i += 1
+    return result
+
+
 def parse_pipeline_body(body: str) -> List[Dict[str, Any]]:
     """Extract step definitions from a ```pipeline fenced block in markdown.
 
     Returns a list of dicts, each with keys like id, name, model, depends_on,
-    prompt_file, timeout, retry, output. Used by the bot, the linter, and the
-    indexer — single source of truth.
+    prompt_file, timeout, retry, output. v3.55+ supports nested dict values
+    (accepts_overrides, sink_config) via YAML indentation. Used by the bot,
+    the linter, and the indexer — single source of truth.
     """
     in_block = False
     block_lines: List[str] = []
@@ -441,27 +504,43 @@ def parse_pipeline_body(body: str) -> List[Dict[str, Any]]:
     if not block_lines:
         return []
 
-    steps: List[Dict[str, Any]] = []
-    current: Optional[Dict[str, Any]] = None
+    # Drop leading blanks and the "steps:" header line
+    while block_lines and block_lines[0].strip() in ("", "steps:"):
+        block_lines.pop(0)
+
+    # Group lines into per-step chunks based on lines starting with "- " at any indent
+    steps_chunks: List[List[str]] = []
+    current_chunk: List[str] = []
     for line in block_lines:
-        stripped = line.strip()
-        if not stripped or stripped == "steps:":
+        stripped_line = line.lstrip()
+        if stripped_line.startswith("- "):
+            if current_chunk:
+                steps_chunks.append(current_chunk)
+            # Normalize "  - key: val" → "    key: val" so the indent of the
+            # first key matches subsequent siblings (the dash + space becomes
+            # 2 spaces of indent for a uniform reference).
+            indent = len(line) - len(stripped_line)
+            content = " " * (indent + 2) + stripped_line[2:]
+            current_chunk = [content]
+        else:
+            if current_chunk:
+                current_chunk.append(line)
+    if current_chunk:
+        steps_chunks.append(current_chunk)
+
+    steps: List[Dict[str, Any]] = []
+    for chunk in steps_chunks:
+        # Reference indent = indent of first non-blank line in chunk
+        ref_indent: Optional[int] = None
+        for cl in chunk:
+            if cl.strip():
+                ref_indent = len(cl) - len(cl.lstrip())
+                break
+        if ref_indent is None:
             continue
-        if stripped.startswith("- "):
-            if current is not None:
-                steps.append(current)
-            current = {}
-            stripped = stripped[2:].strip()
-        if current is None:
-            continue
-        if ":" in stripped:
-            colon = stripped.index(":")
-            key = stripped[:colon].strip()
-            val = stripped[colon + 1 :].strip()
-            if val:
-                current[key] = _parse_yaml_value(val)
-    if current:
-        steps.append(current)
+        step_dict = _parse_indented_yaml(chunk, ref_indent)
+        if step_dict:
+            steps.append(step_dict)
     return steps
 
 

@@ -3,7 +3,6 @@ import Foundation
 actor LogService {
     private let logPath: String
     private var fileHandle: FileHandle?
-    private(set) var entries: [LogEntry] = []
     private var continuation: AsyncStream<LogEntry>.Continuation?
 
     init(dataDir: String) {
@@ -44,9 +43,7 @@ actor LogService {
         let data = fh.availableData
         guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
         for line in text.components(separatedBy: "\n") where !line.isEmpty {
-            let entry = LogEntry.parse(line)
-            entries.append(entry)
-            continuation?.yield(entry)
+            continuation?.yield(LogEntry.parse(line))
         }
     }
 

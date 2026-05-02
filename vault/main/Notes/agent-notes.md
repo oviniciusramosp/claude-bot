@@ -63,6 +63,7 @@ tags: [index, notes]
 - [[main/Notes/openclaw-session-warmth|openclaw-session-warmth]] — Research notes on OpenClaw PR #69679 (keep Claude CLI sessions warm) — persistent stdio process per session, 10-min idle cleanup, resume via session id. Assess applicability to claude-bot.
 - [[main/Notes/oss-watchlist|oss-watchlist]] — External PRs and commits flagged by OSS Radar for monitoring. Daily oss-radar routine checks state changes and surfaces updates when watched items merge, close, or gain major activity.
 - [[main/Notes/phantom-session-consolidation|phantom-session-consolidation]] — Agents created via /onboard and auto-activated immediately have no CLI conversation history; background consolidation will always fail with 
+- [[main/Notes/pipeline-v2-spec|pipeline-v2-spec]] — Architecture spec for typed steps, explicit I/O contract, runtime overrides, display statuses, failure injection, and Telegram leak prevention. Source of truth for executor v2 implementation.
 - [[main/Notes/python-rumps-path|python-rumps-path]] — rumps requires Python 3.9 at `/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/Python.app/Con
 - [[main/Notes/python39-for-rumps|python39-for-rumps]] — rumps requires Python 3.9 from CLI tools: `/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/Resources/P
 - [[main/Notes/run-routine-sh|run-routine-sh]] — `bash scripts/run-routine.sh <name>` lets any Claude subprocess trigger a bot routine via the control server at port 27182 using `~/.claude-
@@ -81,6 +82,7 @@ tags: [index, notes]
 - [[main/Notes/vault-agent-detection|vault-agent-detection]] — Agent directories detected solely by presence of `agent-<dirname>.md` file
 - [[main/Notes/vault-agent-isolation|vault-agent-isolation]] — Agent dirs detected by presence of `agent-<dirname>.md`; no cross-agent inheritance
 - [[main/Notes/vault-routine-index|vault-routine-index]] — `vault/Routines/Routines.md` is the single index of all active routines
+- [[main/Notes/wikilink-basename-collision|wikilink-basename-collision]] — Obsidian resolves `[[agent-notes]]` globally; identical basenames across agents force path-qualified links
 - [[main/Notes/zai-glm51-thinking|zai-glm51-thinking]] — GLM 5.1 reasons by default — always pass `{"thinking":{"type":"disabled"}}` via `extra_body` to avoid token burn
 - [[main/Notes/zai-glm51-thinking-disabled|zai-glm51-thinking-disabled]] — glm-5.1 reasons by default; always pass {"thinking":{"type":"disabled"}} via extra_body unless deep reasoning needed
 - [[main/Notes/zai-thinking-disabled|zai-thinking-disabled]] — GLM 5.1 must always receive `{"thinking":{"type":"disabled"}}` via `extra_body` or it burns tokens on reasoning_content.

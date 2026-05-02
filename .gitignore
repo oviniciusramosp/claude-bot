@@ -49,9 +49,13 @@ vault/*/Routines/.history/
 vault/*/scripts/
 
 # Custom agents — ignore every top-level agent folder EXCEPT main/
-# (main is the shipped default; custom agents are personal)
+# (main is the shipped default; custom agents are personal).
+# vault/Skills/ is ALSO whitelisted: it's the shared-infra-skills carve-out
+# documented in vault/CLAUDE.md (v3.55+) and ships with the repo so every
+# install gets the same authoring/validation skills.
 vault/*/
 !vault/main/
+!vault/Skills/
 !vault/.obsidian/
 
 # But re-exclude main's runtime dirs (the !vault/main/ above would pull them back)

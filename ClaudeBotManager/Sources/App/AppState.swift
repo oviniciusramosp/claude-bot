@@ -8,6 +8,7 @@ final class AppState: ObservableObject {
     @Published var botStatus: BotProcessService.BotStatus = .unknown
     @Published var claudeUsage: ClaudeUsage = .unavailable
     @Published var zaiUsage: ZAIUsage = .empty
+    @Published var gptUsage: GPTUsage = .empty
     @Published var activeRunners: Int = 0
     /// Whether the web dashboard service (port 27184) is reachable.
     @Published var webRunning: Bool = false
@@ -75,6 +76,11 @@ final class AppState: ObservableObject {
     private var statusTimer: Timer?
     private var usageTimer: Timer?
 
+    // Dedup guard: prevents multiple concurrent loadAll() Tasks from piling up
+    // when the FileWatcher fires for several watched paths in quick succession.
+    private var loadAllTask: Task<Void, Never>?
+    private static let maxRecentLogs = 500
+
     // Combine
     private var cancellables = Set<AnyCancellable>()
 
@@ -108,6 +114,7 @@ final class AppState: ObservableObject {
         Task { await self.loadAll() }
         Task { await tunnel.detect() }
         startTimers()
+        startLogStream()
     }
 
     private func setupPaths() {
@@ -142,7 +149,7 @@ final class AppState: ObservableObject {
 
     private func watchFiles() {
         let refresh: @Sendable () -> Void = { [weak self] in
-            Task { @MainActor in await self?.loadAll() }
+            Task { @MainActor in self?.scheduleLoadAll() }
         }
 
         // v3.5: every agent lives directly under the vault root as `<id>/`
@@ -218,7 +225,38 @@ final class AppState: ObservableObject {
         await loadSessions()
         await loadContexts()
         await refreshBotStatus()
-        if let ls = logService { recentLogs = await ls.loadRecent(lines: 200) }
+    }
+
+    // Called by FileWatcher callbacks and the watchdog in watchFiles().
+    // Cancels any already-running loadAll Task to prevent pile-up when multiple
+    // watched paths fire in quick succession (e.g. during an active pipeline).
+    private func scheduleLoadAll() {
+        loadAllTask?.cancel()
+        loadAllTask = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await self.loadAll()
+        }
+    }
+
+    // Seed recentLogs once from disk, then tail new lines via the DispatchSource
+    // stream so LogViewerView never needs to poll.
+    private func startLogStream() {
+        guard let ls = logService else { return }
+        Task {
+            recentLogs = await ls.loadRecent(lines: Self.maxRecentLogs)
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            for await entry in ls.makeStream() {
+                await MainActor.run {
+                    self.recentLogs.append(entry)
+                    if self.recentLogs.count > Self.maxRecentLogs {
+                        self.recentLogs.removeFirst(
+                            self.recentLogs.count - Self.maxRecentLogs)
+                    }
+                }
+            }
+        }
     }
 
     func loadAgents() async {
@@ -328,12 +366,14 @@ final class AppState: ObservableObject {
     }
 
     func refreshUsage() async {
-        // Refresh both providers in parallel. Either may be nil if services
+        // Refresh all providers in parallel. Either may be nil if services
         // aren't wired yet (very early in init) — we only update what we got.
         let claudeService = claudeUsageService
         let zaiService = zaiUsageService
         let zaiKey = botConfig.zaiApiKey
         let zaiBase = botConfig.zaiBaseUrl
+        let codexPath = botConfig.codexPath
+        let costSvc = CostHistoryService(dataDir: dataDir)
 
         async let claudeResult: ClaudeUsage? = {
             guard let s = claudeService else { return nil }
@@ -343,11 +383,19 @@ final class AppState: ObservableObject {
             guard let s = zaiService else { return nil }
             return await s.fetchUsage(apiKey: zaiKey, baseUrl: zaiBase)
         }()
+        async let gptResult: GPTUsage = {
+            let configured = FileManager.default.fileExists(atPath: codexPath)
+            let weekly = (try? await costSvc.totalThisWeek(provider: "openai")) ?? 0
+            let today  = (try? await costSvc.totalToday(provider: "openai")) ?? 0
+            return GPTUsage(isConfigured: configured, weeklyCostUSD: weekly, todayCostUSD: today)
+        }()
 
         let c = await claudeResult
         let z = await zaiResult
+        let g = await gptResult
         if let c = c { self.claudeUsage = c }
         if let z = z { self.zaiUsage = z }
+        self.gptUsage = g
         writeUsageCache()
     }
 
@@ -356,6 +404,7 @@ final class AppState: ObservableObject {
     private func writeUsageCache() {
         let c = claudeUsage
         let z = zaiUsage
+        let g = gptUsage
         let iso = ISO8601DateFormatter()
         let payload: [String: Any] = [
             "claude": [
@@ -384,6 +433,16 @@ final class AppState: ObservableObject {
                 "glmRoutineCount": glmRoutineCount,
                 "glmStepCount":    glmStepCount,
             ],
+            "gpt": [
+                "configured":    g.isConfigured,
+                "weeklyCostUSD": g.weeklyCostUSD,
+                "todayCostUSD":  g.todayCostUSD,
+                "hasCostData":   g.hasCostData,
+                "weeklyLabel":   g.weeklyLabel,
+                "gptAgentCount":   gptAgentCount,
+                "gptRoutineCount": gptRoutineCount,
+                "gptStepCount":    gptStepCount,
+            ],
             "counts": [
                 "agents":   agents.count + 1,
                 "routines": routines.count,
@@ -407,6 +466,20 @@ final class AppState: ObservableObject {
     private var glmStepCount: Int {
         routines.reduce(0) { acc, r in
             acc + r.pipelineStepDefs.filter { $0.model.hasPrefix("glm") }.count
+        }
+    }
+
+    private var gptAgentCount: Int {
+        agents.filter { $0.model.hasPrefix("gpt") }.count
+    }
+    private var gptRoutineCount: Int {
+        routines.filter { r in
+            r.model.hasPrefix("gpt") || r.pipelineStepDefs.contains(where: { $0.model.hasPrefix("gpt") })
+        }.count
+    }
+    private var gptStepCount: Int {
+        routines.reduce(0) { acc, r in
+            acc + r.pipelineStepDefs.filter { $0.model.hasPrefix("gpt") }.count
         }
     }
 
@@ -462,10 +535,8 @@ final class AppState: ObservableObject {
             req.setValue(token, forHTTPHeaderField: "X-Bot-Token")
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: ["name": routine.id, "time_slot": "dry-run"])
-        let sessionConfig = URLSessionConfiguration.default
-        sessionConfig.timeoutIntervalForRequest = 10
-        let session = URLSession(configuration: sessionConfig)
-        let (_, response) = try await session.data(for: req)
+        req.timeoutInterval = 10
+        let (_, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -513,10 +584,8 @@ final class AppState: ObservableObject {
             req.setValue(token, forHTTPHeaderField: "X-Bot-Token")
         }
         req.httpBody = try JSONSerialization.data(withJSONObject: ["name": routine.id])
-        let sessionConfig = URLSessionConfiguration.default
-        sessionConfig.timeoutIntervalForRequest = 10
-        let session = URLSession(configuration: sessionConfig)
-        let (_, response) = try await session.data(for: req)
+        req.timeoutInterval = 10
+        let (_, response) = try await URLSession.shared.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
             throw URLError(.badServerResponse)
         }
@@ -621,15 +690,12 @@ final class AppState: ObservableObject {
     }
 
     private func startTimers() {
-        // Poll faster (5s) when Claude is active, slower (15s) when idle
+        // Poll bot/web health every 5 s. Routine state updates come via
+        // FileWatcher → scheduleLoadAll(), so no need to reload routines here.
         statusTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 await self.refreshBotStatus()
-                // Reload routines when runners are active for real-time pipeline status
-                if self.activeRunners > 0 {
-                    await self.loadRoutines()
-                }
             }
         }
         usageTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in

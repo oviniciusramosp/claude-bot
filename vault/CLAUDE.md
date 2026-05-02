@@ -54,6 +54,32 @@ vault/
 
 The vault root contains only shared files (`README.md`, this `CLAUDE.md`, `Tooling.md`) plus each agent's directory. An agent is identified by the presence of `agent-info.md` — any top-level directory without it (e.g. `.graphs`, `.obsidian`, `Images`) is internal scaffolding, not an agent.
 
+### Exceção: shared infrastructure skills (`vault/Skills/`)
+
+The isolamento total rule above exists to prevent **domain bleed**: crypto-bro's writing voice should never leak into parmeirense, and Main's homebridge knowledge has no business inside contador. That goal is about *domain* knowledge.
+
+It does **not** apply to **meta/infrastructure skills** — instructions about how to author a pipeline YAML, how to scaffold a routine, how to validate frontmatter. Those skills are mechanical. They are identical for every agent that exists today and every agent that will exist tomorrow. Forcing each agent to keep its own copy creates drift the moment the system evolves (new frontmatter field, new pipeline syntax, new harness behavior) and one agent's copy gets the update while the others fall behind.
+
+**The carve-out:** a `vault/Skills/` directory at the vault root may host skills that are purely about authoring or operating the system itself. Every agent may reference these skills in the same way they reference `Tooling.md` — as shared infra, not as inherited domain.
+
+**Positive criterion (what CAN go in `vault/Skills/`):**
+- Skills about authoring a pipeline, routine, or agent (e.g. `create-pipeline`, `create-routine`, `create-agent`)
+- Prompt-engineering helpers and review skills that operate on system artifacts (e.g. `review-pipeline`, `review-routine`)
+- Vault-frontmatter validators, graph-link auditors, indexes regenerators
+- Anything that could be invoked identically by any current OR future agent without modification
+
+**Negative criterion (what CANNOT go in `vault/Skills/`):**
+- Anything mentioning a specific domain (crypto, futebol, parmeirense, contador, etc.)
+- Anything about content style, tone, or formatting of a specific output type (a publishing voice, a tweet format)
+- Anything that references a specific agent's personality, workflow, or external services they alone use
+- Any skill whose prompt assumes an agent-specific Notes/Lessons/Journal layout
+
+**Practical test:** *if the skill mentions a domain or product, it's per-agent. If it's purely about HOW the system works, it's shared.*
+
+**Linking:** shared skills are referenced as `[[Skills/<name>]]` (path-qualified from vault root) to keep them disambiguated from each agent's own `<agent>/Skills/` namespace. The shared `Skills.md` index lives at `vault/Skills/Skills.md` and is reachable from `README.md` as a sibling of `Tooling.md`.
+
+**Not an agent.** `vault/Skills/` has no `agent-info.md`, so `iter_agent_ids()` (Python) and `iterAgentIds()` (Swift) correctly exclude it — same rule as `.graphs`, `.obsidian`, `Images`. The agent detection contract is unchanged.
+
 ### `agent-info.md` — the per-agent hub
 
 Each agent has a single `agent-info.md` file at its root that combines:

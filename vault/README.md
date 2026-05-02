@@ -17,6 +17,7 @@ The vault is organized as **one tree per agent**, with this README as the single
 
 - [[CLAUDE]] — Universal vault rules (frontmatter, graph, linking)
 - [[Tooling]] — Tool preferences shared across all agents
+- [[Skills/Skills|Shared Skills]] — Meta/infra skills available to every agent (pipeline/routine/agent authoring, frontmatter validators, index helpers)
 
 ## Agents
 
@@ -25,6 +26,7 @@ The vault is organized as **one tree per agent**, with this README as the single
 - [[agent-crypto-bro]]
 - [[agent-digests]]
 - [[agent-main]]
+- [[agent-mexc-bot]]
 - [[agent-parmeirense]]
 <!-- vault-query:end -->
 
