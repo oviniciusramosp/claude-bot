@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.60.1"  # feat: skip-cascade Telegram message includes root-cause step + reason ("Motivo: ... (step: writer)") via _find_skip_root_cause; user no longer has to dig into bot.log to know WHY the pipeline skipped publication
+BOT_VERSION = "3.60.2"  # fix: 3 bugs caught in palmeiras-feed v2 production: (1) YAML parser missed `enabled: false  # comment` because inline comments weren't stripped — v1 stayed effectively enabled; (2) _inject_temp_parent_link corrupted publish-step Telegram payloads — now only injects into files that have YAML frontmatter (vault docs, not message bodies); (3) _notify_success fallback double-sent publish-step output — now skips type=publish steps since their sink already emitted
 
 import hmac
 import hashlib
@@ -1686,21 +1686,30 @@ def _inject_temp_parent_link(path: Path, agent_id: str) -> None:
     Used by the pipeline executor after every step write so that Obsidian's
     graph keeps `.workspace/data/**` files linked to the per-agent Temp index
     (instead of showing them as orphans).
-    Idempotent — does nothing if the link is already present. Preserves YAML
-    frontmatter when present. Skipped for non-markdown files (JSON/CSV/binary
-    payloads passed between v2 script steps would otherwise be corrupted).
+
+    Idempotent — does nothing if the link is already present.
+
+    Only runs when ALL of these are true:
+      - agent_id is set
+      - file extension is `.md` / `.markdown` / empty (skips JSON/CSV/binary)
+      - file CONTAINS a YAML frontmatter block (---) at the top — signals
+        "this is a vault knowledge document" rather than "this is a transient
+        Telegram message body or sink payload". Pipeline v2 publish-step
+        outputs (e.g. published.md = `🐷 Palmeiras Feed\\n\\n• [Title](URL)`)
+        intentionally have no frontmatter; they're routed to a sink and must
+        not get a wikilink injected (it would leak into the Telegram message).
     """
     if not agent_id:
         return
-    # Only inject the wikilink into markdown files. Pipeline v2 script/publish
-    # steps frequently write JSON or other structured formats that downstream
-    # steps parse — injecting the link breaks json.loads() etc.
     suffix = path.suffix.lower()
     if suffix not in ("", ".md", ".markdown"):
         return
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
+        return
+    # Frontmatter gate — only inject into vault knowledge docs.
+    if not text.lstrip().startswith("---\n"):
         return
     link = f"[[{agent_id}/agent-temp|Temp]]"
     if link in text:
@@ -8196,12 +8205,21 @@ class PipelineExecutor:
             if step.output_to_telegram and step.id in self._step_outputs:
                 output_text = _strip_temp_parent_link(self._step_outputs[step.id])
                 break
-        # Fallback: last completed step's output (skip output: none steps)
+        # Fallback: last completed step's output (skip output: none steps).
+        # Pipeline v2: also skip `publish` steps because they ALREADY sent
+        # their content via their own sink (telegram/notion/file/...) — sending
+        # the publish step's executor-stored summary ("emitted to telegram")
+        # via _notify_success would duplicate the post in the chat.
         if output_text is None:
             for step in reversed(self.task.steps):
-                if step.id in self._step_outputs and step.output_type != "none":
-                    output_text = _strip_temp_parent_link(self._step_outputs[step.id])
-                    break
+                if step.id not in self._step_outputs:
+                    continue
+                if step.output_type == "none":
+                    continue
+                if step.type == StepType.PUBLISH.value:
+                    continue
+                output_text = _strip_temp_parent_link(self._step_outputs[step.id])
+                break
 
         # NO_REPLY from the output step means nothing worth reporting — silent success
         if _is_no_reply_output(output_text):

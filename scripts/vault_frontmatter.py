@@ -66,7 +66,26 @@ def _strip_quotes(s: str) -> str:
 
 
 def _parse_yaml_value(val: str) -> Any:
-    """Parse a single YAML value: bool, number, quoted string, flow list, or plain string."""
+    """Parse a single YAML value: bool, number, quoted string, flow list, or plain string.
+
+    Strips inline ``# comment`` per YAML spec — so ``enabled: false  # disabled``
+    parses as Python False, not as the truthy string ``"false  # disabled"``.
+    Quoted strings (``"foo # bar"``) preserve everything including the ``#``.
+    """
+    raw = val
+    # Inline comment stripping — YAML allows ``# comment`` at end of value but
+    # NOT inside quoted strings. Detect quoted-ness BEFORE stripping.
+    quoted = (
+        (raw.startswith('"') and raw.endswith('"'))
+        or (raw.startswith("'") and raw.endswith("'"))
+    )
+    if not quoted:
+        # Find ` # ` (space-hash-space) or end-of-line `# `. Conservative — only
+        # strip when the # has whitespace before it, so URLs like
+        # `https://x.com/page#frag` aren't truncated.
+        m = re.search(r"\s+#", val)
+        if m:
+            val = val[:m.start()].rstrip()
     if val.lower() in ("true", "yes"):
         return True
     if val.lower() in ("false", "no"):
@@ -75,7 +94,7 @@ def _parse_yaml_value(val: str) -> Any:
     if val.startswith("[") and val.endswith("]"):
         items = val[1:-1].split(",")
         return [_strip_quotes(i.strip()) for i in items if i.strip()]
-    # Quoted string
+    # Quoted string (re-check on the possibly-stripped value)
     if (val.startswith('"') and val.endswith('"')) or (
         val.startswith("'") and val.endswith("'")
     ):
