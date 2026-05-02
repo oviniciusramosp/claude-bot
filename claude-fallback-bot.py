@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.57.1"  # feat: pipeline v2 PipelineDisplayStatus enum + compute_display_status() + additive routines-state JSON fields (display_status, publish_emitted) — single source of truth for Idle/Scheduled/Running/Success/Failed/Skipped, mirrored to Swift+JS in Phase 2
+BOT_VERSION = "3.58.0"  # feat: pipeline v2 failure injection — _append/collect/clear pipeline_failure blocks in vault/<agent>/agent-temp.md serialized by per-agent threading.Lock, _session_start_recall surfaces them as ## Pipeline status prefix, executor auto-clears on successful re-run (Q1)
 
 import hmac
 import hashlib
@@ -3925,6 +3925,274 @@ def _vault_index_bootstrap_agent(agent_id: str) -> None:
             pass
 
 
+# ---------------------------------------------------------------------------
+# Pipeline v2 — failure injection into agent-temp.md (v3.58+)
+# ---------------------------------------------------------------------------
+# When a pipeline fails or is skipped (NO_REPLY cascade reaches the sink),
+# the executor writes a structured `## pipeline_failure` (or `## pipeline_skip`)
+# block to vault/<agent>/agent-temp.md. The next session with that agent
+# reads these blocks via _session_start_recall and surfaces them in a
+# `## Pipeline status` prefix so the agent knows about the failure
+# immediately — without the user having to ask.
+#
+# Auto-clearing: when the same pipeline runs again successfully, the executor
+# calls _clear_pipeline_failures_for_pipeline to remove the stale blocks.
+# Manual clearing happens via the `/ack <run_id>` slash command (commit 9).
+#
+# Concurrency (Q13): per-agent threading.Lock serializes block writes against
+# concurrent failures from multiple pipelines for the same agent. Files are
+# rewritten atomically via .tmp + rename to survive Obsidian writes (Phase 3
+# adds fcntl.flock for cross-process safety).
+
+_AGENT_TEMP_LOCKS_META_LOCK = threading.Lock()
+_AGENT_TEMP_LOCKS: Dict[str, threading.Lock] = {}
+
+
+def _get_agent_temp_lock(agent_id: str) -> threading.Lock:
+    """Return the per-agent threading.Lock for agent-temp.md writes."""
+    with _AGENT_TEMP_LOCKS_META_LOCK:
+        lock = _AGENT_TEMP_LOCKS.get(agent_id)
+        if lock is None:
+            lock = threading.Lock()
+            _AGENT_TEMP_LOCKS[agent_id] = lock
+        return lock
+
+
+def _pipeline_failure_block_path(agent_id: str) -> Path:
+    """Return the path to the agent's runtime temp file."""
+    return VAULT_DIR / agent_id / "agent-temp.md"
+
+
+_PIPELINE_FAILURE_BLOCK_RE = re.compile(
+    r"^## pipeline_(?:failure|skip)\b.*?(?=^## |\Z)",
+    re.MULTILINE | re.DOTALL,
+)
+_PIPELINE_FAILURE_RUN_ID_RE = re.compile(r"^- run_id:\s*(\S+)\s*$", re.MULTILINE)
+_PIPELINE_FAILURE_PIPELINE_RE = re.compile(r"^- pipeline:\s*(\S+)\s*$", re.MULTILINE)
+
+
+def _format_pipeline_failure_block(block_kind: str, fields: Dict) -> str:
+    """Build the markdown for a single pipeline_failure / pipeline_skip block.
+
+    block_kind is "failure" or "skip" — produces "## pipeline_failure" or
+    "## pipeline_skip" respectively.
+    """
+    header = "pipeline_failure" if block_kind == "failure" else "pipeline_skip"
+    lines = [f"## {header}", ""]
+    # Stable ordering for diff-friendliness
+    for key in (
+        "pipeline", "step", "ran_at", "run_id", "reason", "final_status",
+        "state_path", "last_step_output", "overrides",
+        "pipeline_display_status",
+    ):
+        if key in fields and fields[key] is not None and fields[key] != "":
+            value = fields[key]
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
+            lines.append(f"- {key}: {value}")
+    lines.append("")  # trailing blank for readability
+    return "\n".join(lines)
+
+
+def _ensure_agent_temp_skeleton(path: Path, agent_id: str) -> None:
+    """Create agent-temp.md with minimal frontmatter when it doesn't exist."""
+    if path.exists():
+        return
+    today = time.strftime("%Y-%m-%d")
+    frontmatter = (
+        "---\n"
+        f"title: Temp — {agent_id}\n"
+        f"description: Runtime temp index for {agent_id} — pipeline failure blocks, transient runtime data.\n"
+        "type: history\n"
+        f"created: {today}\n"
+        f"updated: {today}\n"
+        "tags: [temp, runtime]\n"
+        "---\n\n"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(frontmatter, encoding="utf-8")
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomic-ish file write via .tmp + rename. Survives concurrent Obsidian saves."""
+    tmp = path.with_suffix(path.suffix + ".pv2tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _append_pipeline_failure_block(agent_id: str, block_kind: str, fields: Dict) -> None:
+    """Append a `## pipeline_failure` (or `pipeline_skip`) block to agent-temp.md.
+
+    Per-agent lock serializes against concurrent writes from other failures
+    for the same agent. File-level atomicity via tmp+rename protects against
+    a concurrent Obsidian save losing the new block.
+    """
+    if not agent_id:
+        logger.warning("_append_pipeline_failure_block called with empty agent_id — skipping")
+        return
+    path = _pipeline_failure_block_path(agent_id)
+    block_text = _format_pipeline_failure_block(block_kind, fields)
+    lock = _get_agent_temp_lock(agent_id)
+    with lock:
+        try:
+            _ensure_agent_temp_skeleton(path, agent_id)
+            existing = path.read_text(encoding="utf-8")
+            if not existing.endswith("\n"):
+                existing += "\n"
+            new_content = existing + "\n" + block_text
+            _atomic_write_text(path, new_content)
+            logger.info(
+                "Pipeline %s: %s block appended to %s for agent %s (run_id=%s)",
+                fields.get("pipeline", "?"), block_kind, path,
+                agent_id, fields.get("run_id", "?"),
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "Failed to append pipeline_%s block for agent %s: %s",
+                block_kind, agent_id, exc,
+            )
+
+
+def _collect_pipeline_failure_blocks(agent_id: str) -> List[Dict]:
+    """Read all pipeline_failure / pipeline_skip blocks from agent-temp.md.
+
+    Returns a list of dicts with keys: kind ("failure" | "skip"), pipeline,
+    step, ran_at, run_id, reason, etc. Parses the markdown bullet-list format
+    written by _format_pipeline_failure_block. Returns [] on any error.
+    """
+    if not agent_id:
+        return []
+    path = _pipeline_failure_block_path(agent_id)
+    if not path.exists():
+        return []
+    lock = _get_agent_temp_lock(agent_id)
+    with lock:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+    blocks: List[Dict] = []
+    for match in _PIPELINE_FAILURE_BLOCK_RE.finditer(text):
+        block_text = match.group(0)
+        kind = "failure" if "pipeline_failure" in block_text.split("\n", 1)[0] else "skip"
+        block: Dict[str, Any] = {"kind": kind}
+        for line in block_text.splitlines()[1:]:
+            line = line.strip()
+            if not line.startswith("- "):
+                continue
+            key, _, val = line[2:].partition(":")
+            block[key.strip()] = val.strip()
+        blocks.append(block)
+    return blocks
+
+
+def _clear_pipeline_failure_block(agent_id: str, run_id: str) -> bool:
+    """Remove the pipeline_failure / pipeline_skip block matching run_id.
+
+    Returns True if a block was found and removed.
+    """
+    if not agent_id or not run_id:
+        return False
+    path = _pipeline_failure_block_path(agent_id)
+    if not path.exists():
+        return False
+    lock = _get_agent_temp_lock(agent_id)
+    with lock:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        blocks = list(_PIPELINE_FAILURE_BLOCK_RE.finditer(text))
+        cleared = False
+        for match in reversed(blocks):
+            block_text = match.group(0)
+            run_match = _PIPELINE_FAILURE_RUN_ID_RE.search(block_text)
+            if run_match and run_match.group(1).strip() == run_id:
+                text = text[: match.start()] + text[match.end():]
+                cleared = True
+                break
+        if cleared:
+            try:
+                _atomic_write_text(path, text)
+                logger.info(
+                    "Cleared pipeline_failure block for agent %s, run_id %s",
+                    agent_id, run_id,
+                )
+            except OSError as exc:
+                logger.warning("Failed to write cleared agent-temp.md: %s", exc)
+                return False
+    return cleared
+
+
+def _clear_pipeline_failures_for_pipeline(agent_id: str, pipeline_name: str) -> int:
+    """Remove ALL failure/skip blocks for a given pipeline name. Returns count cleared.
+
+    Called by PipelineExecutor on a successful re-run so the failure context
+    auto-clears once the underlying issue is resolved (Q1).
+    """
+    if not agent_id or not pipeline_name:
+        return 0
+    path = _pipeline_failure_block_path(agent_id)
+    if not path.exists():
+        return 0
+    lock = _get_agent_temp_lock(agent_id)
+    cleared = 0
+    with lock:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return 0
+        # Iterate in reverse so removals don't shift earlier match offsets
+        blocks = list(_PIPELINE_FAILURE_BLOCK_RE.finditer(text))
+        for match in reversed(blocks):
+            block_text = match.group(0)
+            pipe_match = _PIPELINE_FAILURE_PIPELINE_RE.search(block_text)
+            if pipe_match and pipe_match.group(1).strip() == pipeline_name:
+                text = text[: match.start()] + text[match.end():]
+                cleared += 1
+        if cleared > 0:
+            try:
+                _atomic_write_text(path, text)
+                logger.info(
+                    "Auto-cleared %d pipeline_failure block(s) for agent %s pipeline %s "
+                    "after successful re-run",
+                    cleared, agent_id, pipeline_name,
+                )
+            except OSError as exc:
+                logger.warning("Failed to write cleared agent-temp.md: %s", exc)
+                return 0
+    return cleared
+
+
+def _format_pipeline_failure_recall_section(blocks: List[Dict]) -> str:
+    """Build the `## Pipeline status` recall prefix from collected blocks."""
+    if not blocks:
+        return ""
+    lines = ["## Pipeline status", ""]
+    for b in blocks:
+        kind = b.get("kind", "failure")
+        verb = "FAILED" if kind == "failure" else "SKIPPED"
+        pipeline = b.get("pipeline", "?")
+        step = b.get("step", "?")
+        ran_at = b.get("ran_at", "?")
+        run_id = b.get("run_id", "?")
+        reason = b.get("reason", "")
+        lines.append(
+            f"- **{pipeline}** {verb} at {ran_at} "
+            f"(step `{step}`, run_id `{run_id}`)"
+        )
+        if reason:
+            # Trim long reasons for readability; full text is in agent-temp.md
+            short = reason if len(reason) <= 160 else reason[:160].rstrip() + "…"
+            lines.append(f"  Reason: {short}")
+    lines.append("")
+    lines.append(
+        "Acknowledge with `/ack <run_id>` after reviewing, or fix the pipeline "
+        "and re-run — successful re-runs auto-clear these blocks."
+    )
+    return "\n".join(lines)
+
+
 def _session_start_recall(prompt: str, session: "Session") -> Optional[str]:
     """Return a compact ``## Recent Context`` block for a fresh session.
 
@@ -3948,12 +4216,24 @@ def _session_start_recall(prompt: str, session: "Session") -> Optional[str]:
         return None
     if not prompt or not prompt.strip():
         return None
+
+    # Pipeline v2: surface any pending pipeline_failure / pipeline_skip blocks
+    # from agent-temp.md BEFORE the FTS recall — failure context is more urgent
+    # than recent journal entries. Fail-open on errors.
+    pipeline_status_section = ""
+    try:
+        agent_for_failures = _agent_id_or_main(session.agent)
+        failure_blocks = _collect_pipeline_failure_blocks(agent_for_failures)
+        if failure_blocks:
+            pipeline_status_section = _format_pipeline_failure_recall_section(failure_blocks)
+    except Exception as exc:
+        logger.warning("SessionStart recall: pipeline failure collection failed: %s", exc)
     vi = _vault_index_module()
     if vi is None:
-        return None
+        return pipeline_status_section or None
     conn = _vault_index_connect()
     if conn is None:
-        return None
+        return pipeline_status_section or None
     agent = _agent_id_or_main(session.agent)
     # Read-time lazy refresh: stat-walk the agent folder and re-index any
     # .md file newer than the DB row. Guarantees Obsidian/CLI/git-pull edits
@@ -3976,13 +4256,14 @@ def _session_start_recall(prompt: str, session: "Session") -> Optional[str]:
             conn.close()
         except Exception:
             pass
-        return None
+        return pipeline_status_section or None
     try:
         conn.close()
     except Exception:
         pass
     if not hits:
-        return None
+        # Even with no FTS hits, surface failures if present
+        return pipeline_status_section or None
     lines: List[str] = [
         "## Recent Context",
         "",
@@ -3997,7 +4278,10 @@ def _session_start_recall(prompt: str, session: "Session") -> Optional[str]:
         if len(snippet) > 220:
             snippet = snippet[:220].rstrip() + "…"
         lines.append(f"- [[{h.rel_path}]]{section}{date} — {snippet}")
-    return "\n".join(lines)
+    recent_context = "\n".join(lines)
+    if pipeline_status_section:
+        return pipeline_status_section + "\n\n" + recent_context
+    return recent_context
 
 
 # ---------------------------------------------------------------------------
@@ -6008,6 +6292,18 @@ class PipelineExecutor:
                 publish_emitted=pipeline_publish_emitted,
                 display_status=display_status,
             )
+            # Pipeline v2 (Q1): auto-clear any prior pipeline_failure blocks
+            # for this pipeline now that it has succeeded.
+            if final_status == "completed" and pipeline_publish_emitted:
+                try:
+                    _clear_pipeline_failures_for_pipeline(
+                        self.task.agent or MAIN_AGENT_ID, self.task.name,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Pipeline %s: auto-clear of failure blocks failed: %s",
+                        self.task.name, exc,
+                    )
             self._finalize_progress(success=True, elapsed=elapsed)
             self._notify_success(elapsed)
             _append_execution_report(
@@ -6043,6 +6339,33 @@ class PipelineExecutor:
                 display_status=PipelineDisplayStatus.FAILED.value,
             )
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
+            # Pipeline v2: write failure block to agent-temp.md so next agent
+            # session sees it via _session_start_recall.
+            try:
+                failed_step = next(
+                    (sid for sid, st in self._step_status.items() if st == "failed"),
+                    None,
+                )
+                _append_pipeline_failure_block(
+                    self.task.agent or MAIN_AGENT_ID,
+                    "failure",
+                    {
+                        "pipeline": self.task.name,
+                        "step": failed_step or "unknown",
+                        "ran_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "run_id": self._run_id,
+                        "reason": err[:300],
+                        "final_status": status,
+                        "state_path": str(ROUTINES_STATE_DIR / f"{time.strftime('%Y-%m-%d')}.json"),
+                        "overrides": self.applied_overrides if self.applied_overrides else None,
+                        "pipeline_display_status": PipelineDisplayStatus.FAILED.value,
+                    },
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Pipeline %s: failed to write pipeline_failure block: %s",
+                    self.task.name, exc,
+                )
             failed_step_name = None
             if failed_steps:
                 by_id = {s.id: s for s in self.task.steps}
