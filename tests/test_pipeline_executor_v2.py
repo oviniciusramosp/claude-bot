@@ -163,15 +163,8 @@ class DispatcherTests(DispatcherTestBase):
 
 
 class StubsRaiseTests(DispatcherTestBase):
-    """The remaining stubs (validate, publish) raise NotImplementedError until
-    commits 5 and 6. Script is implemented in commit 4 (this commit)."""
-
-    def test_validate_stub_raises(self):
-        step = self._make_step(type="validate")
-        ex = self._make_executor([step], pipeline_version=2)
-        with self.assertRaises(NotImplementedError) as cm:
-            ex._execute_validate_step(step, Path("/tmp"))
-        self.assertIn("commit 5", str(cm.exception))
+    """The remaining stub (publish) raises NotImplementedError until commit 6.
+    Script and validate are implemented (commits 4 and 5)."""
 
     def test_publish_stub_raises(self):
         step = self._make_step(type="publish")
@@ -179,6 +172,202 @@ class StubsRaiseTests(DispatcherTestBase):
         with self.assertRaises(NotImplementedError) as cm:
             ex._execute_publish_step(step, Path("/tmp"))
         self.assertIn("commit 6", str(cm.exception))
+
+
+class ValidateStepHandlerTests(DispatcherTestBase):
+    """_execute_validate_step + on_failure policies + feedback retry loop."""
+
+    def setUp(self):
+        self.data_dir = Path(tempfile.mkdtemp(prefix="pv2-validate-data-"))
+        self.scripts_dir = Path(tempfile.mkdtemp(prefix="pv2-validate-fixtures-"))
+
+    def _write_script(self, name: str, body: str) -> Path:
+        p = self.scripts_dir / name
+        p.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
+        p.chmod(0o755)
+        return p
+
+    def _seed_upstream_output(self, ex, upstream_id: str, content: str = "upstream data"):
+        upstream = ex._steps_by_id[upstream_id]
+        target = self.data_dir / upstream.resolved_filename
+        target.write_text(content, encoding="utf-8")
+        return target
+
+    def test_no_command_fails_loud(self):
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer", command="")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "failed")
+        self.assertIn("no `command:`", ex._step_errors["check"])
+
+    def test_no_validates_fails_loud(self):
+        validator = self._make_step("check", type="validate", command="echo")
+        ex = self._make_executor([validator], pipeline_version=2)
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "failed")
+        self.assertIn("no `validates:`", ex._step_errors["check"])
+
+    def test_unknown_upstream_fails_loud(self):
+        validator = self._make_step("check", type="validate", validates="bogus", command="echo")
+        ex = self._make_executor([validator], pipeline_version=2)
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "failed")
+        self.assertIn("unknown upstream", ex._step_errors["check"])
+
+    def test_target_missing_fails_loud(self):
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer", command="echo")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        # don't seed the upstream output
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "failed")
+        self.assertIn("does not exist", ex._step_errors["check"])
+
+    def test_validator_passes_step_completed(self):
+        script = self._write_script(
+            "pass.py",
+            'print(\'{"status": "ready"}\')\n'
+        )
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer",
+                                    command=f"python3 {script}")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "completed")
+
+    def test_validator_fails_on_failure_fail(self):
+        script = self._write_script(
+            "fail.py",
+            'print(\'{"status": "failed", "reason": "missing field X"}\')\n'
+            'import sys; sys.exit(1)\n'
+        )
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer",
+                                    on_failure="fail",
+                                    command=f"python3 {script}")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "failed")
+        self.assertIn("missing field X", ex._step_errors["check"])
+        # Upstream is NOT touched (fail policy)
+        self.assertEqual(ex._step_status["writer"], "pending")
+
+    def test_validator_fails_on_failure_warn(self):
+        script = self._write_script(
+            "warnfail.py",
+            'print(\'{"status": "failed", "reason": "minor formatting"}\')\n'
+            'import sys; sys.exit(1)\n'
+        )
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer",
+                                    on_failure="warn",
+                                    command=f"python3 {script}")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_validate_step(validator, self.data_dir)
+        # warn → step still completed so downstream proceeds
+        self.assertEqual(ex._step_status["check"], "completed")
+        self.assertIn("minor formatting", ex._skip_reasons["check"])
+
+    def test_validator_feedback_triggers_upstream_rerun(self):
+        """on_failure=feedback resets upstream to pending and queues feedback text."""
+        script = self._write_script(
+            "feedback.py",
+            'print(\'{"status": "failed", "reason": "no intro paragraph", '
+            '"feedback": "Add an introductory paragraph before section 1"}\')\n'
+            'import sys; sys.exit(1)\n'
+        )
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer",
+                                    on_failure="feedback",
+                                    command=f"python3 {script}")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        # Mark upstream as completed (simulating it ran already)
+        ex._step_status["writer"] = "completed"
+        ex._step_outputs["writer"] = "upstream content"
+        self._seed_upstream_output(ex, "writer")
+        ex._execute_validate_step(validator, self.data_dir)
+        # Upstream reset to pending (DAG loop will rerun it)
+        self.assertEqual(ex._step_status["writer"], "pending")
+        # Validate step also reset to pending (will rerun after upstream)
+        self.assertEqual(ex._step_status["check"], "pending")
+        # Feedback queued for upstream
+        self.assertIn("introductory paragraph", ex._validation_feedback["writer"])
+        # Retry counter incremented
+        self.assertEqual(ex._validate_feedback_retries["check"], 1)
+
+    def test_validator_feedback_retry_capped_at_one(self):
+        """Second feedback failure downgrades to fail (no infinite loop)."""
+        script = self._write_script(
+            "always_fail.py",
+            'print(\'{"status": "failed", "reason": "still bad", "feedback": "fix it"}\')\n'
+            'import sys; sys.exit(1)\n'
+        )
+        upstream = self._make_step("writer")
+        validator = self._make_step("check", type="validate", validates="writer",
+                                    on_failure="feedback",
+                                    command=f"python3 {script}")
+        ex = self._make_executor([upstream, validator], pipeline_version=2)
+        ex._step_status["writer"] = "completed"
+        ex._step_outputs["writer"] = "upstream content"
+        self._seed_upstream_output(ex, "writer")
+        # First call: triggers retry
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._validate_feedback_retries["check"], 1)
+        # Reset state to simulate after upstream re-ran
+        ex._step_status["writer"] = "completed"
+        ex._step_status["check"] = "pending"
+        # Second call: cap reached → fail
+        ex._execute_validate_step(validator, self.data_dir)
+        self.assertEqual(ex._step_status["check"], "failed")
+        self.assertIn("retry already attempted", ex._step_errors["check"])
+
+
+class FeedbackPromptInjectionTests(DispatcherTestBase):
+    """_build_step_prompt injects validation feedback + overrides into LLM prompts."""
+
+    def setUp(self):
+        self.data_dir = Path(tempfile.mkdtemp(prefix="pv2-prompt-data-"))
+
+    def test_no_feedback_no_overrides_v1(self):
+        step = self._make_step("writer", prompt="write a post")
+        ex = self._make_executor([step], pipeline_version=1)
+        prompt = ex._build_step_prompt(step, self.data_dir)
+        self.assertIn("write a post", prompt)
+        self.assertNotIn("Validation feedback", prompt)
+        self.assertNotIn("Overrides for this run", prompt)
+
+    def test_feedback_injected_for_v2_when_flag_on(self):
+        step = self._make_step("writer", prompt="write a post")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex._validation_feedback["writer"] = "Add intro paragraph"
+        with patch.object(self.bot_mod, "PIPELINE_V2_ENABLED", True):
+            prompt = ex._build_step_prompt(step, self.data_dir)
+        self.assertIn("Validation feedback from previous attempt", prompt)
+        self.assertIn("Add intro paragraph", prompt)
+
+    def test_overrides_injected_into_v2_prompt(self):
+        step = self._make_step("writer", prompt="write a post",
+                               accepts_overrides={"focus_asset": {"type": "string"}})
+        ex = self._make_executor([step], pipeline_version=2)
+        ex.applied_overrides = {"writer": {"focus_asset": "ETH"}}
+        with patch.object(self.bot_mod, "PIPELINE_V2_ENABLED", True):
+            prompt = ex._build_step_prompt(step, self.data_dir)
+        self.assertIn("Overrides for this run", prompt)
+        self.assertIn("focus_asset", prompt)
+        self.assertIn("ETH", prompt)
+
+    def test_overrides_not_injected_when_flag_off(self):
+        step = self._make_step("writer", prompt="write a post")
+        ex = self._make_executor([step], pipeline_version=2)
+        ex.applied_overrides = {"writer": {"focus_asset": "ETH"}}
+        # flag is off → no injection even though pipeline_version=2
+        prompt = ex._build_step_prompt(step, self.data_dir)
+        self.assertNotIn("Overrides for this run", prompt)
 
 
 class ScriptStepHandlerTests(DispatcherTestBase):

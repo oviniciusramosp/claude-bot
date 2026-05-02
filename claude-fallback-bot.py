@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.56.0"  # feat: pipeline v2 script step handler — subprocess execution with hard timeout, stdout capture, JSON status report parsing, PIPELINE_* and STEP_OVERRIDE_* env vars, _record_step_failure/_apply_status_report/_build_step_subprocess_env helpers, _run_id per pipeline run
+BOT_VERSION = "3.56.1"  # feat: pipeline v2 validate step + feedback retry loop — _execute_validate_step with on_failure=fail|warn|feedback, _validation_feedback dict surfacing into _build_step_prompt for upstream rerun (capped at 1 retry per spec § 2.3); LLM prompt now also receives applied_overrides as structured suffix
 
 import hmac
 import hashlib
@@ -6282,12 +6282,179 @@ class PipelineExecutor:
         self._apply_status_report(step, attempt, report)
 
     def _execute_validate_step(self, step: PipelineStep, data_dir: Path) -> None:
-        """Execute a type:validate pipeline step.
+        """Execute a type:validate pipeline step (Pipeline v2).
 
-        Phase 1 commit 5 will implement this with the on_failure feedback loop.
+        Validates the output of an upstream step (declared via ``step.validates``)
+        by spawning ``step.command`` as a subprocess. Same env vars as script
+        steps, plus ``PIPELINE_VALIDATION_TARGET`` pointing at the upstream's
+        output file.
+
+        On status=failed, branches by ``step.on_failure``:
+          - ``fail`` (default): mark this validate step failed → pipeline fails
+          - ``warn``: mark validate completed (downstream proceeds) + log WARNING
+          - ``feedback``: rerun the upstream step ONCE with the validator's
+            feedback appended to its prompt. The retry counter at
+            ``self._validate_feedback_retries`` caps re-runs at 1 to prevent
+            infinite loops (spec § 2.3). After cap, downgrades to ``fail``.
+
+        Status=ready always means the validator passed → step completed.
         """
-        raise NotImplementedError(
-            f"validate step handler arrives in Phase 1 commit 5 (step={step.id})"
+        attempt = self._step_attempts.get(step.id, 0) + 1
+        with self._lock:
+            self._step_attempts[step.id] = attempt
+
+        if not step.command:
+            self._record_step_failure(
+                step, attempt,
+                f"validate step {step.id!r} has no `command:` — fix the pipeline YAML",
+            )
+            return
+        if not step.validates:
+            self._record_step_failure(
+                step, attempt,
+                f"validate step {step.id!r} has no `validates:` — must reference upstream step id",
+            )
+            return
+        upstream = self._steps_by_id.get(step.validates)
+        if upstream is None:
+            self._record_step_failure(
+                step, attempt,
+                f"validate step {step.id!r} references unknown upstream {step.validates!r}",
+            )
+            return
+
+        target_file = data_dir / upstream.resolved_filename
+        if not target_file.exists():
+            self._record_step_failure(
+                step, attempt,
+                f"validate step {step.id!r}: target {target_file} does not exist "
+                f"(upstream step {step.validates!r} did not produce output)",
+            )
+            return
+
+        self.state.set_step_status(
+            self.task.name, self.task.time_slot, step.id, "running", attempt=attempt,
+        )
+        logger.info(
+            "Pipeline %s: validate step %s starting (validates=%s, on_failure=%s, attempt=%d)",
+            self.task.name, step.id, step.validates, step.on_failure, attempt,
+        )
+
+        output_file_path = data_dir / step.resolved_filename
+        env = self._build_step_subprocess_env(step, data_dir, output_file_path)
+        env["PIPELINE_VALIDATION_TARGET"] = str(target_file)
+
+        try:
+            cmd = shlex.split(step.command)
+        except ValueError as exc:
+            self._record_step_failure(step, attempt, f"validate command parse error: {exc}")
+            return
+
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=env, cwd=str(self.workspace), text=True,
+            )
+        except (OSError, FileNotFoundError) as exc:
+            self._record_step_failure(step, attempt, f"failed to spawn validator: {exc}")
+            return
+
+        try:
+            stdout, stderr = proc.communicate(timeout=step.timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            self._record_step_failure(
+                step, attempt,
+                f"validate step {step.id!r} exceeded {step.timeout}s hard timeout",
+            )
+            return
+
+        for line in stdout.splitlines()[:-1]:
+            if line.strip():
+                logger.info("[%s/%s/stdout] %s", self.task.name, step.id, line)
+        for line in stderr.splitlines():
+            if line.strip():
+                logger.warning("[%s/%s/stderr] %s", self.task.name, step.id, line)
+
+        report = _parse_status_report(stdout, proc.returncode, output_file_path)
+        report_status = report.get("status", "failed")
+        reason = report.get("reason", "") or ""
+        feedback = report.get("feedback", "") or ""
+
+        if report_status == "ready":
+            # Validator passed — mark this step completed; downstream proceeds.
+            self._apply_status_report(step, attempt, report)
+            return
+
+        if report_status == "skipped":
+            # Validator chose to skip (e.g. no validation rules applicable).
+            self._apply_status_report(step, attempt, report)
+            return
+
+        # Failed — branch on on_failure policy
+        on_fail = step.on_failure or "fail"
+        if on_fail == "warn":
+            with self._lock:
+                self._step_outputs[step.id] = ""
+                self._step_status[step.id] = "completed"
+                self._skip_reasons[step.id] = f"validation warning: {reason}"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+            self.state.set_step_status(
+                self.task.name, self.task.time_slot, step.id, "completed", attempt=attempt,
+            )
+            logger.warning(
+                "Pipeline %s: validate step %s reported failure but on_failure=warn — continuing (%s)",
+                self.task.name, step.id, reason,
+            )
+            return
+
+        if on_fail == "feedback":
+            retry_count = self._validate_feedback_retries.get(step.id, 0)
+            if retry_count >= 1:
+                # Already retried once — downgrade to fail
+                self._record_step_failure(
+                    step, attempt,
+                    f"validate {step.id!r}: feedback retry already attempted, "
+                    f"upstream {step.validates!r} still failed validation: {reason}",
+                )
+                return
+            # Trigger upstream rerun with validator feedback
+            self._validate_feedback_retries[step.id] = retry_count + 1
+            self._validation_feedback[step.validates] = (
+                feedback or reason
+                or "(no specific feedback supplied; review the rules and try again)"
+            )
+            with self._lock:
+                # Reset upstream so DAG loop re-runs it
+                self._step_status[step.validates] = "pending"
+                self._step_outputs.pop(step.validates, None)
+                self._step_errors.pop(step.validates, None)
+                # Reset this validate step too so it runs after upstream finishes
+                self._step_status[step.id] = "pending"
+                self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
+                if self._output_file_locks.get(step.resolved_filename) == step.id:
+                    del self._output_file_locks[step.resolved_filename]
+                # Release upstream's lock too
+                up_fname = upstream.resolved_filename
+                if self._output_file_locks.get(up_fname) == step.validates:
+                    del self._output_file_locks[up_fname]
+            logger.info(
+                "Pipeline %s: validate %s requested feedback retry of %s — "
+                "upstream rerun with feedback queued",
+                self.task.name, step.id, step.validates,
+            )
+            return
+
+        # Default on_failure=fail (or unknown — log + fail)
+        self._record_step_failure(
+            step, attempt,
+            f"validate failed: {reason or 'no reason given'}",
         )
 
     def _execute_publish_step(self, step: PipelineStep, data_dir: Path) -> None:
@@ -6702,7 +6869,51 @@ class PipelineExecutor:
             "",
         ])
 
-        return "\n".join(prefix_lines) + step.prompt
+        suffix_lines: List[str] = []
+
+        # Pipeline v2: append validator feedback when the upstream step was
+        # rerun by a `validate` step with on_failure=feedback. The feedback
+        # text comes from the validator's status report (commit 5).
+        feedback = self._validation_feedback.get(step.id) if PIPELINE_V2_ENABLED else None
+        if feedback:
+            suffix_lines.extend([
+                "",
+                "---",
+                "",
+                "## Validation feedback from previous attempt",
+                "",
+                "A validator step rejected the previous output of this step "
+                "with the following feedback. Address it explicitly in this "
+                "retry:",
+                "",
+                feedback,
+                "",
+            ])
+
+        # Pipeline v2: append per-step runtime overrides (from /run --overrides
+        # or agent NL parser). LLM steps see them as a structured section;
+        # script/validate/publish steps already get them as STEP_OVERRIDE_* env.
+        if (PIPELINE_V2_ENABLED
+                and self.task.pipeline_version >= 2
+                and self.applied_overrides):
+            merged = _merge_overrides_for_step(step, self.applied_overrides)
+            if merged:
+                suffix_lines.extend([
+                    "",
+                    "---",
+                    "",
+                    "## Overrides for this run",
+                    "",
+                    "The caller supplied the following per-step overrides for "
+                    "this run. Treat them as strong constraints:",
+                    "",
+                    "```json",
+                    json.dumps(merged, indent=2, ensure_ascii=False),
+                    "```",
+                    "",
+                ])
+
+        return "\n".join(prefix_lines) + step.prompt + "\n".join(suffix_lines)
 
     def _cascade_skip(self, failed_id: str) -> None:
         """Recursively mark all transitive dependents of a failed step as skipped."""
