@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.59.5"  # ux: pipeline skip-cascade message uses agent's icon (not generic 🔗), label "Skipped" with ⏭️ instead of "Early-exit" with ⚡, drop redundant "silent finish" tagline (the emoji + label already say it)
+BOT_VERSION = "3.60.0"  # feat: streaming UX — tool calls (Bash/Read/Edit/…) moved into the Reasoning toggle so they no longer pollute the main message; per-tool emojis (⚙️ Bash, 📖 Read, ✏️ Edit, 🔎 Grep, 🌐 WebFetch, …) replace the generic 🔧. Also: Stop button acks before runner.cancel() so the Telegram spinner doesn't hang during the 3-5s SIGINT→TERM→KILL escalation; Reasoning toggle acks in parallel with edit_message
 
 import hmac
 import hashlib
@@ -824,6 +824,26 @@ _TOOL_ACTIVITY_MAP = {
     "Bash": "running_script",
     "Write": "editing", "Edit": "editing",
     "NotebookEdit": "editing", "TodoWrite": "editing",
+}
+
+# Per-tool emoji shown in tool log entries. Distinct icons make scanning the
+# reasoning block easier than the previous one-size-fits-all 🔧. Unknown tools
+# fall back to the generic 🔧.
+_TOOL_EMOJIS = {
+    "Bash": "⚙️",
+    "Read": "📖",
+    "Write": "📝",
+    "Edit": "✏️",
+    "MultiEdit": "✏️",
+    "NotebookEdit": "📓",
+    "Glob": "🗂️",
+    "Grep": "🔎",
+    "WebFetch": "🌐",
+    "WebSearch": "🔍",
+    "Task": "🤖",
+    "TodoWrite": "☑️",
+    "MCP": "🔌",
+    "LSP": "📍",
 }
 
 # Activity type → Telegram sendChatAction value
@@ -5368,7 +5388,8 @@ class ClaudeRunner:
                                 else:
                                     hint = val[:60] + ("…" if len(val) > 60 else "")
                                 break
-                    entry = f"🔧 {tool_name}" + (f": `{hint}`" if hint else "")
+                    emoji = _TOOL_EMOJIS.get(tool_name, "🔧")
+                    entry = f"{emoji} {tool_name}" + (f": `{hint}`" if hint else "")
                     with self._lock:
                         self.tool_log.append(entry)
                         if len(self.tool_log) > 200:
@@ -5436,17 +5457,18 @@ class ClaudeRunner:
             return False
 
     def get_snapshot(self) -> str:
+        # Returns ONLY accumulated_text. Tool log is kept separate so the
+        # streaming message stays clean by default — tool activity surfaces
+        # via get_tool_log_snapshot() and only appears when the user toggles
+        # the Reasoning button.
         with self._lock:
-            if self.accumulated_text:
-                # Show last 5 tool calls + text so far
-                if self.tool_log:
-                    recent_tools = "\n".join(self.tool_log[-5:])
-                    return f"{recent_tools}\n\n{self.accumulated_text}"
-                return self.accumulated_text
-            elif self.tool_log:
-                # No text yet — show tool activity
-                return "\n".join(self.tool_log[-10:])
-            return ""
+            return self.accumulated_text
+
+    def get_tool_log_snapshot(self, max_entries: int = 10) -> str:
+        with self._lock:
+            if not self.tool_log:
+                return ""
+            return "\n".join(self.tool_log[-max_entries:])
 
     def get_thinking_snapshot(self, max_chars: int = 1500) -> str:
         with self._lock:
@@ -5781,7 +5803,8 @@ class CodexRunner:
                 elif itype == "mcp_tool_call":
                     hint = item.get("name", "") or item.get("tool", "")
                     tool_name = "MCP"
-                entry = f"🔧 {tool_name}" + (f": `{hint}`" if hint else "")
+                emoji = _TOOL_EMOJIS.get(tool_name, "🔧")
+                entry = f"{emoji} {tool_name}" + (f": `{hint}`" if hint else "")
                 with self._lock:
                     self.tool_log.append(entry)
                     if len(self.tool_log) > 200:
@@ -5867,15 +5890,16 @@ class CodexRunner:
         return False
 
     def get_snapshot(self) -> str:
+        # See ClaudeRunner.get_snapshot — tool log lives in get_tool_log_snapshot
+        # so the main streaming message only shows the model's reply text.
         with self._lock:
-            if self.accumulated_text:
-                if self.tool_log:
-                    recent_tools = "\n".join(self.tool_log[-5:])
-                    return f"{recent_tools}\n\n{self.accumulated_text}"
-                return self.accumulated_text
-            elif self.tool_log:
-                return "\n".join(self.tool_log[-10:])
-            return ""
+            return self.accumulated_text
+
+    def get_tool_log_snapshot(self, max_entries: int = 10) -> str:
+        with self._lock:
+            if not self.tool_log:
+                return ""
+            return "\n".join(self.tool_log[-max_entries:])
 
     def get_thinking_snapshot(self, max_chars: int = 1500) -> str:
         with self._lock:
@@ -6094,6 +6118,7 @@ class ThreadContext:
     last_typing_time: float = 0.0
     last_snapshot_len: int = 0
     _last_thinking_len: int = 0
+    _last_tool_log_len: int = 0
     tts_enabled: bool = False
     _auto_agent: Optional[str] = None  # agent ID set by auto-routing (None = manual or unset)
     _manual_override: bool = False  # True when user explicitly switched agent in this context
@@ -6448,9 +6473,13 @@ class PipelineExecutor:
                 pipeline_entry = data.setdefault(self.task.name, {})
                 with runner._lock:
                     activity_type = runner.activity_type or "thinking"
-                    # Get last 3 tool entries, strip emoji prefix
+                    # Get last 3 tool entries, strip the leading emoji + space.
+                    # Entries are stored as "<emoji> Bash: cmd" — emoji varies
+                    # per tool now (⚙️ 📖 ✏️ etc.), so split on first space
+                    # rather than replacing a hardcoded "🔧 ".
                     raw_tools = runner.tool_log[-3:] if runner.tool_log else []
-                    tools = [t.replace("🔧 ", "") for t in raw_tools]
+                    tools = [t.split(" ", 1)[1] if " " in t else t
+                             for t in raw_tools]
                     detail = tools[-1] if tools else ""
                 pipeline_entry[step_id] = {
                     "activity_type": activity_type,
@@ -13647,9 +13676,20 @@ class ClaudeTelegramBot:
         parts: List[str] = []
         reasoning_chars = 0
         if show_reasoning:
+            # Reasoning section bundles tool log + thinking. Tool log first
+            # (tool calls are usually what users want to see; thinking is
+            # supplementary). Both are quoted so the toggle visually separates
+            # the inner model activity from the actual reply.
             thinking = runner.get_thinking_snapshot(max_chars=1500)
+            tool_log = runner.get_tool_log_snapshot(max_entries=10)
+            reasoning_parts: List[str] = []
+            if tool_log:
+                reasoning_parts.append(tool_log)
             if thinking:
-                quoted = "\n".join(f"> {line}" for line in thinking.split("\n"))
+                reasoning_parts.append(thinking)
+            if reasoning_parts:
+                reasoning_text = "\n\n".join(reasoning_parts)
+                quoted = "\n".join(f"> {line}" for line in reasoning_text.split("\n"))
                 reasoning_block = f"> 🧠 *Reasoning:*\n{quoted}"
                 parts.append(reasoning_block)
                 reasoning_chars = len(reasoning_block) + 4  # +4 for separator
@@ -13707,19 +13747,26 @@ class ClaudeTelegramBot:
                 markup = self._reasoning_button_markup(stream_msg)
                 thinking_len = len(runner.accumulated_thinking) if reasoning_on else 0
                 thinking_changed = reasoning_on and thinking_len > (ctx._last_thinking_len if ctx else 0)
+                # Tool log changes only trigger re-edits when reasoning is ON.
+                # When OFF, tool calls are hidden so there's no visible reason
+                # to redraw the message — keeps the chat clean during long
+                # tool-heavy turns.
+                tool_log_len = len(runner.tool_log) if reasoning_on else 0
+                tool_log_changed = reasoning_on and tool_log_len > (ctx._last_tool_log_len if ctx else 0)
 
                 if has_new and not _first_output_notified:
                     _first_output_notified = True
                     logger.info("First output received from Claude")
 
-                if (has_new or thinking_changed) and now - last_edit >= STREAM_EDIT_INTERVAL:
+                if (has_new or thinking_changed or tool_log_changed) and now - last_edit >= STREAM_EDIT_INTERVAL:
                     display = self._build_stream_display(snapshot, runner, stream_msg, elapsed, reasoning_on)
-                    if len(snapshot) >= len(_last_sent_text) or thinking_changed:
+                    if len(snapshot) >= len(_last_sent_text) or thinking_changed or tool_log_changed:
                         self.edit_message(stream_msg, display, reply_markup=markup)
                         if ctx:
                             ctx.last_edit_time = now
                             ctx.last_snapshot_len = len(snapshot)
                             ctx._last_thinking_len = thinking_len
+                            ctx._last_tool_log_len = tool_log_len
                         _last_sent_text = snapshot
 
                 elif now - _last_checkin >= _checkin_interval:
@@ -13917,6 +13964,7 @@ class ClaudeTelegramBot:
         if ctx:
             ctx.stream_msg_id = None
             ctx._last_thinking_len = 0
+            ctx._last_tool_log_len = 0
             if ctx.user_msg_id:
                 self.set_reaction(ctx.user_msg_id, "")
                 ctx.user_msg_id = None
@@ -14312,7 +14360,14 @@ class ClaudeTelegramBot:
             if msg_id and msg_id in self._reasoning_toggles:
                 new_state = not self._reasoning_toggles[msg_id]
                 self._reasoning_toggles[msg_id] = new_state
-                self.answer_callback(cb_id, "🧠 ON" if new_state else "🧠 OFF")
+                # Fire ack in parallel with the edit — both are independent
+                # Telegram round-trips (~500ms each), so running them
+                # sequentially doubled the perceived button latency.
+                threading.Thread(
+                    target=self.answer_callback,
+                    args=(cb_id, "🧠 ON" if new_state else "🧠 OFF"),
+                    daemon=True,
+                ).start()
                 markup = self._reasoning_button_markup(msg_id)
                 runner = self.runner
                 if runner and runner.running:
@@ -14329,6 +14384,8 @@ class ClaudeTelegramBot:
                         ctx.last_snapshot_len = len(snapshot)
                         ctx._last_thinking_len = (
                             len(runner.accumulated_thinking) if new_state else 0)
+                        ctx._last_tool_log_len = (
+                            len(runner.tool_log) if new_state else 0)
                 else:
                     # Runner finished — just update the button label
                     msg_text = msg.get("text", "")
@@ -14340,12 +14397,13 @@ class ClaudeTelegramBot:
 
         # Stop button during streaming: cancel the running task
         if data == "reasoning:stop":
-            msg = callback.get("message", {})
-            msg_id = msg.get("message_id")
             runner = self.runner
             if runner and runner.running:
-                runner.cancel()
-                self.answer_callback(cb_id, "🛑 Cancelado")
+                # Ack first — runner.cancel() blocks up to 5s during the
+                # SIGINT→SIGTERM→SIGKILL escalation (time.sleep(3)+time.sleep(2)),
+                # which would freeze the Telegram spinner on the user's side.
+                self.answer_callback(cb_id, "🛑 Cancelando...")
+                threading.Thread(target=runner.cancel, daemon=True).start()
             else:
                 self.answer_callback(cb_id, "Nenhum processo")
             return
