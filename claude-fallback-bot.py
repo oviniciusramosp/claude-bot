@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.59.3"  # fix: _inject_temp_parent_link skips non-markdown outputs (JSON/CSV would be corrupted by the wikilink); caught while running palmeiras-feed-v2 — scout writes scout.json which collect parses, link injection broke json.loads()
+BOT_VERSION = "3.59.4"  # fix: pipeline v2 validate/publish steps auto-infer depends_on from validates:/publishes: (without this the DAG scheduled validate before writer finished, causing premature target-missing failures); caught running palmeiras-feed-v2
 
 import hmac
 import hashlib
@@ -6160,6 +6160,16 @@ class PipelineExecutor:
         self._activity_lock = threading.Lock()
         self._cancelled = threading.Event()
         self._steps_by_id: Dict[str, PipelineStep] = {s.id: s for s in task.steps}
+        # Pipeline v2: validate.validates and publish.publishes are SEMANTIC
+        # references that ALSO imply a DAG dependency. Without inferring the
+        # dep, the DAG loop schedules the validate/publish step before its
+        # target finishes. Mutates step.depends_on in place; idempotent because
+        # we only append when missing.
+        for _step in task.steps:
+            for ref in (getattr(_step, "validates", None),
+                        getattr(_step, "publishes", None)):
+                if ref and ref in self._steps_by_id and ref not in _step.depends_on:
+                    _step.depends_on.append(ref)
         self._bot = None  # set by _enqueue_pipeline if available
         self._step_timestamps: Dict[str, Dict[str, float]] = {}  # step_id → {"start": epoch, "end": epoch}
         self._progress_msg_id: Optional[int] = None  # Telegram message ID for live progress
