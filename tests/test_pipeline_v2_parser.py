@@ -297,5 +297,229 @@ steps:
         self.assertEqual(task.applied_overrides, {})
 
 
+class OverrideValidationTests(unittest.TestCase):
+    """validate_overrides() + helpers (Commit 2 of Phase 1).
+
+    Tests the runtime override validator that will be called by /run --overrides
+    and the agent NL parser in Commit 9.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pv2-overrides-"))
+        cls.bot = load_bot_module(tmp_home=cls.tmp)
+        ensure_agent_layout(cls.bot.VAULT_DIR, "main")
+        cls.routines = cls.bot.VAULT_DIR / "main" / "Routines"
+        cls.routines.mkdir(parents=True, exist_ok=True)
+
+    def _build_task_with_schema(self, schema_yaml: str, name="ovr-test"):
+        body = (
+            "```pipeline\n"
+            "steps:\n"
+            "  - id: analyst\n"
+            "    name: Analyst\n"
+            "    model: sonnet\n"
+            "    prompt: do analysis\n"
+            f"{schema_yaml}"
+            "  - id: writer\n"
+            "    name: Writer\n"
+            "    model: sonnet\n"
+            "    prompt: do writing\n"
+            "```"
+        )
+        md_file = self.routines / f"{name}.md"
+        md_file.write_text("---\nfoo: bar\n---\n" + body, encoding="utf-8")
+        return self.bot._parse_pipeline_task(md_file, {}, body, name, "sonnet", "00:00")
+
+    def test_empty_overrides_returns_defaults_only(self):
+        schema = (
+            "    accepts_overrides:\n"
+            "      focus_asset:\n"
+            "        type: string\n"
+            "        default: BTC\n"
+        )
+        task = self._build_task_with_schema(schema)
+        result = self.bot.validate_overrides(task, None)
+        self.assertEqual(result, {"analyst": {"focus_asset": "BTC"}})
+
+    def test_none_overrides_returns_defaults(self):
+        schema = (
+            "    accepts_overrides:\n"
+            "      depth:\n"
+            "        type: string\n"
+            "        default: normal\n"
+        )
+        task = self._build_task_with_schema(schema)
+        self.assertEqual(self.bot.validate_overrides(task, None),
+                         {"analyst": {"depth": "normal"}})
+
+    def test_user_override_replaces_default(self):
+        schema = (
+            "    accepts_overrides:\n"
+            "      focus_asset:\n"
+            "        type: string\n"
+            "        default: BTC\n"
+        )
+        task = self._build_task_with_schema(schema)
+        result = self.bot.validate_overrides(task, {"analyst": {"focus_asset": "ETH"}})
+        self.assertEqual(result, {"analyst": {"focus_asset": "ETH"}})
+
+    def test_per_step_isolation_q2(self):
+        """Q2: defaults from one step do NOT propagate to another step.
+
+        Even if step.writer has no `focus_asset` schema, it must not inherit
+        analyst's `focus_asset` value.
+        """
+        schema = (
+            "    accepts_overrides:\n"
+            "      focus_asset:\n"
+            "        type: string\n"
+            "        default: BTC\n"
+        )
+        task = self._build_task_with_schema(schema)
+        result = self.bot.validate_overrides(task, {"analyst": {"focus_asset": "ETH"}})
+        # writer is absent from result (no schema, no overrides)
+        self.assertNotIn("writer", result)
+
+    def test_unknown_step_id_raises(self):
+        schema = "    accepts_overrides:\n      x:\n        type: string\n"
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"bogus_step": {"x": "y"}})
+        self.assertIn("unknown step id", str(cm.exception))
+        self.assertIn("bogus_step", str(cm.exception))
+
+    def test_unknown_attr_raises(self):
+        schema = "    accepts_overrides:\n      focus_asset:\n        type: string\n"
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"analyst": {"unknown_attr": "x"}})
+        self.assertIn("unknown_attr", str(cm.exception))
+        self.assertIn("not in", str(cm.exception).lower())
+
+    def test_wrong_type_string_vs_integer_raises(self):
+        schema = (
+            "    accepts_overrides:\n"
+            "      retries:\n"
+            "        type: integer\n"
+        )
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"analyst": {"retries": "not-a-number"}})
+        self.assertIn("expected type", str(cm.exception))
+        self.assertIn("integer", str(cm.exception))
+
+    def test_enum_violation_raises(self):
+        schema = (
+            "    accepts_overrides:\n"
+            "      focus_asset:\n"
+            "        type: string\n"
+            "        enum: [BTC, ETH, SOL]\n"
+        )
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"analyst": {"focus_asset": "DOGE"}})
+        self.assertIn("not in enum", str(cm.exception))
+
+    def test_enum_accepts_valid_value(self):
+        schema = (
+            "    accepts_overrides:\n"
+            "      focus_asset:\n"
+            "        type: string\n"
+            "        enum: [BTC, ETH, SOL]\n"
+        )
+        task = self._build_task_with_schema(schema)
+        result = self.bot.validate_overrides(task, {"analyst": {"focus_asset": "ETH"}})
+        self.assertEqual(result["analyst"]["focus_asset"], "ETH")
+
+    def test_oversized_string_rejected(self):
+        schema = "    accepts_overrides:\n      blob:\n        type: string\n"
+        task = self._build_task_with_schema(schema)
+        huge = "x" * 5000
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"analyst": {"blob": huge}})
+        self.assertIn("too long", str(cm.exception))
+
+    def test_nan_rejected(self):
+        schema = "    accepts_overrides:\n      ratio:\n        type: number\n"
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"analyst": {"ratio": float("nan")}})
+        self.assertIn("NaN", str(cm.exception))
+
+    def test_infinity_rejected(self):
+        schema = "    accepts_overrides:\n      ratio:\n        type: number\n"
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError) as cm:
+            self.bot.validate_overrides(task, {"analyst": {"ratio": float("inf")}})
+        self.assertIn("Infinity", str(cm.exception))
+
+    def test_overrides_must_be_dict(self):
+        schema = "    accepts_overrides:\n      x:\n        type: string\n"
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError):
+            self.bot.validate_overrides(task, "not a dict")
+
+    def test_step_overrides_must_be_dict(self):
+        schema = "    accepts_overrides:\n      x:\n        type: string\n"
+        task = self._build_task_with_schema(schema)
+        with self.assertRaises(self.bot.OverrideValidationError):
+            self.bot.validate_overrides(task, {"analyst": "not-a-dict"})
+
+
+class OverrideHelpersTests(unittest.TestCase):
+    """_merge_overrides_for_step and _overrides_to_env_vars."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = Path(tempfile.mkdtemp(prefix="pv2-helpers-"))
+        cls.bot = load_bot_module(tmp_home=cls.tmp)
+
+    def _make_step(self, sid="foo"):
+        return self.bot.PipelineStep(id=sid, name=sid, model="sonnet", prompt="x")
+
+    def test_merge_returns_empty_when_no_overrides(self):
+        step = self._make_step()
+        self.assertEqual(self.bot._merge_overrides_for_step(step, None), {})
+        self.assertEqual(self.bot._merge_overrides_for_step(step, {}), {})
+
+    def test_merge_returns_step_dict(self):
+        step = self._make_step("analyst")
+        applied = {"analyst": {"focus_asset": "ETH"}, "writer": {"x": 1}}
+        self.assertEqual(self.bot._merge_overrides_for_step(step, applied),
+                         {"focus_asset": "ETH"})
+
+    def test_merge_returns_empty_for_step_not_in_overrides(self):
+        step = self._make_step("absent")
+        applied = {"analyst": {"focus_asset": "ETH"}}
+        self.assertEqual(self.bot._merge_overrides_for_step(step, applied), {})
+
+    def test_env_vars_string_unquoted(self):
+        env = self.bot._overrides_to_env_vars({"focus_asset": "ETH"})
+        self.assertEqual(env, {"STEP_OVERRIDE_FOCUS_ASSET": "ETH"})
+
+    def test_env_vars_boolean_lowercase(self):
+        env = self.bot._overrides_to_env_vars({"verbose": True, "dry_run": False})
+        self.assertEqual(env["STEP_OVERRIDE_VERBOSE"], "true")
+        self.assertEqual(env["STEP_OVERRIDE_DRY_RUN"], "false")
+
+    def test_env_vars_integer_json_encoded(self):
+        env = self.bot._overrides_to_env_vars({"max_retries": 5})
+        self.assertEqual(env["STEP_OVERRIDE_MAX_RETRIES"], "5")
+
+    def test_env_vars_array_json_encoded(self):
+        env = self.bot._overrides_to_env_vars({"assets": ["BTC", "ETH"]})
+        self.assertEqual(env["STEP_OVERRIDE_ASSETS"], '["BTC", "ETH"]')
+
+    def test_env_vars_object_json_encoded(self):
+        env = self.bot._overrides_to_env_vars({"config": {"k": "v"}})
+        self.assertEqual(env["STEP_OVERRIDE_CONFIG"], '{"k": "v"}')
+
+    def test_env_vars_attr_uppercased(self):
+        env = self.bot._overrides_to_env_vars({"focus_asset": "ETH"})
+        self.assertIn("STEP_OVERRIDE_FOCUS_ASSET", env)
+        self.assertNotIn("STEP_OVERRIDE_focus_asset", env)
+
+
 if __name__ == "__main__":
     unittest.main()

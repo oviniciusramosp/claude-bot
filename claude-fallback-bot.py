@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.55.0"  # feat: pipeline v2 scaffolding — StepType enum, type/accepts_overrides/command/validates/publishes/sink fields, pipeline_version frontmatter, PIPELINE_V2_ENABLED flag (additive, zero behavior change without flag + opt-in)
+BOT_VERSION = "3.55.1"  # feat: pipeline v2 override schema validators — validate_overrides, _merge_overrides_for_step, _overrides_to_env_vars, OverrideValidationError; standalone helpers, not wired into executor yet (commits 4-9)
 
 import hmac
 import hashlib
@@ -2212,9 +2212,9 @@ def _parse_overrides_schema(raw: Any) -> dict:
     """Pass-through parser for the `accepts_overrides` YAML field on a step.
 
     In Phase 1 (v3.55) this just normalizes to a dict — the actual schema
-    validation against runtime overrides lives in `validate_overrides()`
-    (commit 2). Returns {} when the field is missing or not a dict (with a
-    warning for the invalid case).
+    validation against runtime overrides lives in `validate_overrides()`.
+    Returns {} when the field is missing or not a dict (with a warning for
+    the invalid case).
     """
     if raw is None:
         return {}
@@ -2225,6 +2225,212 @@ def _parse_overrides_schema(raw: Any) -> dict:
         )
         return {}
     return dict(raw)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline v2 — runtime override validation (v3.55.1+)
+# ---------------------------------------------------------------------------
+# Overrides are runtime parameters supplied to a pipeline by its caller
+# (agent NL trigger, /run --overrides '...', etc). Each step's
+# accepts_overrides schema declares which attributes it accepts and their
+# expected types. validate_overrides() type-checks the supplied dict and
+# fills declared defaults, raising OverrideValidationError on any violation.
+#
+# These helpers are NOT yet wired into the executor (that lands in commits
+# 4-9). They're committed standalone so other layers (the agent NL parser,
+# the slash-command handler) can import them in subsequent commits without
+# re-architecting the executor.
+#
+# Per-step ISOLATION is enforced (Q2): defaults declared by step A do NOT
+# propagate to step B even if both declare the same attr name. Each step
+# carries only its own resolved override dict.
+
+_MAX_STRING_OVERRIDE_LEN = 4096  # 4 KB — guard against prompt-injection-via-override
+
+
+class OverrideValidationError(ValueError):
+    """Raised when a runtime override fails validation against the step's
+    accepts_overrides schema (Pipeline v2)."""
+
+
+def _validate_override_value(step_id: str, attr_name: str, val: Any, schema: Dict) -> None:
+    """Type-check + enum-check + bounds-check a single override value.
+
+    Raises OverrideValidationError on violation. Type names follow JSON
+    Schema conventions (string, integer, number, boolean, array, object).
+    Unknown type names default to permissive (no type check).
+    """
+    if not isinstance(schema, dict):
+        # Malformed schema; parser already warned. Treat as anything-goes.
+        return
+    expected_type = schema.get("type", "string")
+    type_checks = {
+        "string": lambda v: isinstance(v, str),
+        "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+        "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+        "boolean": lambda v: isinstance(v, bool),
+        "array": lambda v: isinstance(v, list),
+        "object": lambda v: isinstance(v, dict),
+    }
+    check_fn = type_checks.get(expected_type, lambda v: True)
+    if not check_fn(val):
+        raise OverrideValidationError(
+            f"step {step_id!r} attribute {attr_name!r}: expected type "
+            f"{expected_type!r}, got {type(val).__name__}"
+        )
+    # Bounds: oversized strings (prompt-injection guard)
+    if isinstance(val, str) and len(val) > _MAX_STRING_OVERRIDE_LEN:
+        raise OverrideValidationError(
+            f"step {step_id!r} attribute {attr_name!r}: string too long "
+            f"({len(val)} > {_MAX_STRING_OVERRIDE_LEN})"
+        )
+    # Bounds: reject NaN / Infinity (would serialize ambiguously)
+    if isinstance(val, float):
+        if val != val:  # NaN never equals itself
+            raise OverrideValidationError(
+                f"step {step_id!r} attribute {attr_name!r}: NaN not allowed"
+            )
+        if val == float("inf") or val == float("-inf"):
+            raise OverrideValidationError(
+                f"step {step_id!r} attribute {attr_name!r}: Infinity not allowed"
+            )
+    # Enum membership
+    if "enum" in schema:
+        allowed = schema["enum"]
+        if isinstance(allowed, list) and val not in allowed:
+            raise OverrideValidationError(
+                f"step {step_id!r} attribute {attr_name!r}: value {val!r} "
+                f"not in enum {allowed}"
+            )
+
+
+def _apply_default_overrides(task: "PipelineTask") -> Dict[str, Dict]:
+    """Return per-step override dict containing only schema-declared defaults.
+
+    Used when the caller supplies no overrides — defaults still flow through
+    so steps see the values they declared as defaults. Per Q2, defaults are
+    per-step (no cross-step inheritance).
+    """
+    result: Dict[str, Dict] = {}
+    for step in task.steps:
+        schema = step.accepts_overrides or {}
+        if not schema:
+            continue
+        defaults: Dict[str, Any] = {}
+        for attr_name, attr_schema in schema.items():
+            if isinstance(attr_schema, dict) and "default" in attr_schema:
+                defaults[attr_name] = attr_schema["default"]
+        if defaults:
+            result[step.id] = defaults
+    return result
+
+
+def validate_overrides(task: "PipelineTask", overrides: Optional[Dict]) -> Dict:
+    """Validate runtime overrides against each step's accepts_overrides schema.
+
+    Args:
+        task: PipelineTask whose steps may declare accepts_overrides.
+        overrides: ``{step_id: {attr_name: value}}`` from the caller (agent
+            NL parser, /run --overrides JSON, etc). May be None or empty.
+
+    Returns:
+        Normalized ``{step_id: {attr_name: value}}`` with per-step defaults
+        applied. Per-step isolation (Q2) — declared defaults do NOT propagate
+        across steps.
+
+    Raises:
+        OverrideValidationError on any schema violation (unknown step id,
+        unknown attr, wrong type, enum miss, oversized string, NaN/Infinity).
+        The error message names the offending step_id and attr_name so the
+        caller can surface a friendly response to the user.
+    """
+    if overrides is None or not overrides:
+        return _apply_default_overrides(task)
+    if not isinstance(overrides, dict):
+        raise OverrideValidationError(
+            f"overrides must be a dict, got {type(overrides).__name__}"
+        )
+
+    step_ids: Dict[str, "PipelineStep"] = {s.id: s for s in task.steps}
+    normalized: Dict[str, Dict] = {}
+
+    # Validate every supplied override
+    for step_id, attrs in overrides.items():
+        if step_id not in step_ids:
+            raise OverrideValidationError(
+                f"unknown step id {step_id!r} in overrides "
+                f"(valid: {sorted(step_ids.keys())})"
+            )
+        if not isinstance(attrs, dict):
+            raise OverrideValidationError(
+                f"step {step_id!r} overrides must be a dict, got "
+                f"{type(attrs).__name__}"
+            )
+        step = step_ids[step_id]
+        schema = step.accepts_overrides or {}
+        normalized_attrs: Dict[str, Any] = {}
+        for attr_name, val in attrs.items():
+            if attr_name not in schema:
+                raise OverrideValidationError(
+                    f"step {step_id!r}: attribute {attr_name!r} is not in "
+                    f"accepts_overrides schema "
+                    f"(valid: {sorted(schema.keys())})"
+                )
+            attr_schema = schema[attr_name]
+            _validate_override_value(step_id, attr_name, val, attr_schema)
+            normalized_attrs[attr_name] = val
+        normalized[step_id] = normalized_attrs
+
+    # Apply per-step defaults for any attr the caller did not supply (Q2 isolation)
+    for step in task.steps:
+        schema = step.accepts_overrides or {}
+        if not schema:
+            continue
+        step_attrs = normalized.setdefault(step.id, {})
+        for attr_name, attr_schema in schema.items():
+            if attr_name in step_attrs:
+                continue
+            if isinstance(attr_schema, dict) and "default" in attr_schema:
+                step_attrs[attr_name] = attr_schema["default"]
+        if not step_attrs:
+            # Don't keep empty dicts in the normalized output
+            normalized.pop(step.id, None)
+
+    return normalized
+
+
+def _merge_overrides_for_step(step: "PipelineStep", applied_overrides: Optional[Dict]) -> Dict:
+    """Return the per-step override dict (may be empty) for executor handlers.
+
+    `applied_overrides` is `task.applied_overrides` (already normalized via
+    validate_overrides). This is a one-line helper but lives here so the
+    executor handlers (commits 4-6) don't have to re-implement the lookup.
+    """
+    if not applied_overrides:
+        return {}
+    return applied_overrides.get(step.id, {})
+
+
+def _overrides_to_env_vars(merged: Dict) -> Dict[str, str]:
+    """Convert a step's resolved override dict to STEP_OVERRIDE_* env vars.
+
+    Strings pass through raw. Booleans become lowercase "true"/"false".
+    Numbers and other JSON-serializable types are JSON-encoded so the script
+    on the other end can json.loads them deterministically. Used by script,
+    validate, and publish step handlers (Pipeline v2 commits 4-6).
+    """
+    env: Dict[str, str] = {}
+    if not merged:
+        return env
+    for attr_name, val in merged.items():
+        env_key = f"STEP_OVERRIDE_{attr_name.upper()}"
+        if isinstance(val, str):
+            env[env_key] = val
+        elif isinstance(val, bool):
+            env[env_key] = "true" if val else "false"
+        else:
+            env[env_key] = json.dumps(val)
+    return env
 
 
 def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
