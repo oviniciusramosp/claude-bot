@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.57.0"  # feat: pipeline v2 publish step + sink registry — PIPELINE_V2_SINKS dict + register_sink decorator + built-in telegram/file/notion sinks; 3-condition gate enforces structural Telegram leak prevention (declared sink + status=ready + content from output_file); idempotency tracked per (run_id, sink, step) in _publish_history
+BOT_VERSION = "3.57.1"  # feat: pipeline v2 PipelineDisplayStatus enum + compute_display_status() + additive routines-state JSON fields (display_status, publish_emitted) — single source of truth for Idle/Scheduled/Running/Success/Failed/Skipped, mirrored to Swift+JS in Phase 2
 
 import hmac
 import hashlib
@@ -1247,6 +1247,102 @@ def _is_no_reply_output(text: Optional[str]) -> bool:
     return normalized == "NOREPLY"
 
 
+class PipelineDisplayStatus(str, Enum):
+    """Display-level status for a pipeline (Pipeline v2 spec § 5).
+
+    The bot's UI surfaces (Telegram /status, ClaudeBotManager dashboard,
+    web dashboard) all render this enum. SINGLE SOURCE OF TRUTH lives here
+    in Python; Swift and JS mirror these exact string values via parity
+    tests (Phase 2). Values are capitalized for direct UI rendering.
+
+    Priority order (compute_display_status returns the highest-priority
+    state that applies):
+        Running > Failed > Success > Skipped > Scheduled > Idle
+    """
+    IDLE = "Idle"            # No run today, no future schedule today
+    SCHEDULED = "Scheduled"  # Has a scheduled fire later today
+    RUNNING = "Running"      # Executor is currently running this pipeline
+    SUCCESS = "Success"      # Last run completed AND emitted to a sink
+    FAILED = "Failed"        # Last run failed or was cancelled
+    SKIPPED = "Skipped"      # Last run completed but emitted nothing (NO_REPLY cascade reached the sink)
+
+
+def _has_future_fire_today(schedule: Optional[Dict], now: float) -> bool:
+    """Return True if the pipeline has at least one schedule fire later today.
+
+    Conservative: returns True for ``schedule.interval`` configs (we'd need
+    last-fired tracking to be precise, but "scheduled" is a reasonable default
+    for periodic pipelines that aren't currently running).
+    """
+    if not schedule or not isinstance(schedule, dict):
+        return False
+    times = schedule.get("times") or []
+    if isinstance(times, list):
+        now_struct = time.localtime(now)
+        for t in times:
+            try:
+                hh, mm = str(t).split(":")
+                if (int(hh), int(mm)) > (now_struct.tm_hour, now_struct.tm_min):
+                    return True
+            except (ValueError, AttributeError):
+                continue
+    if schedule.get("interval"):
+        return True
+    return False
+
+
+def compute_display_status(pipeline_id: str, today_state: Optional[Dict],
+                           schedule: Optional[Dict], now: float) -> str:
+    """Compute the display-level status string for a pipeline.
+
+    Args:
+        pipeline_id: Name of the pipeline (used for log context only).
+        today_state: dict of ``{time_slot: {status, finished_at, publish_emitted, ...}}``
+            from ``routines-state/YYYY-MM-DD.json`` for this pipeline today.
+            None or empty → the pipeline didn't run today.
+        schedule: parsed frontmatter ``schedule`` dict (times/interval/etc).
+            None → no future fires expected.
+        now: current epoch seconds (float).
+
+    Returns:
+        One of PipelineDisplayStatus values (as string).
+    """
+    today_state = today_state or {}
+
+    # Highest priority: any time_slot currently running
+    for entry in today_state.values():
+        if isinstance(entry, dict) and entry.get("status") == "running":
+            return PipelineDisplayStatus.RUNNING.value
+
+    # Find the most-recently-finalized entry (sort by finished_at desc)
+    finalized: List[Tuple[str, Dict]] = []
+    for slot, entry in today_state.items():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") in ("completed", "failed", "skipped", "cancelled"):
+            finalized.append((entry.get("finished_at", ""), entry))
+    finalized.sort(key=lambda x: x[0], reverse=True)
+
+    if finalized:
+        recent = finalized[0][1]
+        st = recent.get("status")
+        publish_emitted = recent.get("publish_emitted")
+        if st in ("failed", "cancelled"):
+            return PipelineDisplayStatus.FAILED.value
+        if st == "skipped":
+            return PipelineDisplayStatus.SKIPPED.value
+        if st == "completed":
+            # Soft-success without sink emission → Skipped (no user-visible output)
+            if publish_emitted is False:
+                return PipelineDisplayStatus.SKIPPED.value
+            return PipelineDisplayStatus.SUCCESS.value
+
+    # No runs today — check schedule for future fires
+    if _has_future_fire_today(schedule, now):
+        return PipelineDisplayStatus.SCHEDULED.value
+    return PipelineDisplayStatus.IDLE.value
+
+
 class StepType(str, Enum):
     """Semantic type of a pipeline step (v3.55+, Pipeline v2).
 
@@ -1935,8 +2031,18 @@ class RoutineStateManager:
     def set_pipeline_status(self, name: str, time_slot: str, status: str,
                             steps_init: Optional[list] = None, error: Optional[str] = None,
                             workspace: Optional[str] = None,
-                            agent: Optional[str] = None, source_file: Optional[str] = None) -> None:
-        """Set pipeline-level status. steps_init can be list of ids or list of dicts with id+output_type."""
+                            agent: Optional[str] = None, source_file: Optional[str] = None,
+                            publish_emitted: Optional[bool] = None,
+                            display_status: Optional[str] = None) -> None:
+        """Set pipeline-level status. steps_init can be list of ids or list of dicts with id+output_type.
+
+        Pipeline v2 (v3.57+) additive fields:
+          publish_emitted: True if any publish step (or v1 telegram output)
+            successfully emitted to a sink during this run.
+          display_status: precomputed PipelineDisplayStatus value
+            (Idle/Scheduled/Running/Success/Failed/Skipped) so dashboards
+            don't need to re-derive.
+        """
         with self._lock:
             data = self._load()
             if name not in data:
@@ -1966,6 +2072,11 @@ class RoutineStateManager:
                     else:
                         steps[item] = {"status": "pending", "attempt": 0}
                 entry["steps"] = steps
+            # Pipeline v2 additive fields (v3.57+)
+            if publish_emitted is not None:
+                entry["publish_emitted"] = bool(publish_emitted)
+            if display_status is not None:
+                entry["display_status"] = str(display_status)
             data[name][time_slot] = entry
             self._save(data)
         # Outside the state lock — see set_status for rationale.
@@ -5827,7 +5938,11 @@ class PipelineExecutor:
             logger.error("Pipeline %s error: %s", self.task.name, exc)
             if checkpoint_ref:
                 vault_checkpoint_restore(checkpoint_ref)
-            self.state.set_pipeline_status(self.task.name, self.task.time_slot, "failed", error=str(exc)[:200])
+            self.state.set_pipeline_status(
+                self.task.name, self.task.time_slot, "failed", error=str(exc)[:200],
+                publish_emitted=False,
+                display_status=PipelineDisplayStatus.FAILED.value,
+            )
             self._finalize_progress(success=False, error=str(exc), elapsed=int(time.time() - start_time))
             _append_execution_report(
                 agent=self.task.agent, kind="pipeline", name=self.task.name,
@@ -5878,7 +5993,21 @@ class PipelineExecutor:
             final_status = "skipped" if (soft_success and output_skipped) else "completed"
             if checkpoint_ref:
                 vault_checkpoint_drop(checkpoint_ref)
-            self.state.set_pipeline_status(self.task.name, self.task.time_slot, final_status)
+            # Pipeline v2: emit precomputed display_status + publish_emitted
+            # so dashboards don't have to re-derive. v1 derives publish_emitted
+            # from the existing output_skipped heuristic.
+            if self.task.pipeline_version >= 2:
+                pipeline_publish_emitted = self._publish_emitted
+            else:
+                pipeline_publish_emitted = (final_status == "completed" and not output_skipped)
+            display_status = (PipelineDisplayStatus.SUCCESS.value
+                              if final_status == "completed" and pipeline_publish_emitted
+                              else PipelineDisplayStatus.SKIPPED.value)
+            self.state.set_pipeline_status(
+                self.task.name, self.task.time_slot, final_status,
+                publish_emitted=pipeline_publish_emitted,
+                display_status=display_status,
+            )
             self._finalize_progress(success=True, elapsed=elapsed)
             self._notify_success(elapsed)
             _append_execution_report(
@@ -5908,7 +6037,11 @@ class PipelineExecutor:
                 vault_checkpoint_restore(checkpoint_ref)
             elif checkpoint_ref:
                 vault_checkpoint_drop(checkpoint_ref)
-            self.state.set_pipeline_status(self.task.name, self.task.time_slot, status, error=err)
+            self.state.set_pipeline_status(
+                self.task.name, self.task.time_slot, status, error=err,
+                publish_emitted=False,
+                display_status=PipelineDisplayStatus.FAILED.value,
+            )
             self._finalize_progress(success=False, error=err, elapsed=elapsed)
             failed_step_name = None
             if failed_steps:
