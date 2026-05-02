@@ -692,3 +692,46 @@ These are points where the spec is intentionally vague, where competing reasonab
 **Q11. What is the Swift `PipelineDisplayStatus` decoded from?** The bot writes `~/.claude-bot/routines-state/YYYY-MM-DD.json` with the new fields (`publish_emitted`, `final_status`). Swift currently reads this file and synthesizes a status string. With the v2 enum, Swift could decode the status directly from a new field (`pipeline_display_status: "Success"`) instead of re-deriving. Recommendation: write the enum value into the JSON as `pipeline_display_status` AND keep the underlying state fields. Swift and JS consumers can either trust the precomputed value (simple path) or re-derive (defensive path). The CI parity test only locks the enum members, not the consumer logic, so both paths remain viable.
 
 **Q12. Is `version: 2` the right opt-in marker?** Alternatives: `pipeline_version`, `engine: v2`, a separate file extension. Recommendation: stick with `version: 2`. It's terse, common in YAML conventions, and aligns with the spec naming. Avoid magic strings in the `engine` field — that field today implies LLM provider (`engine: claude`) at the step level, and reusing it at the pipeline level would confuse readers.
+
+---
+
+## 13. Resolution log (2026-05-02 — Phase 1 implementation)
+
+The questions above were resolved during Phase 1 implementation. Phase 1 shipped 9 commits (BOT_VERSION 3.53.0 → 3.58.1) all behind `PIPELINE_V2_ENABLED` env var + per-pipeline `pipeline_version: 2` opt-in. The chosen options:
+
+| # | Decision | Where it lives |
+|---|---|---|
+| Q1 | `/ack <run_id>` slash command + auto-clear on successful re-run. Magic-string deferred. | `cmd_ack`, `_clear_pipeline_failures_for_pipeline` (commit 8 + 9) |
+| Q2 | Per-step isolation: each step's defaults stay scoped to that step. No cross-step inheritance. | `_apply_default_overrides`, `validate_overrides` (commit 2) |
+| Q3 | Opt-in only — no auto-insert of validate steps. Authors decide. | Doc in `vault/Skills/create-pipeline.md` |
+| Q4 | Per-pipeline `Routines/<name>/scripts/`. Mirrors the `steps/` pattern, keeps pipelines self-contained. | Doc in `create-pipeline` skill; lint check deferred |
+| Q5 | Forbidden — scripts are isolated subprocesses, no `claude-fallback-bot.py` import. | Subprocess boundary; not Python-enforced (lint deferred) |
+| Q6 | Soft guidance: prompts SHOULD treat the override section as the source of truth and remove ambient defaults. Documented in `create-pipeline`. | Doc only |
+| Q7 | LLM-step JSON-status-block stripping is **deferred** — Phase 1's `_execute_llm_step` is byte-identical to v1 and doesn't yet emit fenced JSON status reports. Reopen when LLM steps adopt the structured contract (likely Phase 4 alongside the TA migration). | Future work |
+| Q8 | N/A in Phase 1 — we don't synthesize publish steps from `output: telegram` yet. v1 path still uses `_notify_success` with the existing chat/thread routing. Reopen in Phase 4. | Future work |
+| Q9 | Hard timeout only for `script` steps (no inactivity timeout). Scripts are deterministic and non-conversational. | `_execute_script_step` (commit 4) |
+| Q10 | Separate `## pipeline_skip` block (not `## pipeline_failure`) for soft-fail. Recall section uses lighter "SKIPPED" wording. | `_format_pipeline_failure_block`, `_format_pipeline_failure_recall_section` (commit 8) |
+| Q11 | Precomputed `display_status` written into routines-state JSON (Python is source of truth). Swift+JS render directly without re-deriving. Parity test in Phase 2. | `compute_display_status`, `set_pipeline_status(display_status=…)` (commit 7) |
+| Q12 | **Renamed during impl: `engine: v2` → `pipeline_version: 2`** (because `PipelineStep.engine` already exists at step level for `claude`/`codex` runner choice — collision risk). | `_parse_pipeline_task` (commit 1) |
+
+### New questions surfaced during implementation
+
+| # | Decision | Where it lives |
+|---|---|---|
+| Q13 | Per-agent `threading.Lock` for `agent-temp.md` writes (in-process serialization) + atomic `.tmp + rename`. Phase 3 adds `fcntl.flock` for cross-process safety against concurrent Obsidian saves. | `_AGENT_TEMP_LOCKS`, `_get_agent_temp_lock`, `_atomic_write_text` (commit 8) |
+| Q14 | Both `PIPELINE_DATA_DIR` and `STEP_DATA_DIR` are set as aliases. `PIPELINE_DATA_DIR` is canonical; `STEP_DATA_DIR` is documented as convenience. | `_build_step_subprocess_env` (commit 4) |
+| Q15 | `step.engine` (runner choice: claude/codex) and `step.type` (semantic role: llm/script/etc) are orthogonal. Parser warns if `type: script` + non-default `engine` (engine is meaningless for non-LLM steps). | `_parse_pipeline_task` (commit 1) |
+
+### Phase 1 sub-commit map
+
+| # | Title | Version | Files added |
+|---|---|---|---|
+| 1 | scaffolding + Phase 0 spec + macOS leak fix | 3.55.0 | `tests/test_pipeline_v2_parser.py`, `vault/Skills/`, `vault/main/Notes/pipeline-v2-spec.md` |
+| 2 | override schema validators | 3.55.1 | (validators in bot.py + tests extended) |
+| 3 | refactor `_execute_step` into type dispatcher | 3.55.2 | `tests/test_pipeline_executor_v2.py` |
+| 4 | script step handler | 3.56.0 | (handler in bot.py + tests extended) |
+| 5 | validate step + feedback retry loop | 3.56.1 | (handler in bot.py + tests extended) |
+| 6 | publish step + sink registry + leak gate | 3.57.0 | (handler in bot.py + tests extended) |
+| 7 | display status enum + computer | 3.57.1 | `tests/test_pipeline_display_status.py` |
+| 8 | failure injection into agent-temp.md | 3.58.0 | `tests/test_pipeline_failure_injection.py` |
+| 9 | `/ack` + `/run --overrides` JSON | 3.58.1 | (slash + parser in bot.py + tests extended) |
