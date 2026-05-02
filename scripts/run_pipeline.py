@@ -21,8 +21,11 @@ Exits:
 The script depends ONLY on the Python stdlib so it can run in cron, agent
 shell tools, or any environment where the bot is locally installed.
 
-Reads ``CLAUDE_BOT_WEB_URL`` from env (default ``http://127.0.0.1:8765``)
-and ``CLAUDE_BOT_WEB_TOKEN`` if set (passed as Authorization header).
+Reads ``CLAUDE_BOT_WEB_URL`` from env (default ``http://127.0.0.1:27182`` —
+the bot's CONTROL_PORT, local-only). Auth: reads
+``~/.claude-bot/.control-token`` automatically (the bot writes it on
+startup with mode 0600); override via ``CLAUDE_BOT_CONTROL_TOKEN`` env
+var if needed. Token is sent in the ``X-Bot-Token`` header.
 """
 
 from __future__ import annotations
@@ -55,8 +58,8 @@ def main() -> int:
         help="Identifier for this run in routines-state JSON (default: manual-shell)",
     )
     parser.add_argument(
-        "--url", default=os.environ.get("CLAUDE_BOT_WEB_URL", "http://127.0.0.1:8765"),
-        help="Bot HTTP base URL (env: CLAUDE_BOT_WEB_URL, default: http://127.0.0.1:8765)",
+        "--url", default=os.environ.get("CLAUDE_BOT_WEB_URL", "http://127.0.0.1:27182"),
+        help="Bot HTTP base URL (env: CLAUDE_BOT_WEB_URL, default: http://127.0.0.1:27182 — CONTROL_PORT)",
     )
     args = parser.parse_args()
 
@@ -74,9 +77,16 @@ def main() -> int:
 
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
-    token = os.environ.get("CLAUDE_BOT_WEB_TOKEN")
+    # Bot's control server uses X-Bot-Token (not Bearer). Token is in
+    # ~/.claude-bot/.control-token unless overridden via env.
+    token = os.environ.get("CLAUDE_BOT_CONTROL_TOKEN", "")
+    if not token:
+        token_path = os.path.expanduser("~/.claude-bot/.control-token")
+        if os.path.isfile(token_path):
+            with open(token_path) as f:
+                token = f.read().strip()
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        headers["X-Bot-Token"] = token
 
     url = args.url.rstrip("/") + "/routine/run"
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")

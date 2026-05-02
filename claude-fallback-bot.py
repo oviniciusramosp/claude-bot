@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.59.1"  # fix: .env loader recognizes PIPELINE_V2_ENABLED so the flag can ship via vault config (was previously only readable via shell env / launchd EnvironmentVariables)
+BOT_VERSION = "3.59.2"  # fix: pipeline v2 parser allows missing prompt for script/validate/publish steps (they have command:, not prompt:); previous parser hard-failed v2 pipelines that legitimately lack a prompt — caught while migrating palmeiras-feed
 
 import hmac
 import hashlib
@@ -2797,7 +2797,12 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         if not prompt_text:
             prompt_text = str(s.get("prompt", ""))
         is_manual = bool(s.get("manual", False))
-        if not prompt_text and not is_manual:
+        # Pipeline v2: script/validate/publish steps don't need a prompt — they
+        # carry a `command:` instead. Only `llm` (default) and `gate`/manual
+        # steps require prompt content.
+        _step_type_for_check = str(s.get("type", "llm")).strip().lower() or "llm"
+        needs_prompt = is_manual or _step_type_for_check in ("llm", "gate")
+        if not prompt_text and needs_prompt:
             logger.error(
                 "Pipeline %s step %s: no prompt (prompt_file missing or empty, no inline prompt) — "
                 "aborting parse. Fix the vault file before re-running.",
