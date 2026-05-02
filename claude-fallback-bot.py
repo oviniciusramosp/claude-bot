@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.60.2"  # fix: 3 bugs caught in palmeiras-feed v2 production: (1) YAML parser missed `enabled: false  # comment` because inline comments weren't stripped — v1 stayed effectively enabled; (2) _inject_temp_parent_link corrupted publish-step Telegram payloads — now only injects into files that have YAML frontmatter (vault docs, not message bodies); (3) _notify_success fallback double-sent publish-step output — now skips type=publish steps since their sink already emitted
+BOT_VERSION = "3.60.3"  # fix: pipeline v2 _notify_success fallback skipped only `publish` steps before — `validate` steps still leaked their JSON lint output to Telegram (caught after ai-digest-v2 sent the {issues,passed,...} blob as a follow-up). v2 pipelines now disable the fallback entirely; only publish steps (with sinks) emit user-facing content
 
 import hmac
 import hashlib
@@ -8199,18 +8199,22 @@ class PipelineExecutor:
         if self.task.notify == "none":
             return
 
-        # Find the step marked output: telegram
+        # Find the step marked output: telegram (v1 explicit marking)
         output_text = None
         for step in self.task.steps:
             if step.output_to_telegram and step.id in self._step_outputs:
                 output_text = _strip_temp_parent_link(self._step_outputs[step.id])
                 break
-        # Fallback: last completed step's output (skip output: none steps).
-        # Pipeline v2: also skip `publish` steps because they ALREADY sent
-        # their content via their own sink (telegram/notion/file/...) — sending
-        # the publish step's executor-stored summary ("emitted to telegram")
-        # via _notify_success would duplicate the post in the chat.
-        if output_text is None:
+        # Fallback applies to V1 ONLY: pipelines without an explicit
+        # `output: telegram` step pick the last completed non-none step.
+        #
+        # Pipeline v2 NEVER uses this fallback — v2 declares `publish` steps
+        # that own delivery via the sink registry (Telegram/Notion/file/...).
+        # If no publish step emitted, the pipeline is silent on purpose.
+        # Without this guard, validate/script steps' internal output (JSON
+        # lint results, status reports, etc.) leaked into Telegram as a
+        # follow-up to the actual publish.
+        if output_text is None and self.task.pipeline_version < 2:
             for step in reversed(self.task.steps):
                 if step.id not in self._step_outputs:
                     continue
