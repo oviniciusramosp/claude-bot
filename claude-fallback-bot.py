@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.60.3"  # fix: pipeline v2 _notify_success fallback skipped only `publish` steps before — `validate` steps still leaked their JSON lint output to Telegram (caught after ai-digest-v2 sent the {issues,passed,...} blob as a follow-up). v2 pipelines now disable the fallback entirely; only publish steps (with sinks) emit user-facing content
+BOT_VERSION = "3.60.4"  # fix: pipeline v2 _notify_success was still sending "Pipeline X: N/N steps completed in Ts" summary even after the savings_summary fired (caught after aviso-contas-v2). v2 now skips the whole output_text/summary send block — content reaches users only via publish sinks + savings_summary cascade message
 
 import hmac
 import hashlib
@@ -8231,7 +8231,14 @@ class PipelineExecutor:
             return  # savings summary already sent above
 
         sent_text = None
-        if self.task.notify == "summary" or not output_text:
+        # Pipeline v2: skip the entire output_text/summary send block. v2
+        # emits user-facing content ONLY via publish steps' sinks (Telegram/
+        # Notion/file/...). The "Pipeline X: N/N steps completed" line is v1
+        # ergonomics that duplicates noise in v2 chats — when the cascade
+        # already fired, _maybe_send_savings_summary covered the report.
+        if self.task.pipeline_version >= 2:
+            pass
+        elif self.task.notify == "summary" or not output_text:
             mins = elapsed // 60
             secs = elapsed % 60
             sent_text = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
