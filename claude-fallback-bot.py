@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.59.2"  # fix: pipeline v2 parser allows missing prompt for script/validate/publish steps (they have command:, not prompt:); previous parser hard-failed v2 pipelines that legitimately lack a prompt — caught while migrating palmeiras-feed
+BOT_VERSION = "3.59.3"  # fix: _inject_temp_parent_link skips non-markdown outputs (JSON/CSV would be corrupted by the wikilink); caught while running palmeiras-feed-v2 — scout writes scout.json which collect parses, link injection broke json.loads()
 
 import hmac
 import hashlib
@@ -1667,9 +1667,16 @@ def _inject_temp_parent_link(path: Path, agent_id: str) -> None:
     graph keeps `.workspace/data/**` files linked to the per-agent Temp index
     (instead of showing them as orphans).
     Idempotent — does nothing if the link is already present. Preserves YAML
-    frontmatter when present.
+    frontmatter when present. Skipped for non-markdown files (JSON/CSV/binary
+    payloads passed between v2 script steps would otherwise be corrupted).
     """
     if not agent_id:
+        return
+    # Only inject the wikilink into markdown files. Pipeline v2 script/publish
+    # steps frequently write JSON or other structured formats that downstream
+    # steps parse — injecting the link breaks json.loads() etc.
+    suffix = path.suffix.lower()
+    if suffix not in ("", ".md", ".markdown"):
         return
     try:
         text = path.read_text(encoding="utf-8")
