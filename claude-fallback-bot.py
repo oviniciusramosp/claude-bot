@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.55.1"  # feat: pipeline v2 override schema validators — validate_overrides, _merge_overrides_for_step, _overrides_to_env_vars, OverrideValidationError; standalone helpers, not wired into executor yet (commits 4-9)
+BOT_VERSION = "3.55.2"  # refactor: split _execute_step into type dispatcher (extract _execute_llm_step), add stubs for script/validate/publish handlers (gated behind PIPELINE_V2_ENABLED + pipeline_version>=2; v1 path unchanged)
 
 import hmac
 import hashlib
@@ -5957,10 +5957,21 @@ class PipelineExecutor:
             self._update_progress()
 
     def _execute_step(self, step: PipelineStep, data_dir: Path) -> None:
-        """Execute a single pipeline step using ClaudeRunner."""
+        """Dispatch a single pipeline step to the appropriate handler.
+
+        Order of precedence:
+          1. Manual review gate — `step.manual` (any pipeline_version)
+          2. Ralph loop — `step.has_loop` (any pipeline_version)
+          3. Pipeline v2 typed dispatch — only when BOTH
+             ``PIPELINE_V2_ENABLED`` env var is set AND the pipeline declares
+             ``pipeline_version: 2`` in frontmatter. Routes to
+             _execute_script_step / _execute_validate_step /
+             _execute_publish_step based on `step.type`.
+          4. Default: LLM execution path via _execute_llm_step (v1 behavior,
+             unchanged for every pipeline that does not opt into v2)
+        """
         with self._lock:
             self._step_timestamps.setdefault(step.id, {})["start"] = time.time()
-        # Manual review gate — pause and wait for human approval
         if step.manual:
             try:
                 self._execute_manual_step(step, data_dir)
@@ -5968,8 +5979,6 @@ class PipelineExecutor:
                 with self._lock:
                     self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
             return
-        # Ralph loop dispatcher — when the step has loop config, use the
-        # dedicated loop executor. Otherwise fall through to the normal path.
         if step.has_loop:
             try:
                 self._execute_loop_step(step, data_dir)
@@ -5977,7 +5986,64 @@ class PipelineExecutor:
                 with self._lock:
                     self._step_timestamps.setdefault(step.id, {})["end"] = time.time()
             return
+        # Pipeline v2 typed dispatch — gated by env flag + per-pipeline opt-in.
+        if (PIPELINE_V2_ENABLED
+                and self.task.pipeline_version >= 2
+                and step.type
+                and step.type != StepType.LLM.value):
+            handler = {
+                StepType.SCRIPT.value: self._execute_script_step,
+                StepType.VALIDATE.value: self._execute_validate_step,
+                StepType.PUBLISH.value: self._execute_publish_step,
+            }.get(step.type)
+            if handler is not None:
+                handler(step, data_dir)
+                return
+            # Unknown v2 type — parser already warned at parse time. Fall
+            # through to LLM so the pipeline still makes progress.
+            logger.warning(
+                "Pipeline %s step %s: unknown step type %r — running as LLM",
+                self.task.name, step.id, step.type,
+            )
+        self._execute_llm_step(step, data_dir)
 
+    def _execute_script_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute a type:script pipeline step.
+
+        Phase 1 commit 4 will implement this. Currently raises NotImplementedError
+        so v2 pipelines that opt in get a clear, fail-loud error rather than
+        silently degrading to LLM execution.
+        """
+        raise NotImplementedError(
+            f"script step handler arrives in Phase 1 commit 4 (step={step.id})"
+        )
+
+    def _execute_validate_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute a type:validate pipeline step.
+
+        Phase 1 commit 5 will implement this with the on_failure feedback loop.
+        """
+        raise NotImplementedError(
+            f"validate step handler arrives in Phase 1 commit 5 (step={step.id})"
+        )
+
+    def _execute_publish_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute a type:publish pipeline step.
+
+        Phase 1 commit 6 will implement this with the sink registry and the
+        Telegram leak-prevention 3-condition gate.
+        """
+        raise NotImplementedError(
+            f"publish step handler arrives in Phase 1 commit 6 (step={step.id})"
+        )
+
+    def _execute_llm_step(self, step: PipelineStep, data_dir: Path) -> None:
+        """Execute an LLM-type pipeline step using ClaudeRunner.
+
+        This is the original v1 ``_execute_step`` body extracted unchanged so
+        the type dispatcher can route to it. Behavior is byte-identical to the
+        pre-refactor v1 path for any pipeline that does not opt into v2.
+        """
         attempt = self._step_attempts.get(step.id, 0) + 1
         with self._lock:
             self._step_attempts[step.id] = attempt
