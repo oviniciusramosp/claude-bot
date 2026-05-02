@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.59.4"  # fix: pipeline v2 validate/publish steps auto-infer depends_on from validates:/publishes: (without this the DAG scheduled validate before writer finished, causing premature target-missing failures); caught running palmeiras-feed-v2
+BOT_VERSION = "3.59.5"  # ux: pipeline skip-cascade message uses agent's icon (not generic 🔗), label "Skipped" with ⏭️ instead of "Early-exit" with ⚡, drop redundant "silent finish" tagline (the emoji + label already say it)
 
 import hmac
 import hashlib
@@ -7771,7 +7771,7 @@ class PipelineExecutor:
         for step in saved_steps:
             by_model[step.model] = by_model.get(step.model, 0) + 1
         parts = [f"{cnt}×{model}" for model, cnt in sorted(by_model.items())]
-        return f"⚡ Early-exit: {len(saved_steps)} step(s) pulado(s) ({', '.join(parts)})"
+        return f"⏭️ Skipped: {len(saved_steps)} step(s) ({', '.join(parts)})"
 
     def _maybe_send_savings_summary(self, elapsed: int) -> None:
         """Send a silent Telegram message summarising early-exit savings.
@@ -7786,8 +7786,12 @@ class PipelineExecutor:
                 return
             mins = elapsed // 60
             secs = elapsed % 60
+            # Use the owning agent's icon (from agent-<id>.md frontmatter) so
+            # the user can tell which agent's pipeline finished at a glance.
+            agent = load_agent(_agent_id_or_main(self.task.agent))
+            icon = (agent.get("icon", "🔗") if agent else "🔗")
             msg = (
-                f"🔗 *{self.task.title}* — silent finish\n"
+                f"{icon} *{self.task.title}*\n"
                 f"{summary}\n"
                 f"_Elapsed: {mins}m{secs:02d}s_"
             )
