@@ -9,6 +9,68 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
     <link rel="stylesheet" href="/css/app.css">
+
+    <!-- ── Pipeline v2 display status (mirrors PipelineDisplayStatus enum in claude-fallback-bot.py) ── -->
+    <style>
+        /* Mirror the macOS app's pipeline status palette. */
+        .badge-pipeline-idle      { background: rgba(255,255,255,0.06); color: #ababab; border-color: rgba(255,255,255,0.10); }
+        .badge-pipeline-scheduled { background: rgba(0,113,227,0.15);   color: #60a5fa; border-color: rgba(0,113,227,0.30); }
+        .badge-pipeline-running   { background: rgba(249,115,22,0.15);  color: #f97316; border-color: rgba(249,115,22,0.30); animation: pipelinePulse 1.6s ease-in-out infinite; }
+        .badge-pipeline-success   { background: rgba(48,209,88,0.15);   color: #30d158; border-color: rgba(48,209,88,0.30); }
+        .badge-pipeline-failed    { background: rgba(255,69,58,0.15);   color: #ff453a; border-color: rgba(255,69,58,0.30); }
+        .badge-pipeline-skipped   { background: rgba(255,255,255,0.04); color: #6e6e73; border-color: rgba(255,255,255,0.06); }
+        @keyframes pipelinePulse {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.55; }
+        }
+    </style>
+    <script>
+        // PipelineDisplayStatus — mirrors the Python enum in claude-fallback-bot.py.
+        // String values MUST match exactly: Idle, Scheduled, Running, Success, Failed, Skipped.
+        // CI parity test (tests/test_pipeline_status_parity.py — Phase 2) locks these.
+        const PIPELINE_DISPLAY_STATUS = {
+            IDLE:      { value: 'Idle',      label: 'Idle',      badgeClass: 'badge-pipeline-idle' },
+            SCHEDULED: { value: 'Scheduled', label: 'Scheduled', badgeClass: 'badge-pipeline-scheduled' },
+            RUNNING:   { value: 'Running',   label: 'Running',   badgeClass: 'badge-pipeline-running' },
+            SUCCESS:   { value: 'Success',   label: 'Success',   badgeClass: 'badge-pipeline-success' },
+            FAILED:    { value: 'Failed',    label: 'Failed',    badgeClass: 'badge-pipeline-failed' },
+            SKIPPED:   { value: 'Skipped',   label: 'Skipped',   badgeClass: 'badge-pipeline-skipped' },
+        };
+        const PIPELINE_DISPLAY_STATUS_BY_VALUE = Object.fromEntries(
+            Object.values(PIPELINE_DISPLAY_STATUS).map(s => [s.value, s])
+        );
+        // Legacy raw status → display value (used when display_status is absent on legacy entries).
+        const LEGACY_STATUS_TO_DISPLAY = {
+            completed: 'Success',
+            running:   'Running',
+            failed:    'Failed',
+            cancelled: 'Failed',
+            skipped:   'Skipped',
+            pending:   'Scheduled',
+        };
+        /**
+         * Resolve the display info for a routines-state entry (or a synthetic
+         * timeline entry). Prefers the precomputed `display_status` field
+         * written by PipelineExecutor; falls back to mapping legacy
+         * `final_status`/`status` for v1 entries.
+         * Returns null if nothing renders (entry missing or unknown status).
+         */
+        function pipelineDisplayInfo(entry) {
+            if (!entry) return null;
+            const dv = entry.display_status;
+            if (dv && PIPELINE_DISPLAY_STATUS_BY_VALUE[dv]) {
+                return PIPELINE_DISPLAY_STATUS_BY_VALUE[dv];
+            }
+            const legacy = entry.final_status || entry.status;
+            if (legacy && LEGACY_STATUS_TO_DISPLAY[legacy]) {
+                return PIPELINE_DISPLAY_STATUS_BY_VALUE[LEGACY_STATUS_TO_DISPLAY[legacy]];
+            }
+            return null;
+        }
+        // Expose to the global scope so Alpine inline expressions can reach it.
+        window.PIPELINE_DISPLAY_STATUS = PIPELINE_DISPLAY_STATUS;
+        window.pipelineDisplayInfo = pipelineDisplayInfo;
+    </script>
 </head>
 <body class="h-full overscroll-none" x-data="app" x-cloak style="background:var(--bg);color:var(--text)">
 
@@ -562,13 +624,12 @@
                                                     </div>
                                                 </div>
                                                 <div class="flex items-center gap-2 shrink-0">
-                                                    <!-- Status badge -->
-                                                    <template x-if="statusOf(routine)">
-                                                        <span class="badge" :class="{
-                                                            'badge-completed': statusOf(routine) === 'completed',
-                                                            'badge-running': statusOf(routine) === 'running',
-                                                            'badge-failed': statusOf(routine) === 'failed',
-                                                        }" x-text="statusOf(routine)"></span>
+                                                    <!-- Status badge — prefers precomputed display_status (Pipeline v2),
+                                                         falls back to legacy status mapping for v1 entries. -->
+                                                    <template x-if="pipelineDisplayInfo(getExecution(routine))">
+                                                        <span class="badge"
+                                                              :class="pipelineDisplayInfo(getExecution(routine)).badgeClass"
+                                                              x-text="pipelineDisplayInfo(getExecution(routine)).label"></span>
                                                     </template>
                                                     <!-- Toggle -->
                                                     <div
@@ -630,16 +691,22 @@
                                             </div>
                                         </div>
 
-                                        <!-- Execution status -->
+                                        <!-- Execution status — prefers precomputed display_status (Pipeline v2),
+                                             falls back to legacy raw status for v1 entries. -->
                                         <template x-if="getExecution(selectedRoutine)">
                                             <div class="glass-card">
                                                 <h3 class="text-sm font-medium text-slate-400 mb-2">Latest Execution</h3>
                                                 <div class="text-xs space-y-1">
-                                                    <div>Status: <span class="badge" :class="{
-                                                        'badge-completed': getExecution(selectedRoutine).status === 'completed',
-                                                        'badge-running': getExecution(selectedRoutine).status === 'running',
-                                                        'badge-failed': getExecution(selectedRoutine).status === 'failed',
-                                                    }" x-text="getExecution(selectedRoutine).status"></span></div>
+                                                    <div>Status:
+                                                        <template x-if="pipelineDisplayInfo(getExecution(selectedRoutine))">
+                                                            <span class="badge"
+                                                                  :class="pipelineDisplayInfo(getExecution(selectedRoutine)).badgeClass"
+                                                                  x-text="pipelineDisplayInfo(getExecution(selectedRoutine)).label"></span>
+                                                        </template>
+                                                        <template x-if="!pipelineDisplayInfo(getExecution(selectedRoutine))">
+                                                            <span class="text-slate-400" x-text="getExecution(selectedRoutine).status || '—'"></span>
+                                                        </template>
+                                                    </div>
                                                     <div>Time slot: <span class="text-slate-400" x-text="getExecution(selectedRoutine).slot"></span></div>
                                                     <template x-if="getExecution(selectedRoutine).error">
                                                         <div class="bg-red-900/20 text-red-400 px-2 py-1 rounded mt-1" x-text="getExecution(selectedRoutine).error"></div>

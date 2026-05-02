@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.58.1"  # feat: pipeline v2 /ack <run_id> slash command + /run --overrides JSON parsing — manual clear-by-run-id for failure blocks (Q1) + runtime override delivery from caller via validate_overrides → PipelineTask.applied_overrides → executor handlers
+BOT_VERSION = "3.58.2"  # feat: dashboards render precomputed PipelineDisplayStatus (Idle/Scheduled/Running/Success/Failed/Skipped) — web (JS) + ClaudeBotManager (Swift) mirror the Python enum and fall back to legacy status when display_status missing on older state entries
 
 import hmac
 import hashlib

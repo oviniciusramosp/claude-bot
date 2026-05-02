@@ -13,6 +13,17 @@ struct RoutineExecution: Identifiable, Hashable, Sendable {
     var pipelineSteps: [StepExecution] = []
     var workspace: String?  // Pipeline workspace path (/tmp/claude-pipeline-...)
 
+    /// Pipeline v2 (v3.57.1+): precomputed display status written by Python's
+    /// `compute_display_status`. `nil` for legacy entries (pre-v3.57.1) and
+    /// for non-pipeline routines — callers should fall back to deriving from
+    /// `status` via `PipelineDisplayStatus.fromLegacy(_:)` when this is `nil`.
+    var displayStatus: PipelineDisplayStatus?
+
+    /// Pipeline v2 (v3.57.1+): true iff at least one publish step (or v1
+    /// `output: telegram`) successfully emitted to its sink during this run.
+    /// `nil` on legacy entries.
+    var publishEmitted: Bool?
+
     enum Status: String, Sendable {
         case pending
         case running

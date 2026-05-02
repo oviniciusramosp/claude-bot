@@ -79,6 +79,29 @@ struct Routine: Identifiable, Hashable, Sendable {
 
     var isPipeline: Bool { routineType == "pipeline" }
 
+    /// Pipeline v2 display status (v3.57.1+) — primarily for pipelines, but
+    /// safe to call on any routine. Resolution order:
+    ///   1. Most recent execution's precomputed `displayStatus` (Python
+    ///      writes this since v3.57.1 of the bot).
+    ///   2. Legacy synthesis from `RoutineExecution.Status` for back-compat
+    ///      with older state files.
+    ///   3. `Scheduled` if there's still a future fire today, else `Idle`.
+    /// Mirrors Python's `compute_display_status` priority where possible
+    /// without re-deriving — we trust the precomputed value when it exists.
+    var pipelineDisplayStatus: PipelineDisplayStatus {
+        // Look for any running execution first — Python's compute also
+        // ranks `Running` as highest priority. This catches the edge case
+        // where the most-recent-by-start-time entry isn't the running one.
+        if let running = todayExecutions.first(where: { $0.status == .running }) {
+            return running.displayStatus ?? .running
+        }
+        if let exec = lastExecution {
+            if let precomputed = exec.displayStatus { return precomputed }
+            return PipelineDisplayStatus.fromLegacy(exec.status)
+        }
+        return enabled && !schedule.times.isEmpty ? .scheduled : .idle
+    }
+
     /// Built-in routines shipped with the repo — can be disabled but not deleted
     static let builtInIds: Set<String> = [
         "update-check", "vault-rebuild", "vault-health",

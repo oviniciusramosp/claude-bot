@@ -719,10 +719,21 @@ struct TodayRoutinesCard: View {
                                 let isPast = entry.time <= nowTime
                                 let nextIsFuture = idx + 1 < timeline.count && timeline[idx + 1].time > nowTime
 
+                                // For pipelines, prefer the Pipeline v2 display
+                                // status (Python writes a precomputed value
+                                // since v3.57.1 — we trust it when present and
+                                // fall back to legacy synthesis otherwise).
+                                // Regular routines keep using the underlying
+                                // execution status: their UI semantics haven't
+                                // changed and they don't have a publish step.
                                 TimelineRow(
                                     time: entry.time,
                                     name: entry.routine.title,
-                                    status: entry.execution?.status ?? .pending
+                                    status: entry.execution?.status ?? .pending,
+                                    pipelineDisplayStatus: entry.routine.isPipeline
+                                        ? (entry.execution?.displayStatus
+                                           ?? entry.execution.map { PipelineDisplayStatus.fromLegacy($0.status) })
+                                        : nil
                                 )
 
                                 if isPast && nextIsFuture {
@@ -815,23 +826,30 @@ struct TimelineRow: View {
     var time: String
     var name: String
     var status: RoutineExecution.Status
+    /// Pipeline v2 display status (only set for pipeline routines). When
+    /// non-nil, drives the icon/color so the timeline reflects the
+    /// six-state Pipeline v2 enum rather than the lower-level execution
+    /// status. Leaves regular routines untouched.
+    var pipelineDisplayStatus: PipelineDisplayStatus? = nil
 
     private var statusColor: Color {
+        if let p = pipelineDisplayStatus { return p.color }
         switch status {
-        case .completed: Color(red: 0.204, green: 0.780, blue: 0.349)
-        case .failed:    Color(red: 1.0, green: 0.220, blue: 0.235)
-        case .running:   Color(red: 0.25, green: 0.56, blue: 0.98)
-        case .pending, .skipped: Color(red: 0.447, green: 0.447, blue: 0.447)
+        case .completed: return Color(red: 0.204, green: 0.780, blue: 0.349)
+        case .failed:    return Color(red: 1.0, green: 0.220, blue: 0.235)
+        case .running:   return Color(red: 0.25, green: 0.56, blue: 0.98)
+        case .pending, .skipped: return Color(red: 0.447, green: 0.447, blue: 0.447)
         }
     }
 
     private var statusSymbol: String {
+        if let p = pipelineDisplayStatus { return p.symbol }
         switch status {
-        case .completed: "checkmark.circle.fill"
-        case .failed:    "xmark.circle.fill"
-        case .running:   "arrow.trianglehead.2.clockwise"
-        case .pending:   "clock"
-        case .skipped:   "forward.fill"
+        case .completed: return "checkmark.circle.fill"
+        case .failed:    return "xmark.circle.fill"
+        case .running:   return "arrow.trianglehead.2.clockwise"
+        case .pending:   return "clock"
+        case .skipped:   return "forward.fill"
         }
     }
 

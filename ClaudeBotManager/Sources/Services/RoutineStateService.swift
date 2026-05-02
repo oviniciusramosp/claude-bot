@@ -102,6 +102,16 @@ actor RoutineStateService {
             }
         }
 
+        // Pipeline v2 (v3.57.1+): Python writes a precomputed `display_status`
+        // string and a `publish_emitted` bool into each pipeline entry. Both
+        // fields are optional — older state files predate them and Python
+        // also omits them on non-pipeline routines. Trust the precomputed
+        // value when present; consumers fall back to legacy synthesis via
+        // PipelineDisplayStatus.fromLegacy when nil.
+        let displayStatus = (data["display_status"] as? String)
+            .flatMap(PipelineDisplayStatus.init(rawValue:))
+        let publishEmitted = data["publish_emitted"] as? Bool
+
         return RoutineExecution(
             routineName: routineName,
             timeSlot: timeSlot,
@@ -112,7 +122,9 @@ actor RoutineStateService {
             error: data["error"] as? String,
             isPipeline: isPipeline,
             pipelineSteps: pipelineSteps,
-            workspace: data["workspace"] as? String
+            workspace: data["workspace"] as? String,
+            displayStatus: displayStatus,
+            publishEmitted: publishEmitted
         )
     }
 
