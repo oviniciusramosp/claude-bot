@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.67.0"  # feat: per-pipeline run log file. PipelineExecutor now writes full stdout/stderr from every script/validate step (no truncation) to data_dir/logs/{pipeline}_{YYYY-MM-DD-HHMMSS}_{run-suffix}.log. Old logs (>48h) are purged inline at run start so active pipelines self-clean without a cron. Failure Telegram message gains a "📄 Log: <path>" suffix when the file exists, so users can grep the full HTTP error body (Notion 400, etc.) instead of the 100-char truncated preview. Implementation: _log_path/_log_filename/_log_started_at on PipelineExecutor; _cleanup_old_logs + _write_step_log helpers; wired into both timeout and success branches of _execute_script_step / _execute_validate_step
+BOT_VERSION = "3.68.0"  # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
 
 import hmac
 import hashlib
@@ -270,6 +270,80 @@ def skills_dir(agent_id: Optional[str]) -> Path:
 
 def journal_dir(agent_id: Optional[str]) -> Path:
     return agent_base(agent_id) / "Journal"
+
+
+def journal_month_dir(agent_id: Optional[str], date_str: str) -> Path:
+    """Return ``Journal/YYYY-MM/`` for a date string ``YYYY-MM-DD`` or ``YYYY-MM``.
+
+    v3.68+ hierarchical layout: dailies, weeklies, and the monthly index live
+    inside ``Journal/YYYY-MM/``. Older flat-format files (``Journal/*.md``)
+    are still readable; the migration script promotes them on demand.
+    """
+    year_month = (date_str or "")[:7]
+    return journal_dir(agent_id) / year_month
+
+
+def journal_daily_path(agent_id: Optional[str], date_str: str) -> Path:
+    """Return ``Journal/YYYY-MM/YYYY-MM-DD.md`` for a daily entry."""
+    return journal_month_dir(agent_id, date_str) / f"{date_str}.md"
+
+
+def journal_monthly_index_path(agent_id: Optional[str], year_month: str) -> Path:
+    """Return ``Journal/YYYY-MM/YYYY-MM.md`` — the monthly summary index."""
+    return journal_month_dir(agent_id, year_month) / f"{year_month}.md"
+
+
+def journal_weekly_path(agent_id: Optional[str], week_label: str, monday_date: str) -> Path:
+    """Return ``Journal/YYYY-MM/YYYY-Www.md`` (month inferred from the Monday)."""
+    return journal_month_dir(agent_id, monday_date) / f"{week_label}.md"
+
+
+def ensure_journal_month_skeleton(agent_id: Optional[str], year_month: str) -> Path:
+    """Ensure ``Journal/YYYY-MM/`` and a placeholder ``YYYY-MM.md`` index exist.
+
+    The skeleton has frontmatter that explains the file is a pending monthly
+    rollup — the ``journal-monthly-rollup`` routine enriches it on the 1st of
+    each month. Idempotent: never overwrites an existing index file.
+    """
+    month_dir = journal_month_dir(agent_id, year_month)
+    month_dir.mkdir(parents=True, exist_ok=True)
+    monthly_idx = month_dir / f"{year_month}.md"
+    if monthly_idx.exists():
+        return monthly_idx
+    try:
+        year = int(year_month[:4])
+        month = int(year_month[5:7])
+        from datetime import date as _date
+        month_label = _date(year, month, 1).strftime("%Y-%m")
+    except (ValueError, IndexError):
+        month_label = year_month
+    today = time.strftime("%Y-%m-%d")
+    owner = agent_id or MAIN_AGENT_ID
+    skeleton = (
+        "---\n"
+        f'title: "Journal {month_label}"\n'
+        f'description: "Monthly index for {year_month} ({owner}). Pending rollup — '
+        "the journal-monthly-rollup routine enriches this with themes, "
+        'highlights, weekly links and daily summaries on the 1st of next month."\n'
+        "type: journal_monthly\n"
+        f"month: {year_month}\n"
+        f"agent: {owner}\n"
+        f"created: {today}\n"
+        f"updated: {today}\n"
+        "tags: [journal, monthly, rollup]\n"
+        "---\n\n"
+        f"# Journal — {month_label}\n\n"
+        "## How to consult this month\n\n"
+        "Memory is hierarchical. Read in this order before opening individual days:\n\n"
+        "1. The description in this file's frontmatter — themes covered.\n"
+        "2. The weekly summaries below — compact recap per week.\n"
+        "3. Individual daily files — only when you need raw detail.\n\n"
+        "## Pending\n\n"
+        "Rollup not yet generated. Will be filled by `journal-monthly-rollup` "
+        "on the 1st of next month.\n"
+    )
+    monthly_idx.write_text(skeleton, encoding="utf-8")
+    return monthly_idx
 
 
 def reactions_dir(agent_id: Optional[str]) -> Path:
@@ -943,7 +1017,19 @@ SYSTEM_PROMPT = (
     "Use emojis to highlight important parts of your responses "
     "(e.g. ✅ for success, ❌ for errors, ⚠️ for warnings, 📁 for files, 🔧 for fixes, "
     "📝 for notes, 🚀 for deployments). "
-    "NEVER wrap URLs in backtick code formatting — always use markdown links `[text](url)` or bare URLs."
+    "NEVER wrap URLs in backtick code formatting — always use markdown links `[text](url)` or bare URLs. "
+    "\n\n"
+    "## Memory consultation — hierarchical journal\n"
+    "Your Journal is hierarchical: `Journal/agent-journal.md → Journal/YYYY-MM/YYYY-MM.md "
+    "→ Journal/YYYY-MM/YYYY-Www.md → Journal/YYYY-MM/YYYY-MM-DD.md`. ALWAYS consult memory "
+    "top-down before answering questions about past work, decisions, or context:\n"
+    "1. Glance at `agent-journal.md` to see which months exist.\n"
+    "2. Read the **monthly** file's frontmatter `description` and `## What you'll find here` "
+    "section — that alone tells you whether the month is relevant.\n"
+    "3. Only open **weekly** summaries when the month looks relevant.\n"
+    "4. Only open **daily** files when you need raw detail a weekly summary doesn't cover.\n"
+    "Skipping levels wastes the context window. Today's daily file is fine to read directly "
+    "when you're recording new entries; for recall, follow the hierarchy."
 )
 
 HELP_TEXT = """🤖 *Claude Code Telegram Bot*
@@ -3990,9 +4076,11 @@ def _append_execution_report(
     """
     try:
         agent_id = agent or MAIN_AGENT_ID
-        journal_d = get_agent_journal_dir(agent_id, create=True)
+        get_agent_journal_dir(agent_id, create=True)
         today = time.strftime("%Y-%m-%d")
-        path = journal_d / f"{today}.md"
+        ensure_journal_month_skeleton(agent_id, today[:7])
+        path = journal_daily_path(agent_id, today)
+        path.parent.mkdir(parents=True, exist_ok=True)
         now = time.strftime("%H:%M")
         m, s = divmod(elapsed, 60)
 
@@ -11510,6 +11598,7 @@ class ClaudeTelegramBot:
             return
         journal_path = Path(self._get_journal_path())
         journal_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_journal_month_skeleton(session.agent, time.strftime("%Y-%m"))
         timestamp = time.strftime("%Y-%m-%d %H:%M")
         snapshot_prompt = (
             "Gere um snapshot compacto desta sessão em markdown puro (sem preâmbulo), "
@@ -11954,27 +12043,31 @@ class ClaudeTelegramBot:
         threading.Thread(target=_worker, daemon=True, name="subagent-delegate").start()
 
     def _get_journal_path(self) -> str:
-        """Return the journal file path for today, using agent journal if active."""
+        """Return today's daily journal file path under ``Journal/YYYY-MM/``."""
         session = self._get_session()
         today = time.strftime("%Y-%m-%d")
-        journal_dir = get_agent_journal_dir(session.agent if session else None)
-        return str(journal_dir / f"{today}.md")
+        agent_id = session.agent if session else None
+        get_agent_journal_dir(agent_id, create=True)
+        return str(journal_daily_path(agent_id, today))
 
     def _append_journal_entry(self, agent: Optional[str], header: str, body: str) -> Optional[Path]:
-        """Append a timestamped entry to ``<agent>/Journal/YYYY-MM-DD.md``.
+        """Append a timestamped entry to ``<agent>/Journal/YYYY-MM/YYYY-MM-DD.md``.
 
         Append-only: never rewrites existing content. Creates the file with a
-        standard frontmatter header if it doesn't exist yet. Used by commands
-        like ``/routine delete`` to leave an audit trail of destructive
-        actions in the agent's journal.
+        standard frontmatter header if it doesn't exist yet, and the parent
+        ``YYYY-MM/`` skeleton if the month folder doesn't exist. Used by
+        commands like ``/routine delete`` to leave an audit trail of
+        destructive actions in the agent's journal.
 
         Returns the journal path on success, or None on failure (errors are
         logged, never silent).
         """
         try:
-            journal_d = get_agent_journal_dir(agent, create=True)
+            get_agent_journal_dir(agent, create=True)
             today = time.strftime("%Y-%m-%d")
-            path = journal_d / f"{today}.md"
+            ensure_journal_month_skeleton(agent, today[:7])
+            path = journal_daily_path(agent, today)
+            path.parent.mkdir(parents=True, exist_ok=True)
             now = time.strftime("%H:%M")
             entry = f"\n## {now} — {header}\n\n{body}\n"
             if not path.exists():
@@ -12037,8 +12130,9 @@ class ClaudeTelegramBot:
         old_agent      = session.agent
 
         today = time.strftime("%Y-%m-%d")
-        journal_dir  = get_agent_journal_dir(old_agent)
-        journal_path = str(journal_dir / f"{today}.md")
+        get_agent_journal_dir(old_agent, create=True)
+        ensure_journal_month_skeleton(old_agent, today[:7])
+        journal_path = str(journal_daily_path(old_agent, today))
 
         prompt = (
             f"Consolide esta sessao no Journal. Appende um resumo da conversa em "

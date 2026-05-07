@@ -1,42 +1,28 @@
 ---
 title: Journal
-description: Journal belonging to the main agent.
+description: Monthly index hub for the main agent — points to YYYY-MM rollups; each rollup links to that month's weekly summaries and daily files.
 type: index
 created: 2026-04-11
-updated: 2026-04-11
+updated: 2026-05-07
 tags: [index, journal]
 ---
 
 # Journal (main)
 
-<!-- vault-query:start filter="type=journal" scope="main/Journal" sort="-stem" format="- [[{link}|{stem}]] — {description}" -->
-- [[main/Journal/2026-05-06|2026-05-06]] — 
-- [[main/Journal/2026-05-05|2026-05-05]] — 
-- [[main/Journal/2026-05-04|2026-05-04]] — Cross-agent session snapshots: crypto-bro TA edit+publish+translate, mexc-bot plan-SL fix + ARB ClientDisconnect, parmeirense pos-jogo pipeline created, digests PinchTab restart.
-- [[main/Journal/2026-05-03|2026-05-03]] — OSS radar pipeline, vault-health, journal-audit, session snapshots for crypto-bro target_date refactor and parmeirense GloboEsporte integration, user verified Main agent access via primary chat.
-- [[main/Journal/2026-05-02|2026-05-02]] — Bot restart root-cause identified (launchd re-registration), pipeline consistency design discussion, OSS Radar pipeline completed.
-- [[main/Journal/2026-05-01|2026-05-01]] — Bot v3.53 vault graph fixes, agent-temp branch, watchdog startup notification restricted to primary chats, mexcbot dashboard mobile polish, OSS radar pipeline, skill audit.
-- [[main/Journal/2026-04-30|2026-04-30]] — oss-radar timeout fix and re-run; OSS Radar analysis for claude-bot improvements; Obsidian orphan fix (path-qualified parent links, agent-temp branch); v3.52.1 → v3.53.0.
-- [[main/Journal/2026-04-29|2026-04-29]] — mexc-bot agent created, v3.50.1 consolidation error message fix, oss-radar pipeline ran.
-- [[main/Journal/2026-04-28|2026-04-28]] — Check-in pós-compactação, oss-radar pipeline, context files updated for main and parmeirense agents.
-- [[main/Journal/2026-04-27|2026-04-27]] — 
-- [[main/Journal/2026-04-26|2026-04-26]] — Vault health routine, oss-radar pipeline (GitHub + relevance report), update-check.
-- [[main/Journal/2026-04-25|2026-04-25]] — 
-- [[main/Journal/2026-04-24|2026-04-24]] — pending: no entries yet
-- [[main/Journal/2026-04-23|2026-04-23]] — WalletRadar IP debug (static .125 vs old DHCP .102), bot restart needed after claude-fallback-bot.py changes.
-- [[main/Journal/2026-04-22|2026-04-22]] — Routine and pipeline runs: vault-health, vault-rebuild, oss-radar, update-check. No active sessions.
-- [[main/Journal/2026-04-21|2026-04-21]] — 
-- [[main/Journal/2026-04-20|2026-04-20]] — HomeBridge skill created, SmartThings plugin migrated from PAT to OAuth (aziz66), Office AC control tested via API, HomePod mini AirPlay integration discussed.
-- [[main/Journal/2026-04-19|2026-04-19]] — 
-- [[main/Journal/2026-04-18|2026-04-18]] — Bot v3.37-3.38.2: model restoration on session cleanup, effective_model in signature, response cache, update install fix. GLM rate limit freeze investigated.
-- [[main/Journal/2026-04-17|2026-04-17]] — Overnight session snapshots, vault-health and oss-radar pipeline completed, update-check ran, journal audits throughout the day.
-- [[main/Journal/2026-04-16|2026-04-16]] — Claude Code telemetry error diagnosis, permissions page research, Opus 4.7 best practices analysis, HomeBridge dashboard, Jellyfin improvements.
-- [[main/Journal/2026-04-15|2026-04-15]] — Claude Code 2.1.92 changelog reviewed, update-check routine rebuilt (changelog+buttons), OSS Radar pipeline created, wikilink auto-fix in vault-health, journal-audit NO_REPLY fix.
-- [[main/Journal/2026-04-14|2026-04-14]] — update-check routine improved with changelog summary and Telegram install buttons, oss-radar pipeline created, Contador agent created
-- [[main/Journal/2026-04-13|2026-04-13]] — Investigated spurious test-routine warnings after file deletion; explained bot restart behavior resetting notification sets.
-- [[main/Journal/2026-04-12|2026-04-12]] — pending: no entries yet
-- [[main/Journal/2026-04-11|2026-04-11]] — pending: no entries yet
-- [[main/Journal/2026-04-10|2026-04-10]] — Operational skills library created, pipeline step migrations, palmeiras-feed image and date filter fixes.
-- [[main/Journal/2026-04-09|2026-04-09]] — Daily log for 2026-04-09.
-- [[main/Journal/2026-04-07|2026-04-07]] — Registro do dia 2026-04-07. Setup do vault, correcao thinking leak GLM, atualizacao OC, otimizacoes de config.
+## How to consult this journal
+
+Memory is hierarchical. **Always read top-down before opening individual days:**
+
+1. **This hub** — orients you on which months exist.
+2. **Monthly index** (`YYYY-MM/YYYY-MM.md`) — themes, highlights, decisions, links to that month's weeks. The frontmatter `description` is keyword-rich so you can decide whether to open the file from the listing alone.
+3. **Weekly summary** (`YYYY-MM/YYYY-Www.md`) — Goals/Decisions/Progress for that week + links to its daily files.
+4. **Daily file** (`YYYY-MM/YYYY-MM-DD.md`) — only when you need raw detail.
+
+This minimizes context window usage while keeping deep recall available.
+
+## Months
+
+<!-- vault-query:start filter="type=journal_monthly" scope="main/Journal" sort="-stem" format="- [[{link}|{stem}]] — {description}" -->
+- [[main/Journal/2026-05/2026-05|2026-05]] — MEXCBot dashboard extensivo (live SL/entry, BE button, modal chart Lightweight Charts, paginação, equity curves, AutoTrader timeout+retry fix), crypto-ta-analise-v2 refatorado com target_date canônico + Polymarket, crypto-ta-translate blindado contra leaks Telegram, palmeiras-pos-jogo-v2 pipeline criada, GloboEsporte integrado Tier 1, vault agent-temp branch, bot restart investigado (background…
+- [[main/Journal/2026-04/2026-04|2026-04]] — Correção do GLM-5.1 thinking leak e atualização OC 2026.4.5; criação dos agentes parmeirense, crypto-bro, digests e mexc-bot; refactor palmeiras-feed (13→5 steps) e crypto-news para human-in-the-loop; fix de órfãos no Obsidian com wikilinks path-qualified e branch agent-temp; migração SmartThings OAuth via homebridge-smartthings-oauth; bot v3.19→v3.53 com response cache, auto-compact notify e c…
 <!-- vault-query:end -->

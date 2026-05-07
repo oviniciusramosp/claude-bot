@@ -110,8 +110,22 @@ def discover_agents(entries: list[dict]) -> set[str]:
 
 
 def get_journal_path(vault: Path, agent: str, target_date: str) -> Path:
-    """Return journal file path for an agent under the v3.1 flat layout."""
-    return vault / (agent or "main") / "Journal" / f"{target_date}.md"
+    """Return journal file path for an agent under the v3.68 hierarchical layout.
+
+    New layout: ``vault/<agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md``. Falls
+    back to the old flat layout (``vault/<agent>/Journal/<YYYY-MM-DD>.md``)
+    only if the new-layout file doesn't exist AND the legacy file does —
+    so an in-progress migration still finds whatever the bot wrote earlier.
+    """
+    agent_id = agent or "main"
+    year_month = (target_date or "")[:7]
+    new_path = vault / agent_id / "Journal" / year_month / f"{target_date}.md"
+    if new_path.exists():
+        return new_path
+    legacy = vault / agent_id / "Journal" / f"{target_date}.md"
+    if legacy.exists():
+        return legacy
+    return new_path
 
 
 JOURNAL_TEMPLATE = """\

@@ -33,7 +33,7 @@ import subprocess
 import sys
 import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
@@ -108,25 +108,46 @@ def _collect_journal_text(
     return "\n\n".join(chunks).strip()
 
 
-def _run_claude_summary(agent: str, week_label: str, raw_text: str, workspace: Path) -> str:
+def _run_claude_summary(agent: str, week_label: str, raw_text: str, workspace: Path) -> Tuple[str, str]:
     """Spawn a ``claude --print`` subprocess to produce the weekly summary.
 
-    Uses ``--model sonnet`` and explicitly avoids tool use. The subprocess
-    stdin is the collected journal text; stdout is the summary we write
-    to disk. Times out after 120 s to avoid hanging the routine.
+    Returns ``(description, body)`` where:
+      - ``description`` is a single paragraph (≤300 chars) for the YAML
+        frontmatter that explains what content the reader will find.
+        Memory-consultation flow expects this to be specific enough that
+        an LLM scanning a list of weeks can decide which ones to open.
+      - ``body`` is the full markdown block (Goals/Decisions/Progress/
+        Next Week + a Days bullet list) that becomes the file contents.
+
+    Times out after 120 s. ``--model sonnet`` and no tool use.
     """
     claude_bin = os.environ.get("CLAUDE_PATH", "/opt/homebrew/bin/claude")
     prompt = (
         f"Você é responsável por produzir o sumário semanal do agente "
         f"`{agent}` para a semana `{week_label}`. Recebeu abaixo o texto "
-        "bruto de todas as entradas de journal da semana. Gere um resumo "
-        "compacto em markdown, em português, com EXACTLY estes blocos:\n\n"
-        "## Goals\n- bullet\n\n"
-        "## Decisions\n- bullet\n\n"
-        "## Progress\n- bullet\n\n"
-        "## Next Week\n- bullet\n\n"
-        "Máximo 6 bullets por bloco. Sem preâmbulo, sem epílogo. "
-        "Responda APENAS com o markdown.\n\n"
+        "bruto de todas as entradas de journal da semana. Gere DUAS saídas "
+        "delimitadas pelo separador exato `===DESC===`.\n\n"
+        "PARTE 1 — Description (1 parágrafo, máx 300 caracteres, em "
+        "português, denso de palavras-chave concretas: temas, projetos, "
+        "decisões, agentes/serviços tocados). NÃO comece com 'Auto-generated' "
+        "nem com a data. Esta description vai para o frontmatter YAML e é o "
+        "principal sinal que outro LLM usa para decidir se abre este "
+        "arquivo. Seja específico — `Pipeline crypto-news refactor + "
+        "mexc-bot dashboard mobile polish` é bom; `Diversas atividades` é "
+        "ruim.\n\n"
+        "===DESC===\n\n"
+        "PARTE 2 — Body (markdown completo, em português) com EXATAMENTE estes "
+        "blocos nesta ordem:\n\n"
+        "## What you'll find here\n"
+        "Um parágrafo (3-5 linhas) destacando os temas centrais da semana — "
+        "expansão da description, mais narrativo. Cite agentes, projetos, "
+        "decisões importantes.\n\n"
+        "## Goals\n- bullet (máx 6)\n\n"
+        "## Decisions\n- bullet (máx 6)\n\n"
+        "## Progress\n- bullet (máx 6)\n\n"
+        "## Next Week\n- bullet (máx 6)\n\n"
+        "Sem preâmbulo, sem epílogo. Responda APENAS com PARTE 1, o "
+        "separador, e PARTE 2.\n\n"
         "---\n\n"
         f"{raw_text}"
     )
@@ -143,40 +164,88 @@ def _run_claude_summary(agent: str, week_label: str, raw_text: str, workspace: P
         cwd=str(workspace),
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=180,
     )
     if result.returncode != 0:
         raise RuntimeError(
             f"claude subprocess failed rc={result.returncode}: "
             f"stderr={result.stderr.strip()[:400]}"
         )
-    return (result.stdout or "").strip()
+    raw = (result.stdout or "").strip()
+    if "===DESC===" in raw:
+        desc_part, body_part = raw.split("===DESC===", 1)
+        description = desc_part.strip()
+        body = body_part.strip()
+    else:
+        description = (
+            f"Weekly rollup for {agent} covering {week_label}."
+        )
+        body = raw
+    description = " ".join(description.split())  # collapse whitespace
+    if len(description) > 300:
+        description = description[:297] + "…"
+    return description, body
 
 
 def _write_weekly_file(
     vault_dir: Path,
     agent: str,
     week_label: str,
-    summary: str,
+    description: str,
+    body: str,
     date_from: str,
     date_to: str,
 ) -> Path:
-    weekly_dir = vault_dir / agent / "Journal" / "weekly"
-    weekly_dir.mkdir(parents=True, exist_ok=True)
-    path = weekly_dir / f"{week_label}.md"
+    """Write ``vault/<agent>/Journal/<YYYY-MM>/<YYYY-Www>.md``.
+
+    The month folder is the month containing the Monday of the week — that
+    rule is unambiguous (every week has exactly one Monday). The directory
+    is created on demand so a fresh agent or a brand-new month doesn't need
+    a separate setup pass.
+    """
+    monday = _dt.date.fromisoformat(date_from)
+    month_label = f"{monday.year:04d}-{monday.month:02d}"
+    month_dir = vault_dir / agent / "Journal" / month_label
+    month_dir.mkdir(parents=True, exist_ok=True)
+    path = month_dir / f"{week_label}.md"
     today = _dt.date.today().isoformat()
+    # Sanitize description for YAML — escape internal quotes, no newlines.
+    desc_safe = (description or "").replace('"', '\\"').replace("\n", " ").strip()
+    if not desc_safe:
+        desc_safe = (
+            f"Weekly rollup for {agent} ({week_label}, "
+            f"{date_from} → {date_to})."
+        )
+    days_list = []
+    cur = monday
+    end = _dt.date.fromisoformat(date_to)
+    while cur <= end:
+        days_list.append(cur.isoformat())
+        cur += _dt.timedelta(days=1)
+    days_yaml = ", ".join(days_list)
     frontmatter = (
         "---\n"
         f'title: "Weekly {week_label} — {agent}"\n'
-        f'description: "Auto-generated weekly rollup covering {date_from} → {date_to}"\n'
+        f'description: "{desc_safe}"\n'
         "type: journal_weekly\n"
         f"week: {week_label}\n"
+        f"month: {month_label}\n"
+        f"agent: {agent}\n"
+        f"period_start: {date_from}\n"
+        f"period_end: {date_to}\n"
+        f"days: [{days_yaml}]\n"
         f"created: {today}\n"
         f"updated: {today}\n"
         "tags: [journal, weekly, rollup]\n"
         "---\n\n"
     )
-    path.write_text(frontmatter + summary + "\n", encoding="utf-8")
+    # Append the wikilinks-to-days section so a reader can drill down without
+    # opening the agent-journal.md hub.
+    days_section_lines = ["", "## Days", ""]
+    for d in days_list:
+        days_section_lines.append(f"- [[{agent}/Journal/{month_label}/{d}|{d}]]")
+    days_section = "\n".join(days_section_lines) + "\n"
+    path.write_text(frontmatter + body.strip() + "\n" + days_section, encoding="utf-8")
     return path
 
 
@@ -196,19 +265,28 @@ def _rollup_for_agent(
         return None
     workspace = vault_dir / agent
     if skip_llm:
-        # Used by tests — write a deterministic summary so we can assert
-        # on the final artifact without spawning a real Claude subprocess.
-        summary = (
+        # Used by tests and the migration script — produces a deterministic
+        # placeholder so the final artifact can be asserted on without a real
+        # Claude subprocess.
+        description = (
+            f"Test-mode rollup for {agent} ({week_label}, "
+            f"{len(raw)} chars of raw journal)."
+        )
+        body = (
+            "## What you'll find here\n"
+            f"(test-mode) Placeholder summary for {agent} during {week_label}.\n\n"
             f"## Goals\n- (test-mode) {agent}\n\n"
             f"## Decisions\n- (test-mode)\n\n"
             f"## Progress\n- (test-mode) {len(raw)} chars of raw journal\n\n"
             f"## Next Week\n- (test-mode)\n"
         )
     else:
-        summary = _run_claude_summary(agent, week_label, raw, workspace)
-    if not summary.strip():
+        description, body = _run_claude_summary(agent, week_label, raw, workspace)
+    if not body.strip():
         raise RuntimeError(f"weekly summary for {agent} came back empty")
-    path = _write_weekly_file(vault_dir, agent, week_label, summary, date_from, date_to)
+    path = _write_weekly_file(
+        vault_dir, agent, week_label, description, body, date_from, date_to,
+    )
     # Write-through to the FTS index so the new rollup is immediately
     # searchable by the next session.
     try:

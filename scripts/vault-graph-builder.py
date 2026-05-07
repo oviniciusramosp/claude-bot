@@ -131,6 +131,8 @@ def resolve_wikilink(link, source_dir, vault_dir):
 # reactions, agent metadata) — not knowledge nodes. Including them pollutes
 # the graph with orphans and forces editors to add fake backlinks.
 DAILY_JOURNAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
+WEEKLY_JOURNAL_RE = re.compile(r"^\d{4}-W\d{2}\.md$")
+MONTHLY_JOURNAL_RE = re.compile(r"^\d{4}-\d{2}\.md$")
 
 
 def is_ephemeral(filepath: Path, vault_dir: Path) -> bool:
@@ -149,9 +151,20 @@ def is_ephemeral(filepath: Path, vault_dir: Path) -> bool:
     # Bot reactions (webhook config, not knowledge) — v3.1: per-agent reactions.
     if "Reactions" in parts:
         return True
-    # Daily journal entries (YYYY-MM-DD.md) at any level — keep Journal.md indexes
-    if "Journal" in parts and DAILY_JOURNAL_RE.match(filepath.name):
-        return True
+    # Journal files (any depth) — daily, weekly, monthly. v3.68 introduces the
+    # YYYY-MM/ hierarchy: dailies, weeklies, AND the monthly summary all live
+    # inside the month folder. Only `agent-journal.md` (the hub) stays in the
+    # graph as the single per-agent entry point. Including the monthly summary
+    # files in the graph would re-introduce the orphan-storm we got rid of in
+    # v3.0 by excluding dailies.
+    if "Journal" in parts:
+        name = filepath.name
+        if (
+            DAILY_JOURNAL_RE.match(name)
+            or WEEKLY_JOURNAL_RE.match(name)
+            or MONTHLY_JOURNAL_RE.match(name)
+        ):
+            return True
     # Routine execution history rollups (<agent>/Routines/.history/YYYY-MM.md).
     if ".history" in parts:
         return True

@@ -103,6 +103,39 @@ The top-level `vault/CLAUDE.md` (this file) has path-qualified links to each `<a
 
 **Principle: scan before read.** Never open all files in a folder. First list the files and read only the first ~10 lines (frontmatter) of each. Use the `description` field to decide which ones deserve a full read.
 
+### Hierarchical journal — read top-down (v3.68+)
+
+Each agent's `Journal/` is organized as a tree, NOT a flat list of dailies:
+
+```
+<agent>/Journal/
+├── agent-journal.md              ← hub: lists every month
+├── 2026-05/
+│   ├── 2026-05.md                ← MONTHLY summary (themes, highlights, decisions)
+│   ├── 2026-W18.md               ← WEEKLY summary (Goals/Decisions/Progress)
+│   ├── 2026-W19.md
+│   ├── 2026-05-01.md             ← raw daily entry
+│   └── ...
+└── 2026-04/
+    └── ...
+```
+
+**Always consult memory in this order — never skip levels:**
+
+1. **`agent-journal.md`** — orients you on which months exist. One read.
+2. **Monthly file** (`YYYY-MM/YYYY-MM.md`) — frontmatter `description` + `## What you'll find here` section tell you whether the month is worth opening. The body has *Themes / Highlights / Decisions / Lessons / Carry-forward*. Almost every recall question can be answered here.
+3. **Weekly summary** (`YYYY-MM/YYYY-Www.md`) — only when the month looks relevant. Goals/Decisions/Progress for that week, plus links to its daily files.
+4. **Daily file** (`YYYY-MM/YYYY-MM-DD.md`) — only when you need raw detail a weekly summary doesn't cover. Today's daily file is the exception — read it directly when you're *appending* new entries.
+
+**Why this matters:** the monthly description is keyword-rich (refactor names, agent names, decisions). Reading three monthlies costs ~3K tokens; reading thirty dailies costs ~50K. Stay shallow until the question demands depth.
+
+**Generation pipeline:**
+- Daily files — written by the bot in real time (`/important`, session consolidation, pipeline reports).
+- Weekly file — generated automatically every **Monday at 05:00** by the `journal-weekly-rollup` routine.
+- Monthly file — generated automatically on the **1st of each month at 05:30** by the `journal-monthly-rollup` routine.
+
+The folder for a new month is created on demand by the bot the first time something is written that day. A placeholder `YYYY-MM.md` is dropped immediately so the hub never points at a missing file; the LLM rollup enriches it on the 1st of next month.
+
 ### Knowledge graph (`.graphs/graph.json`)
 
 The vault has a lightweight knowledge graph at `.graphs/graph.json`, regenerated daily by the `vault-graph-update` routine. Every node now carries an `agent` attribute derived from its path (`Agents/<id>/…`), which the Active Memory and skill hint helpers use to enforce isolamento total.
@@ -195,7 +228,9 @@ README (root hub)
 | Tooling | none (terminal) | README |
 
 **Files that are NOT graph nodes** (excluded by `vault-graph-builder.py`):
-- Daily journal entries (`<agent>/Journal/YYYY-MM-DD.md`) — ephemeral chronological logs
+- Daily journal entries (`<agent>/Journal/YYYY-MM/YYYY-MM-DD.md`) — ephemeral chronological logs
+- Weekly summaries (`<agent>/Journal/YYYY-MM/YYYY-Www.md`) — auto-generated rollups
+- Monthly summaries (`<agent>/Journal/YYYY-MM/YYYY-MM.md`) — auto-generated rollups (the only graph node from `Journal/` is `agent-journal.md`, the hub)
 - Bot reactions (`<agent>/Reactions/**`) — webhook config, not knowledge
 - Routine execution history (`<agent>/Routines/.history/**`) — churn-y log rollups
 - Agent instructions (`<agent>/CLAUDE.md`) — parsed directly by Claude CLI, not browsed in the graph

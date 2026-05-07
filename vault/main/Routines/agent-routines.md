@@ -19,6 +19,7 @@ tags: [index, routines]
 
 <!-- vault-query:start filter="type=routine" scope="main/Routines" sort="title" format="- [[{link}|{stem}]] — {description}" -->
 - [[main/Routines/journal-audit|journal-audit]] — Nightly audit that checks all agents' journals for completeness, fixes frontmatter issues, and fills gaps from the activity log.
+- [[main/Routines/journal-monthly-rollup|journal-monthly-rollup]] — First-of-month: produce a rich monthly summary (themes, highlights, decisions, lessons, carry-forward) for every agent — frontmatter description is the primary signal LLMs use when scanning agent-journal.md to pick which months to open. Iterates iter_agent_ids() automatically per contract C7.
 - [[main/Routines/journal-weekly-rollup|journal-weekly-rollup]] — Monday morning: produce a compact bullet-style summary of last week's journal for every agent — global routine that iterates iter_agent_ids() automatically. New agents are picked up with zero config per contract C7.
 - [[main/Routines/skill-audit|skill-audit]] — Monthly audit of all vault skills across agents — checks trigger clarity, description accuracy, staleness, and overlap. Reports issues or NO_REPLY if everything is healthy.
 - [[main/Routines/update-check|update-check]] — Checks daily for updates to Claude Code CLI and claude-bot repo/macOS app. Summarizes changes, recommends urgency, offers install button.

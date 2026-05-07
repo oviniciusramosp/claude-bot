@@ -354,21 +354,59 @@ def vault_create_note(
 def vault_append_journal(text: str, agent_id: Optional[str] = None) -> Dict[str, Any]:
     """Append a timestamped entry to today's journal.
 
-    Writes to `vault/<agent_id>/Journal/YYYY-MM-DD.md` (v3.1 flat per-agent
-    layout). If `agent_id` is omitted, defaults to "main".
+    Writes to ``vault/<agent_id>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md``
+    (v3.68+ hierarchical layout). The ``YYYY-MM/`` folder is created on
+    demand, and a placeholder ``YYYY-MM.md`` monthly index is dropped if
+    one doesn't exist yet — the ``journal-monthly-rollup`` routine
+    enriches it on the 1st of next month. If ``agent_id`` is omitted,
+    defaults to ``main``.
     """
     today = time.strftime("%Y-%m-%d")
     timestamp = time.strftime("%H:%M")
     agent = agent_id or "main"
-    journal_dir = VAULT_DIR / agent / "Journal"
-    journal_dir.mkdir(parents=True, exist_ok=True)
-    journal_path = journal_dir / f"{today}.md"
+    year_month = today[:7]
+    month_dir = VAULT_DIR / agent / "Journal" / year_month
+    month_dir.mkdir(parents=True, exist_ok=True)
+    # Drop a placeholder monthly index so agent-journal.md (which lists
+    # monthlies) immediately picks up the new month even before the
+    # journal-monthly-rollup routine runs.
+    monthly_idx = month_dir / f"{year_month}.md"
+    if not monthly_idx.exists():
+        owner = agent
+        monthly_skeleton = (
+            "---\n"
+            f'title: "Journal {year_month}"\n'
+            f'description: "Monthly index for {year_month} ({owner}). Pending '
+            "rollup — the journal-monthly-rollup routine enriches this with "
+            "themes, highlights, weekly links and daily summaries on the "
+            '1st of next month."\n'
+            "type: journal_monthly\n"
+            f"month: {year_month}\n"
+            f"agent: {owner}\n"
+            f"created: {today}\n"
+            f"updated: {today}\n"
+            "tags: [journal, monthly, rollup]\n"
+            "---\n\n"
+            f"# Journal — {year_month}\n\n"
+            "## How to consult this month\n\n"
+            "Memory is hierarchical. Read in this order before opening individual days:\n\n"
+            "1. The description in this file's frontmatter — themes covered.\n"
+            "2. The weekly summaries linked here — compact recap per week.\n"
+            "3. Individual daily files — only when you need raw detail.\n\n"
+            "## Pending\n\n"
+            "Rollup not yet generated. Will be filled by `journal-monthly-rollup` "
+            "on the 1st of next month.\n"
+        )
+        monthly_idx.write_text(monthly_skeleton, encoding="utf-8")
+    journal_path = month_dir / f"{today}.md"
     if not journal_path.exists():
         header = (
             f"---\n"
             f'title: "Journal {today}"\n'
             f'description: "pending: no entries yet"\n'
             f"type: journal\n"
+            f"month: {year_month}\n"
+            f"agent: {agent}\n"
             f"created: {today}\n"
             f"updated: {today}\n"
             f"tags: [journal]\n"

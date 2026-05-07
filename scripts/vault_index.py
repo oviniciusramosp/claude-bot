@@ -72,9 +72,10 @@ DEFAULT_DB_PATH = Path.home() / ".claude-bot" / "vault-index.sqlite"
 
 KIND_JOURNAL = "journal"
 KIND_JOURNAL_WEEKLY = "journal_weekly"
+KIND_JOURNAL_MONTHLY = "journal_monthly"
 KIND_LESSON = "lesson"
 KIND_NOTE = "note"
-ALL_KINDS = (KIND_JOURNAL, KIND_JOURNAL_WEEKLY, KIND_LESSON, KIND_NOTE)
+ALL_KINDS = (KIND_JOURNAL, KIND_JOURNAL_WEEKLY, KIND_JOURNAL_MONTHLY, KIND_LESSON, KIND_NOTE)
 
 # Vault filenames/directories we skip when walking agent folders.
 _SKIP_FILENAMES = frozenset({
@@ -97,11 +98,17 @@ _JOURNAL_SECTION_HEADING_RE = re.compile(
     re.MULTILINE,
 )
 
-# Weekly rollup filename: vault/<agent>/Journal/weekly/YYYY-Www.md
+# Weekly rollup filename: YYYY-Www.md
 _WEEKLY_ROLLUP_RE = re.compile(r"(\d{4})-W(\d{2})\.md$")
 
 # Journal daily filename: YYYY-MM-DD.md
 _JOURNAL_DAILY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
+
+# Journal monthly index filename: YYYY-MM.md
+_JOURNAL_MONTHLY_RE = re.compile(r"^(\d{4}-\d{2})\.md$")
+
+# Journal month-folder name: YYYY-MM/
+_JOURNAL_MONTH_DIR_RE = re.compile(r"^(\d{4}-\d{2})$")
 
 
 # ---------------------------------------------------------------------------
@@ -379,20 +386,41 @@ def _iter_agent_files(
     agent_root = vault_dir / agent
     if not agent_root.is_dir():
         return
-    # Journals: daily + weekly rollup
+    # Journals: hierarchy is Journal/YYYY-MM/{YYYY-MM-DD,YYYY-Www,YYYY-MM}.md
+    # (v3.68+). Older flat-format files (Journal/YYYY-MM-DD.md and the
+    # legacy Journal/weekly/YYYY-Www.md folder) are still indexed for
+    # backward compatibility until a migration sweep promotes them.
     journal_dir = agent_root / "Journal"
     if journal_dir.is_dir():
+        # 1. Top-level legacy files (pre-v3.68 flat layout)
         for p in sorted(journal_dir.iterdir()):
             if not p.is_file() or p.name in _SKIP_FILENAMES:
                 continue
             if _JOURNAL_DAILY_RE.match(p.name):
                 yield KIND_JOURNAL, p, p.relative_to(vault_dir).as_posix()
-        weekly_dir = journal_dir / "weekly"
-        if weekly_dir.is_dir():
-            for p in sorted(weekly_dir.iterdir()):
+        # 2. Legacy weekly subfolder (pre-v3.68)
+        legacy_weekly = journal_dir / "weekly"
+        if legacy_weekly.is_dir():
+            for p in sorted(legacy_weekly.iterdir()):
                 if not p.is_file() or p.suffix != ".md":
                     continue
                 yield KIND_JOURNAL_WEEKLY, p, p.relative_to(vault_dir).as_posix()
+        # 3. v3.68+ monthly subfolders Journal/YYYY-MM/
+        for sub in sorted(journal_dir.iterdir()):
+            if not sub.is_dir() or not _JOURNAL_MONTH_DIR_RE.match(sub.name):
+                continue
+            for p in sorted(sub.iterdir()):
+                if not p.is_file() or p.suffix != ".md":
+                    continue
+                if p.name in _SKIP_FILENAMES:
+                    continue
+                rel = p.relative_to(vault_dir).as_posix()
+                if _JOURNAL_DAILY_RE.match(p.name):
+                    yield KIND_JOURNAL, p, rel
+                elif _WEEKLY_ROLLUP_RE.search(p.name):
+                    yield KIND_JOURNAL_WEEKLY, p, rel
+                elif _JOURNAL_MONTHLY_RE.match(p.name):
+                    yield KIND_JOURNAL_MONTHLY, p, rel
     # Lessons
     lessons_dir = agent_root / "Lessons"
     if lessons_dir.is_dir():
@@ -464,6 +492,10 @@ def _rows_for_file(
         m = _WEEKLY_ROLLUP_RE.search(abs_path.name)
         if m:
             date_str = f"{m.group(1)}-W{m.group(2)}"
+    elif kind == KIND_JOURNAL_MONTHLY:
+        m = _JOURNAL_MONTHLY_RE.match(abs_path.name)
+        if m:
+            date_str = m.group(1)
     else:
         date_str = str(fm.get("date") or "") or None
 
@@ -835,11 +867,19 @@ def upsert_file(
         conn.commit()
         return 0
 
-    # Infer the kind from the path
+    # Infer the kind from the path. v3.68+ layout puts dailies, weeklies, and
+    # the monthly index inside Journal/YYYY-MM/, so the basename pattern is
+    # the most reliable signal.
     parts = rel_path.split("/")
     kind = KIND_NOTE
     if "Journal" in parts:
-        kind = KIND_JOURNAL_WEEKLY if "weekly" in parts else KIND_JOURNAL
+        fname = Path(rel_path).name
+        if _JOURNAL_MONTHLY_RE.match(fname):
+            kind = KIND_JOURNAL_MONTHLY
+        elif _WEEKLY_ROLLUP_RE.search(fname) or "weekly" in parts:
+            kind = KIND_JOURNAL_WEEKLY
+        else:
+            kind = KIND_JOURNAL
     elif "Lessons" in parts:
         kind = KIND_LESSON
     elif "Notes" in parts:
