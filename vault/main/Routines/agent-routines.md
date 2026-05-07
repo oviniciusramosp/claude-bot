@@ -12,7 +12,7 @@ tags: [index, routines]
 ## Pipelines
 
 <!-- vault-query:start filter="type=pipeline" scope="main/Routines" sort="title" format="- [[{link}|{stem}]] — {description}" -->
-- [[main/Routines/oss-radar|oss-radar]] — Daily scan of OpenClaw and Hermes Agent repos for new commits, PRs, and releases. Opus analyzes relevance to claude-bot product and reports actionable insights.
+- [[main/Routines/oss-radar-v2|oss-radar-v2]] — Pipeline v2 -- typed steps; one Python collector + opus LLM analyzer + Telegram publish sink. Daily scan of OpenClaw + Hermes Agent for new commits, PRs, and releases. Replaces oss-radar.md (v1 disabled).
 <!-- vault-query:end -->
 
 ## Routines

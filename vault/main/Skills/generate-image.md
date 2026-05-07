@@ -213,5 +213,5 @@ If the use case requires a real person's likeness (e.g., "Abel Ferreira celebrat
 - **Cost awareness**: Gemini image generation is cheap (~$0.02/image) but not free. Don't generate speculatively — only when the pipeline will actually publish.
 - **Caching**: for repeated prompts (e.g., fallback assets), cache in `/tmp/image-cache/{prompt-hash}.jpg` and reuse for 24h.
 - **Compliance**: Generated images used publicly should not impersonate public figures or brand logos.
-- Reference implementations: `Routines/crypto-ta-analise/steps/cover.md`, `Agents/crypto-bro/scripts/generate-ta-cover.py`
+- Reference implementations: `crypto-bro/Routines/crypto-ta-analise/scripts/cover_v2.py`, `crypto-bro/scripts/generate-ta-cover.py`
 - For image selection from existing web sources (not generation), see `Skills/fetch-web.md` and the palmeiras-feed image cascade pattern

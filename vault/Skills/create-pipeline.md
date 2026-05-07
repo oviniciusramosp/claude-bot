@@ -135,6 +135,135 @@ Validators report a pass/fail status the harness understands. On `retry-{step}`,
 
 Publish steps are the **only** place external API calls happen. No exceptions.
 
+#### 3.5.1 Inline-keyboard buttons (the ACTIONS block)
+
+A `sink: telegram` publish step can include interactive buttons that trigger another pipeline with a single tap. The producer (LLM step or script that writes the publish payload) embeds an HTML-comment block at the END of the body:
+
+```
+<!-- ACTIONS:
+[
+  {
+    "text": "📝 Publicar este",
+    "pipeline": "crypto-news-produce-v2",
+    "agent": "crypto-bro",
+    "overrides": {
+      "collect": {
+        "link": "https://...",
+        "notes": "Foque no impacto regulatório"
+      }
+    }
+  }
+]
+-->
+```
+
+The bot's Telegram sink:
+1. Strips the block from the visible message
+2. Persists each action under `~/.claude-bot/pending-actions/<id>.json` (TTL 24h)
+3. Renders a one-row-per-button `inline_keyboard` with `callback_data: act:<id>`
+
+When a user taps the button, the bot routes through `_handle_action_callback` (in `claude-fallback-bot.py`) which:
+- Authorizes (chat must be in `authorized_ids`)
+- Marks the payload `consumed_at` (idempotent — second click shows "já disparada por @user")
+- Triggers the target pipeline via the same path as `/run --overrides`
+- Edits the original message to drop the keyboard and append `✅ Disparada por @user às HH:MM`
+
+Field schema (varies by `type` — defaults to `trigger_pipeline` if omitted):
+
+**`type: "trigger_pipeline"`** (default — fires another pipeline):
+- `text` (required) — button label, ≤64 chars (Telegram limit)
+- `pipeline` (required) — target pipeline name (without `.md`)
+- `agent` (optional) — owning agent for the target pipeline; defaults to the source pipeline's agent
+- `overrides` (optional) — `{step_id: {attr: value}}` validated against the target pipeline's `accepts_overrides` schema before triggering
+
+**`type: "enter_edit_mode"`** (puts the bot in edit-mode; next user msg in that chat/topic gets intercepted as feedback and dispatched to a re-edit pipeline):
+- `text` (required) — button label
+- `edit_pipeline` (required) — target pipeline that accepts a `feedback` override on one of its steps (typically the LLM step that applies the edit)
+- `edit_agent` (optional) — owning agent of edit_pipeline
+- `edit_overrides_template` (optional) — base overrides merged with `{<step>: {feedback: "..."}}` at trigger time. Use this to pass static context like `source_data_dir` so the edit pipeline knows which run's artifacts to update.
+
+**`type: "cancel"`** (drops the workflow — marks all OTHER actions in the same batch consumed):
+- `text` (required) — button label
+
+The Telegram sink fills in `cancel.related_actions` automatically with the IDs of the other buttons emitted in the same ACTIONS block, so a single `cancel` payload covers every sibling without the producer needing to know IDs in advance.
+
+**When to use:**
+- ✅ "Scout → Produce" flows — one pipeline detects a signal, another acts on it (crypto-news-scout-v2 → crypto-news-produce-v2)
+- ✅ Approval gates with optional iterative editing — a draft is published as a Telegram preview with `[Publicar]` / `[Editar]` / `[Cancelar]` buttons that route to publish-final / re-edit / discard pipelines. **For the full pattern, see §4.5 (Approval-gate split).**
+- ✅ Multi-target dispatch — one detection emits buttons to several alternative downstream pipelines (e.g. publish to Notion vs. publish to a public X/Threads thread)
+
+**When NOT to use:**
+- ❌ Direct side-effects — buttons trigger pipelines, not arbitrary actions. They never POST/PATCH/DELETE on their own
+- ❌ Free-form text input — the button is fire-and-forget. If the user needs to type something, fall back to the conversational shortcut (e.g. `publica:` in Telegram DM)
+- ❌ Authorization-sensitive operations beyond "any authorized chat can trigger" — there is no per-button user filter today (TODO)
+
+**End-to-end example — scout emits a button, button triggers produce:**
+
+The producer (an LLM step in this case) writes the publish-step output:
+
+```
+🔴 Alerta alta — 14h32
+
+Bitcoin caiu 4,5% em 2h depois do anúncio surpresa do Fed.
+
+BTC: $78,250 (-4,5% nas últimas 2h)
+
+📎 Referências:
+• Fed surprises markets with rate hold — https://example.com/fed-decision
+
+<!-- ACTIONS:
+[
+  {
+    "text": "📝 Publicar este",
+    "pipeline": "crypto-news-produce-v2",
+    "agent": "crypto-bro",
+    "overrides": {
+      "collect": {
+        "link": "https://example.com/fed-decision",
+        "title": "Fed surprises markets with rate hold",
+        "notes": "Foque no impacto sobre BTC e cripto risk-on"
+      }
+    }
+  }
+]
+-->
+```
+
+The downstream pipeline (`crypto-news-produce-v2`) declares the override schema on its `collect` step:
+
+```yaml
+- id: collect
+  type: script
+  command: python3 .../scripts/collect_v2.py
+  output_file: collect.md
+  accepts_overrides:
+    link:
+      type: string
+      description: Article URL — bypasses input.md when set
+    notes:
+      type: string
+      description: Editorial notes about what to cover
+    title:
+      type: string
+      description: Article title hint when the URL fetcher cannot infer it
+```
+
+The script reads the values from `STEP_OVERRIDE_LINK` / `STEP_OVERRIDE_NOTES` / `STEP_OVERRIDE_TITLE` env vars (the harness exports them per the schema). Without overrides, the script falls back to the manual `input.md` path — the trigger surface (button vs `publica:` shortcut) is decoupled from the collection logic.
+
+**Authoring rule for the producing LLM:**
+
+The LLM that writes the publish-step content needs explicit instructions to emit the ACTIONS block. The block is invisible to it during normal "write a Telegram message" inertia — without a prompt rule, you'll get prose-only output. The prompt should say:
+
+> Append a single ACTIONS block on its own paragraph after the alert text. Use exactly this format: `<!-- ACTIONS:\n[ {...} ]\n-->`. Pick the SINGLE best link from the input data — multiple buttons clutter the message. Skip the block entirely when the data does not contain an actionable URL.
+
+See `crypto-bro/Routines/crypto-news-scout-v2/steps/relevance-decide.md` for a working reference.
+
+**Operational notes:**
+- Pending actions live at `~/.claude-bot/pending-actions/<id>.json` with TTL 24h
+- Bot startup purges expired files — no maintenance needed
+- The `consumed_at` field doubles as an audit trail (`consumed_by` username) — useful when multiple admins share a chat
+- If the target pipeline is already running, the button click is rejected with `⚠️ já está rodando` and `consumed_at` is rolled back so the user can retry after it finishes
+
 ### 3.6 Status report
 
 When a step finishes, the executor logs its status (`completed`, `skipped`, `failed`, `retrying`) and any structured emits. Downstream steps consume these via the `{{prev.<step-id>.<field>}}` substitution — they do **not** reparse the workspace to "guess what happened."
@@ -176,6 +305,117 @@ scout (llm, haiku) ─► (NO_REPLY?) ─► fetch (script) ─► analyst (llm,
 ### 4.4 Loop-until-done refinement
 
 For iterative shaping (a writer/reviewer pair that converges), use the `loop_until` field on the LLM step. Bound it with `loop_max_iterations` and pair it with a `validate` step so the loop has a concrete stop signal beyond a fuzzy marker.
+
+### 4.5 Approval-gate split — composing multiple pipelines via shared data dir
+
+When the workflow has a **human decision point** ("publish? edit? cancel?") AND a possibly-iterative refinement loop, splitting one logical pipeline into 2–3 physical pipelines connected by ACTIONS buttons is cleaner than a monolith. The split gives:
+
+- A **scheduled producer** that runs to a paused preview state and stops (no side-effects yet).
+- An **on-demand publisher** that fires when the user approves (does the irreversible Notion POST / API call / etc.).
+- An optional **on-demand editor** that re-applies user feedback and regenerates the preview, looping until the user publishes or cancels.
+
+All three pipelines share state via the producer's `data dir`, threaded through the chain by the `source_data_dir` accepts_overrides field. The producer's data dir is the **canonical** copy of reviewer/cover/checkpoint files; consumers always read AND write back there (never to their own data dirs).
+
+**Topology:**
+
+```
+producer (cron)                publisher (manual)              editor (manual)
+───────────────                ──────────────────              ───────────────
+collect ─► analyze ─►
+write ─► validate ─►
+review ─► cover ─►
+compose-preview ─►
+preview-telegram (ACTIONS)
+   │
+   ├─ tap "Publicar" ─────► publish-step (script, source_data_dir)
+   │                              ↓
+   │                        notify-link (publish sink)
+   │
+   ├─ tap "Editar"   ─► [edit-mode armed]
+   │   ↓
+   │   user types feedback
+   │                                                ────► apply-edit (LLM, source_data_dir + feedback)
+   │                                                          ↓
+   │                                                      validate (source_data_dir)
+   │                                                          ↓
+   │                                                      sync-back  (writes → source_data_dir)
+   │                                                          ↓
+   │                                                      compose-preview (regenerates ACTIONS)
+   │                                                          ↓
+   │                                                      preview-telegram ⤴ (loops)
+   │
+   └─ tap "Cancelar" ─► drop the workflow
+```
+
+**Working reference:** `crypto-bro/Routines/crypto-ta-analise-v2.md` (producer) + `crypto-ta-publish-v2.md` (publisher) + `crypto-ta-edit-v2.md` (editor).
+
+**Sharing state via `source_data_dir`:**
+
+The producer's `compose-preview` script embeds its own data dir as `source_data_dir` in every ACTIONS button payload. The publisher and editor declare `accepts_overrides.source_data_dir` on the steps that need to read/write canonical state, and read the value from `STEP_OVERRIDE_SOURCE_DATA_DIR` env var.
+
+```yaml
+# In the publisher pipeline
+- id: publish-notion
+  type: script
+  command: python3 .../scripts/publish_notion.py
+  accepts_overrides:
+    source_data_dir:
+      type: string
+      description: "Absolute path to the producer run's data dir (where reviewer.md / cover.md / published.md live). Required."
+```
+
+```python
+# In the script:
+data_dir = Path(os.environ.get("STEP_OVERRIDE_SOURCE_DATA_DIR")
+                or os.environ["PIPELINE_DATA_DIR"])
+reviewer = (data_dir / "reviewer.md").read_text()
+```
+
+**Idempotency in the producer's dir:**
+
+The publish step writes its `published.md` checkpoint to `source_data_dir/published.md` (NOT to its own data dir). A second tap on Publicar reads the checkpoint and reuses the existing notion_url/api_id/etc. instead of duplicating the side-effect. Because the user could legitimately tap Publicar after a failed first attempt, this is the right default — opt out by writing the checkpoint to the publisher's own data dir if the producer's must remain pristine.
+
+**Iteration loop (editor):**
+
+If you want the user to refine before publishing, add an editor pipeline. It mirrors the producer's tail: `apply-edit (LLM)` → `validate` → `sync-back` (a tiny script that copies the edited file from the editor's data dir back to `source_data_dir/<canonical>.md`) → `compose-preview` (with `source_data_dir` override so the regenerated preview reads the freshly synced file) → `preview-telegram` (with `source_data_dir` baked into the new ACTIONS payload).
+
+The `enter_edit_mode` ACTIONS button on the producer's preview triggers the editor with `feedback` set to the user's free-text reply. Each iteration emits a NEW preview message with NEW button IDs; the prior message's buttons are auto-consumed (idempotency) so the user only ever has one live preview.
+
+**When NOT to use this split:**
+
+- The "publish" is reversible and cheap (e.g. write to a draft folder) — keep it inline.
+- There's no human-in-the-loop need — keep it inline.
+- The producer never produces canonical state worth sharing — there's no shared data to thread through. Use a flat single pipeline.
+
+**Authoring checklist:**
+
+1. Producer ends with `compose-preview` (script that strips internal markup → Telegram-friendly + ACTIONS block) → `preview-telegram` (publish, sink: telegram, `sink_config.title: false` so the script's custom header is the only one).
+2. Publisher accepts `source_data_dir` override on the step(s) that read/write canonical artifacts. Idempotency checkpoint written to `source_data_dir`.
+3. Editor (if present) has 5 steps: `apply-edit` (LLM with `feedback` + `source_data_dir` overrides) → `writer-validate` (with `source_data_dir` for cross-checks) → `sync-back` (script copying edited file → source_data_dir) → `compose-preview` (with `source_data_dir`) → `preview-telegram`.
+4. Validation script of the producer must accept `STEP_OVERRIDE_SOURCE_DATA_DIR` so the editor can re-validate against the same upstream artifacts (CSV cross-checks, etc.).
+5. Document the trigger flow in each pipeline's `## Trigger` section so future readers don't grep the bot for "who calls this".
+
+**⚠️ Gotcha — `source_data_dir` must thread through EVERY consumer step that declares it.**
+
+When the producer's compose-preview emits the `enter_edit_mode` ACTIONS payload, the `edit_overrides_template` field becomes the base override dict for the editor pipeline. **Every step in the editor that declares `accepts_overrides.source_data_dir` must appear in this template** — missing keys do NOT silently inherit a default; they fall through to per-step behavior that's wrong in the edit context:
+
+- `sync-back` hard-fails (`STEP_OVERRIDE_SOURCE_DATA_DIR is required`) — its destination is unknown.
+- `writer-validate` silently SKIPS the EMA / CSV cross-check (returns `ema_check_skipped: true`) because it can't find the upstream collect file in the editor's empty data dir. The validator passes a malformed post.
+
+The producer/editor contract is therefore tight coupling: `compose_preview_v2.py`'s `overrides_for_edit_template` dict must list ALL steps in the editor pipeline that need `source_data_dir`. When you add or rename an editor step that needs it, you MUST update the producer's template at the same time. There is no runtime safety net today — the symptom is a half-applied edit (apply-edit succeeded, sync-back failed, user has no way to recover except rerunning the entire producer).
+
+The minimum coverage for the canonical 5-step editor:
+
+```python
+overrides_for_edit_template = {
+    "apply-edit":      {"source_data_dir": source_data_dir_abs},
+    "writer-validate": {"source_data_dir": source_data_dir_abs},
+    "sync-back":       {"source_data_dir": source_data_dir_abs},
+    "compose-preview": {"source_data_dir": source_data_dir_abs},
+}
+```
+
+Reference: `crypto-bro/Routines/crypto-ta-analise/scripts/compose_preview_v2.py` — the `overrides_for_edit_template` dict near the bottom of `main()`.
 
 ---
 
@@ -226,7 +466,7 @@ What the validator typically checks:
 
 External API calls and writes outside the pipeline workspace happen **only** in `publish` steps. Not in `llm` prompts. Not in `script` steps that "happen to call an API." Not in inline Python embedded in a step prompt.
 
-### 6.1 Anti-pattern (real, taken from `crypto-bro/Routines/crypto-ta-analise/steps/publisher.md`)
+### 6.1 Anti-pattern (historical — was the v1 `crypto-ta-analise` `publisher` step before the v2 migration replaced it with `publish_notion_ta_v2.py`)
 
 ```python
 # Inside an LLM step prompt, the model is told to:
@@ -350,6 +590,17 @@ When the pipeline is triggered with `{analyst: {focus_asset: "ETH"}}`, the harne
 - For `llm` steps: appends a `## Overrides for this run` section to the prompt with the resolved values
 - For `script` steps: sets env vars (`STEP_OVERRIDE_FOCUS_ASSET=ETH`) before invocation
 - For `publish` steps: substitutes into the `template` / `config` via `{{override.<key>}}`
+
+**Triggers that pass overrides (Pipeline v2):**
+
+| Trigger | Path | Example |
+|---|---|---|
+| Manual command | `/run <pipeline> --overrides '<json>'` | `/run crypto-ta-analise-v2 --overrides '{"analyst":{"focus_asset":"ETH"}}'` |
+| Programmatic | `bash scripts/run-routine.sh <name>` (no override support) or direct control-server POST | — |
+| **Inline-keyboard button** | Producer emits `<!-- ACTIONS: [...] -->` block; user taps button | See §3.5.1 |
+| Agent NL parser | "Crypto Bro, roda a TA com foco em ETH" → maps to `focus_asset` override | — |
+
+All paths converge on the same `validate_overrides()` validator before the pipeline starts. Authoring an override means defining its schema once — it works across every trigger.
 
 ### 8.1 What to expose
 
@@ -508,7 +759,7 @@ Notes on this example:
 
 ## 11. Refactoring example — break a monolithic LLM step
 
-This is the canonical anti-pattern in `vault/crypto-bro/Routines/crypto-ta-analise/steps/publisher.md`. The single `publisher` step does:
+This is the canonical anti-pattern that lived in the original v1 `crypto-ta-analise` `publisher` step (now replaced by `crypto-bro/Routines/crypto-ta-analise/scripts/publish_notion_ta_v2.py`). The single `publisher` step did:
 
 - Reads three workspace files (idempotency, cover data, reviewer output)
 - Computes a title in Portuguese from the system clock

@@ -293,5 +293,5 @@ if cache_file.exists():
 
 - The bot is stdlib-only — NO `requests`, NO `beautifulsoup4`, NO `lxml`. Use `urllib` + `xml.etree` + `re` + `html`
 - For complex HTML parsing, prefer PinchTab's `text` extraction over hand-written regex
-- Reference implementations: `Routines/palmeiras-feed/steps/fetch-web.md`, `Routines/crypto-news/steps/collect.md`, `Routines/crypto-ta-analise/steps/collect-*.md`
+- Reference implementations (Pipeline v2 scripts): `parmeirense/Routines/palmeiras-feed/scripts/scout_v2.py`, `crypto-bro/Routines/crypto-news-scout/scripts/collect_data_v2.py`, `crypto-bro/Routines/crypto-ta-analise/scripts/collect_*_v2.py`
 - Tool preferences: always check `Tooling.md` before introducing a new fetching approach

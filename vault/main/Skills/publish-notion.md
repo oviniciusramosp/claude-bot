@@ -212,4 +212,4 @@ Skipping duplicates is the caller's responsibility — this skill always creates
 - Blocks have a 2000-character content limit per `rich_text` element — split long paragraphs
 - Images inside content use `image` blocks with `{"type": "external", "external": {"url": ...}}` — host via `Skills/generate-image.md` (catbox.moe upload pattern)
 - For Telegram notification after publishing, read `agent.md` for `chat_id`/`thread_id` and use the bot's standard sendMessage pattern
-- Reference implementations: `Routines/crypto-news/steps/publish.md`, `Routines/crypto-ta-analise/steps/publisher.md`, `Routines/palmeiras-feed/steps/publish.md`
+- Reference implementations (Pipeline v2 scripts): `crypto-bro/Routines/crypto-news-produce/scripts/publish_notion_v2.py`, `crypto-bro/Routines/crypto-ta-analise/scripts/publish_notion_ta_v2.py`, `parmeirense/Routines/palmeiras-feed/scripts/publish_notion_v2.py`

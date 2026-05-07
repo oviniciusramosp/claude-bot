@@ -1,10 +1,12 @@
 You are analyzing recent open-source activity from two projects to find ideas and patterns relevant to **claude-bot** — a Telegram bot that wraps Claude Code CLI with session management, routines/pipelines, a vault-based knowledge graph, agents, voice, active memory, and a macOS companion app.
 
-Read the collected data from the previous step:
+Read the collected data from the previous step. The collector script writes a structured markdown file to the pipeline's data directory; the path is exposed via the `PIPELINE_DATA_DIR` env var, with the file named `collect-github.md`. Use the Read tool on `$PIPELINE_DATA_DIR/collect-github.md` (or, if that env var is not surfaced to you, look in the workspace `data/oss-radar-v2/collect-github.md`).
 
-```bash
-cat data/collect.md
-```
+The file has these sections:
+
+- `## collection_status` — `sources_ok` and `sources_failed` lists. Note any failed sources so you can caveat your analysis when data is partial.
+- `## openclaw_repos_overview` — JSON list of OpenClaw repos with `pushed_at` and `stars`.
+- `## <sanitized_full_name>_activity` — one section per active OpenClaw repo (and Hermes Agent), each containing JSON arrays of recent commits, releases, and (for Hermes) open PRs.
 
 ## Your product context
 

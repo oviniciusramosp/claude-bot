@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.60.4"  # fix: pipeline v2 _notify_success was still sending "Pipeline X: N/N steps completed in Ts" summary even after the savings_summary fired (caught after aviso-contas-v2). v2 now skips the whole output_text/summary send block — content reaches users only via publish sinks + savings_summary cascade message
+BOT_VERSION = "3.67.0"  # feat: per-pipeline run log file. PipelineExecutor now writes full stdout/stderr from every script/validate step (no truncation) to data_dir/logs/{pipeline}_{YYYY-MM-DD-HHMMSS}_{run-suffix}.log. Old logs (>48h) are purged inline at run start so active pipelines self-clean without a cron. Failure Telegram message gains a "📄 Log: <path>" suffix when the file exists, so users can grep the full HTTP error body (Notion 400, etc.) instead of the 100-char truncated preview. Implementation: _log_path/_log_filename/_log_started_at on PipelineExecutor; _cleanup_old_logs + _write_step_log helpers; wired into both timeout and success branches of _execute_script_step / _execute_validate_step
 
 import hmac
 import hashlib
@@ -153,6 +153,10 @@ VAULT_DIR = Path(__file__).resolve().parent / "vault"
 ROUTINES_STATE_DIR = DATA_DIR / "routines-state"
 AGENTS_SETTINGS_DIR = DATA_DIR / "agents"
 INFLIGHT_DIR = DATA_DIR / "inflight"
+PENDING_ACTIONS_DIR = DATA_DIR / "pending-actions"  # button-action payloads for inline keyboards
+PENDING_ACTION_TTL = 86400  # 24h — expired actions are purged on startup
+EDIT_MODE_DIR = DATA_DIR / "edit-modes"  # per-chat edit-mode state (awaiting feedback)
+EDIT_MODE_TTL = 1800  # 30min — edit mode expires if user doesn't respond
 WATCHDOG_NOTIFIED_FLAG = DATA_DIR / ".watchdog-notified"
 WATCHDOG_DISABLE_FLAG  = DATA_DIR / ".watchdog-disabled"
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
@@ -2625,6 +2629,21 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
 
     Honors ``sink_config['silent']`` (default False) → disable_notification.
     Honors ``sink_config['parse_mode']`` (default MarkdownV2 from bot.send_message).
+
+    **ACTIONS block (v3.63+):** if the content ends with a
+    ``<!-- ACTIONS: [...] -->`` block, the sink:
+      1. Strips the block from the visible text
+      2. Persists each action as a pending-action JSON
+         (``~/.claude-bot/pending-actions/<id>.json``)
+      3. Renders an ``inline_keyboard`` whose ``callback_data`` is
+         ``act:<id>``
+    Clicks route through ``_handle_callback`` → ``act:`` branch which loads
+    the payload, marks consumed, and triggers the target pipeline with
+    overrides via ``_run`` / ``_enqueue_pipeline_from_file``.
+
+    Validation: each action MUST be an object with ``text`` (button label)
+    and ``pipeline`` (target pipeline name) — invalid actions are dropped
+    with a WARNING and the message still sends without their button.
     """
     if not content_path.exists():
         return {"emitted": False, "sink": "telegram",
@@ -2639,6 +2658,120 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
     ctx = getattr(executor, "ctx", None)
     if bot is None or ctx is None:
         return {"emitted": False, "sink": "telegram", "error": "no bot/ctx on executor"}
+
+    # ACTIONS block → inline_keyboard
+    visible_text, raw_actions = _extract_actions_block(text)
+
+    # Pipeline header (v3.64+) — every Telegram-sink output gets a bold title
+    # prefixed with the owning agent's icon so the user can identify which
+    # pipeline produced the message at a glance. Suppressed only when
+    # `sink_config.title = false` (rare — payload that already contains its
+    # own header, or binary content).
+    task = getattr(executor, "task", None)
+    if task is not None and sink_config.get("title", True):
+        agent = load_agent(_agent_id_or_main(getattr(task, "agent", None)))
+        agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+        pipeline_title = getattr(task, "title", None) or getattr(task, "name", "Pipeline")
+        # `*...*` is the MarkdownV2 bold marker; _sanitize_markdown_v2 (called
+        # by bot.send_message) recognizes it and escapes reserved chars inside
+        # the bold span (e.g. `(v2)` becomes `\(v2\)`). No manual escape here.
+        header = f"*{agent_icon} {pipeline_title}*\n\n"
+        visible_text = header + visible_text.lstrip()
+
+    reply_markup: Optional[Dict] = None
+    saved_action_ids: List[str] = []
+    if raw_actions:
+        # Two-pass: (1) validate + assign IDs, (2) resolve cross-references
+        # (cancel action's `related_actions` = the OTHER IDs in this batch),
+        # (3) save all payloads + build keyboard.
+        owning_agent = getattr(executor, "task", None)
+        owning_agent = getattr(owning_agent, "agent", None) if owning_agent else None
+        source_pipeline = getattr(getattr(executor, "task", None), "name", None)
+
+        # Pass 1: validate and pre-assign IDs
+        prepared: List[Tuple[str, str, Dict]] = []  # (action_id, label, base_payload)
+        for action in raw_actions:
+            if not isinstance(action, dict):
+                logger.warning("ACTIONS entry must be a dict, got %s — skipping",
+                               type(action).__name__)
+                continue
+            label = str(action.get("text", "")).strip()
+            if not label:
+                logger.warning("ACTIONS entry missing text — skipping: %r", action)
+                continue
+            action_type = str(action.get("type", "trigger_pipeline"))
+            if action_type == "trigger_pipeline":
+                pipeline = str(action.get("pipeline", "")).strip()
+                if not pipeline:
+                    logger.warning("trigger_pipeline ACTIONS entry missing pipeline — skipping: %r", action)
+                    continue
+                base_payload = {
+                    "type": "trigger_pipeline",
+                    "pipeline": pipeline,
+                    "agent": action.get("agent") or owning_agent,
+                    "overrides": action.get("overrides") or {},
+                }
+            elif action_type == "enter_edit_mode":
+                edit_pipeline = str(action.get("edit_pipeline", "")).strip()
+                if not edit_pipeline:
+                    logger.warning("enter_edit_mode ACTIONS entry missing edit_pipeline — skipping: %r", action)
+                    continue
+                base_payload = {
+                    "type": "enter_edit_mode",
+                    "edit_pipeline": edit_pipeline,
+                    "edit_agent": action.get("edit_agent") or owning_agent,
+                    "edit_overrides_template": action.get("edit_overrides_template") or {},
+                }
+            elif action_type == "cancel":
+                base_payload = {
+                    "type": "cancel",
+                    # related_actions filled in pass 2
+                }
+            else:
+                logger.warning("Unknown ACTIONS type %r — skipping", action_type)
+                continue
+            base_payload["source_pipeline"] = source_pipeline
+            base_payload["source_step"] = step.id
+            action_id = _new_action_id()
+            prepared.append((action_id, label[:64], base_payload))
+
+        # Pass 2: resolve cross-references and populate original_action_ids
+        # on enter_edit_mode payloads (so cancel_edit can restore the keyboard).
+        all_ids = [aid for aid, _, _ in prepared]
+        for aid, _, payload in prepared:
+            t = payload.get("type")
+            if t == "cancel":
+                # Cancel action consumes everything else in the batch
+                payload["related_actions"] = [other for other in all_ids if other != aid]
+            elif t == "enter_edit_mode":
+                # Edit-mode needs to know which IDs to restore on cancel-edit
+                payload["original_action_ids"] = list(all_ids)
+
+        # Pass 3: save and build keyboard
+        keyboard_row: List[Dict] = []
+        for aid, label, payload in prepared:
+            # Save with the predetermined ID. _save_pending_action generates
+            # its own ID — bypass it by writing directly.
+            PENDING_ACTIONS_DIR.mkdir(parents=True, exist_ok=True)
+            full_payload = dict(payload)
+            full_payload.setdefault("created_at", int(time.time()))
+            full_payload.setdefault("consumed_at", None)
+            full_payload.setdefault("consumed_by", None)
+            (PENDING_ACTIONS_DIR / f"{aid}.json").write_text(
+                json.dumps(full_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            saved_action_ids.append(aid)
+            keyboard_row.append({
+                "text": label,
+                "callback_data": f"act:{aid}",
+            })
+
+        if keyboard_row:
+            # One row per action (vertical stack — easier on mobile and
+            # avoids label truncation when texts are wide).
+            reply_markup = {"inline_keyboard": [[btn] for btn in keyboard_row]}
+
     try:
         kwargs = {
             "chat_id": getattr(ctx, "chat_id", None),
@@ -2648,8 +2781,13 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
         parse_mode = sink_config.get("parse_mode")
         if parse_mode is not None:
             kwargs["parse_mode"] = parse_mode
-        bot.send_message(text, **kwargs)
-        return {"emitted": True, "sink": "telegram"}
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        bot.send_message(visible_text, **kwargs)
+        result = {"emitted": True, "sink": "telegram"}
+        if saved_action_ids:
+            result["actions"] = saved_action_ids
+        return result
     except Exception as exc:
         return {"emitted": False, "sink": "telegram", "error": str(exc)}
 
@@ -5107,6 +5245,347 @@ def parse_rate_limit_reset(raw: str) -> Optional[float]:
     return None
 
 
+# ----------------------------------------------------------------------------
+# Pipeline v2 publish-step ACTIONS block (v3.63+)
+# ----------------------------------------------------------------------------
+#
+# A publish step's content can declare zero or more interactive buttons by
+# embedding a single HTML-comment block:
+#
+#   <!-- ACTIONS:
+#   [
+#     {"text": "📝 Publicar",
+#      "pipeline": "crypto-news-produce-v2",
+#      "agent": "crypto-bro",
+#      "overrides": {"collect": {"link": "https://...", "notes": "..."}}}
+#   ]
+#   -->
+#
+# The Telegram sink:
+#   1. Extracts and removes the block from the visible message body
+#   2. Saves each action as a `pending-action` JSON file (TTL 24h)
+#   3. Builds an inline_keyboard whose callback_data is `act:<8-char-id>`
+#
+# Clicking the button routes through `_handle_callback` → `act:<id>` branch
+# which loads the payload, validates the user's authorization, marks the
+# action consumed (idempotency), and enqueues the target pipeline with the
+# given overrides via the same path as `/run --overrides`.
+#
+# Format chosen because:
+#   - HTML comments are silent in Telegram message rendering when stripped
+#   - JSON is the simplest way to express richly-typed action payloads
+#   - The block is at the END of the body so token-economy LLMs can append
+#     it after writing prose without restructuring
+#   - Callback_data is bound to 64 bytes by the Telegram API; storing the
+#     full payload off-band keeps button clicks fast and unrestricted in size
+_ACTIONS_BLOCK_RE = re.compile(
+    r'\s*<!--\s*ACTIONS:\s*(?P<json>\[.*?\])\s*-->\s*$',
+    re.DOTALL,
+)
+
+
+_MD2_RESERVED_RE = re.compile(r'([_*\[\]()~`>#+\-=|{}.!])')
+
+
+# ---------------------------------------------------------------------------
+# Pending action storage (Pipeline v2 inline-keyboard buttons)
+# ---------------------------------------------------------------------------
+
+def _new_action_id() -> str:
+    """8-char URL-safe random ID — short enough to fit Telegram's 64-byte
+    callback_data limit alongside the ``act:`` prefix and a few separators."""
+    return secrets.token_urlsafe(6)[:8]
+
+
+def _save_pending_action(payload: Dict) -> str:
+    """Persist a button-action payload and return its short ID.
+
+    Schema:
+        {"pipeline": str, "agent": Optional[str],
+         "overrides": Dict, "created_at": int (epoch),
+         "consumed_at": Optional[int], "consumed_by": Optional[str]}
+    """
+    PENDING_ACTIONS_DIR.mkdir(parents=True, exist_ok=True)
+    action_id = _new_action_id()
+    payload = dict(payload)
+    payload.setdefault("created_at", int(time.time()))
+    payload.setdefault("consumed_at", None)
+    payload.setdefault("consumed_by", None)
+    path = PENDING_ACTIONS_DIR / f"{action_id}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    return action_id
+
+
+def _load_pending_action(action_id: str) -> Optional[Dict]:
+    """Read a pending action by ID. Returns None if missing, expired, or
+    malformed. Does NOT mark consumed — caller decides via
+    ``_consume_pending_action`` after authorization passes."""
+    if not action_id or "/" in action_id or "." in action_id:
+        return None  # path-traversal guard
+    path = PENDING_ACTIONS_DIR / f"{action_id}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    created_at = payload.get("created_at", 0)
+    if isinstance(created_at, int) and time.time() - created_at > PENDING_ACTION_TTL:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    return payload
+
+
+def _consume_pending_action(action_id: str, by_user: str) -> bool:
+    """Mark an action consumed. Returns False if already consumed (idempotent
+    guard against double-clicks). The file stays on disk so future clicks
+    can show "already triggered by X" instead of "expired"."""
+    path = PENDING_ACTIONS_DIR / f"{action_id}.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("consumed_at"):
+        return False
+    payload["consumed_at"] = int(time.time())
+    payload["consumed_by"] = by_user[:64]
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _purge_expired_actions() -> int:
+    """Delete pending-action files older than TTL. Called from
+    `_recover_on_startup`. Returns count deleted."""
+    if not PENDING_ACTIONS_DIR.is_dir():
+        return 0
+    now = time.time()
+    deleted = 0
+    for f in PENDING_ACTIONS_DIR.glob("*.json"):
+        try:
+            payload = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+            continue
+        created_at = payload.get("created_at", 0)
+        if not isinstance(created_at, int) or now - created_at > PENDING_ACTION_TTL:
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+    return deleted
+
+
+# ---------------------------------------------------------------------------
+# Edit-mode state (Pipeline v2 ACTIONS — multi-step approval-gate flow)
+# ---------------------------------------------------------------------------
+#
+# When a user taps an "✏️ Editar" button on a publish-step preview, the bot
+# enters EDIT MODE for that chat: the next free-form text message the user
+# sends is intercepted (NOT routed to the agent's interactive session) and
+# fed as `feedback` to a re-edit pipeline (e.g. `crypto-ta-edit-v2`). After
+# the re-edit finishes, a fresh preview is sent with new buttons; the loop
+# continues until the user taps Publicar or Cancelar.
+#
+# State is keyed per (chat_id, thread_id) so a user can be editing in one
+# topic of a multi-topic chat without blocking other topics. State files
+# live under `~/.claude-bot/edit-modes/` with a 30-minute TTL — if the user
+# walks away mid-edit, the state expires and normal chat resumes.
+#
+# Lifecycle:
+#   1. _save_edit_mode  — set when "Editar" tapped
+#   2. _load_edit_mode  — checked at the top of _handle_text on every msg
+#   3. _clear_edit_mode — cleared when feedback consumed OR user taps "Cancelar Edição"
+# ---------------------------------------------------------------------------
+
+def _edit_mode_key(chat_id: str, thread_id: Optional[int]) -> str:
+    """Produce a path-safe key for (chat_id, thread_id). Negative chat_ids
+    (Telegram supergroups) start with '-' which is fine in filenames; thread
+    None becomes '0' so every key has the same shape."""
+    safe_chat = str(chat_id).replace("/", "_")
+    return f"{safe_chat}_{int(thread_id) if thread_id else 0}"
+
+
+def _save_edit_mode(chat_id: str, thread_id: Optional[int], payload: Dict) -> None:
+    """Persist edit-mode state for a chat. Overwrites any prior state for
+    the same (chat_id, thread_id) — only one edit-mode active at a time per
+    topic. Schema:
+
+        {"chat_id": str, "thread_id": Optional[int],
+         "msg_id": int,                  # the preview message that holds the buttons
+         "original_text": str,           # so "Cancelar Edição" can restore it
+         "original_action_ids": [str, str, str],  # pending-action IDs of the original [Publicar, Editar, Cancelar]
+         "edit_pipeline": str,           # e.g. "crypto-ta-edit-v2"
+         "edit_agent": str,              # e.g. "crypto-bro"
+         "edit_overrides_template": {},  # base overrides; "feedback" is added at trigger time
+         "created_at": int}
+    """
+    EDIT_MODE_DIR.mkdir(parents=True, exist_ok=True)
+    payload = dict(payload)
+    payload["chat_id"] = str(chat_id)
+    payload["thread_id"] = int(thread_id) if thread_id else None
+    payload.setdefault("created_at", int(time.time()))
+    path = EDIT_MODE_DIR / f"{_edit_mode_key(chat_id, thread_id)}.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+
+
+def _load_edit_mode(chat_id: str, thread_id: Optional[int]) -> Optional[Dict]:
+    """Load edit-mode state for a chat, or None if absent/expired/malformed.
+    Auto-deletes expired state on read so callers don't see stale data."""
+    path = EDIT_MODE_DIR / f"{_edit_mode_key(chat_id, thread_id)}.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    created_at = payload.get("created_at", 0)
+    if not isinstance(created_at, int) or time.time() - created_at > EDIT_MODE_TTL:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return None
+    return payload
+
+
+def _clear_edit_mode(chat_id: str, thread_id: Optional[int]) -> None:
+    """Clear edit-mode state for a chat. Idempotent — silent if absent."""
+    path = EDIT_MODE_DIR / f"{_edit_mode_key(chat_id, thread_id)}.json"
+    try:
+        path.unlink()
+    except (OSError, FileNotFoundError):
+        pass
+
+
+def _purge_expired_edit_modes() -> int:
+    """Delete edit-mode state files older than TTL. Called from
+    `_recover_on_startup`. Returns count deleted."""
+    if not EDIT_MODE_DIR.is_dir():
+        return 0
+    now = time.time()
+    deleted = 0
+    for f in EDIT_MODE_DIR.glob("*.json"):
+        try:
+            payload = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+            continue
+        created_at = payload.get("created_at", 0)
+        if not isinstance(created_at, int) or now - created_at > EDIT_MODE_TTL:
+            try:
+                f.unlink()
+                deleted += 1
+            except OSError:
+                pass
+    return deleted
+
+
+def _extract_actions_block(text: str) -> Tuple[str, List[Dict]]:
+    """Strip the trailing ``<!-- ACTIONS: [...] -->`` block from ``text`` and
+    return ``(cleaned_text, actions)``. Malformed JSON yields ``(text, [])``
+    with the block left intact so the user at least sees the failure rather
+    than silently losing their alert.
+    """
+    m = _ACTIONS_BLOCK_RE.search(text)
+    if not m:
+        return text, []
+    try:
+        actions = json.loads(m.group("json"))
+    except json.JSONDecodeError as exc:
+        logger.warning("ACTIONS block JSON parse failed (left in body): %s", exc)
+        return text, []
+    if not isinstance(actions, list):
+        logger.warning("ACTIONS block must be a list, got %s — ignoring", type(actions).__name__)
+        return text, []
+    cleaned = text[:m.start()].rstrip() + "\n"
+    return cleaned, actions
+
+
+def _md2_escape(text: str) -> str:
+    """Escape every MarkdownV2 reserved character in ``text``.
+
+    Use whenever interpolating a variable VALUE (a routine name, agent
+    name, file path, error string) into a message sent with
+    ``parse_mode="MarkdownV2"``. Without escaping, common characters like
+    ``-`` (in ``journal-audit``, ``palmeiras-feed-v2``, etc.) cause
+    Telegram to return ``400 Bad Request: can't parse entities`` and the
+    message silently fails after 3 retries.
+
+    For richly-formatted prose (text the AUTHOR writes with intentional
+    bold/italic/links), use ``_escape_mdv2_segment`` instead — it
+    preserves the formatting markers.
+    """
+    return _MD2_RESERVED_RE.sub(r'\\\1', text)
+
+
+def _format_status_message(
+    title: str,
+    icon: str = "🔗",
+    body: Optional[List[Tuple[str, str]]] = None,
+    duration_seconds: Optional[int] = None,
+) -> str:
+    """Canonical user-facing status message for pipelines/routines.
+
+    Format (Telegram MarkdownV1):
+
+        *{icon} {title}*
+
+        {body_icon_1} {body_text_1}
+        {body_icon_2} {body_text_2}
+        ...
+
+        ⏱️ Duração: 1m20s
+
+    Italic (`_..._`) is intentionally avoided because Telegram MD V1 does
+    not render it across line breaks and leaks raw underscores. Bold uses
+    single `*...*`. Body lines are emoji-prefixed so the message scans
+    visually.
+
+    Args:
+        title: human-readable title (e.g. "Crypto News Scout (v2)")
+        icon: leading icon (agent icon if available, else neutral chain)
+        body: list of (icon, text) shown one per line; None means just title
+        duration_seconds: if set, appends a duration line at the end
+    """
+    lines: List[str] = [f"*{icon} {title}*", ""]
+    if body:
+        for body_icon, body_text in body:
+            lines.append(f"{body_icon} {body_text}")
+    if duration_seconds is not None:
+        if body:
+            lines.append("")
+        d = max(0, int(duration_seconds))
+        mins, secs = divmod(d, 60)
+        lines.append(f"⏱️ Duração: {mins}m{secs:02d}s")
+    return "\n".join(lines)
+
+
 def _format_duration(seconds: float) -> str:
     """Human-readable short duration for Telegram notices ('2h 15min', '45s')."""
     seconds = max(0, int(seconds))
@@ -6131,6 +6610,7 @@ class ThreadContext:
     tts_enabled: bool = False
     _auto_agent: Optional[str] = None  # agent ID set by auto-routing (None = manual or unset)
     _manual_override: bool = False  # True when user explicitly switched agent in this context
+    last_username: Optional[str] = None  # most recent message sender's @handle/first_name (for audit footers)
 
     def ensure_runner(self, model: Optional[str] = None):
         """Return a runner, creating or swapping types if the model's provider
@@ -6207,6 +6687,13 @@ class PipelineExecutor:
         self._bot = None  # set by _enqueue_pipeline if available
         self._step_timestamps: Dict[str, Dict[str, float]] = {}  # step_id → {"start": epoch, "end": epoch}
         self._progress_msg_id: Optional[int] = None  # Telegram message ID for live progress
+        # Heartbeat: thread that re-edits the progress message every
+        # PROGRESS_HEARTBEAT_INTERVAL seconds so the user sees the elapsed
+        # counter tick even during long-running steps with no status change.
+        # Without this, a 10-minute Opus analyst step looks frozen because
+        # the message is only edited on step transitions.
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_stop: threading.Event = threading.Event()
         # Path locking: output_filename → step_id holding the write lock.
         # Prevents two parallel steps from writing to the same output file.
         self._output_file_locks: Dict[str, str] = {}
@@ -6230,6 +6717,75 @@ class PipelineExecutor:
         # Map: upstream step id → feedback string. Read by _build_step_prompt
         # (commit 5) which appends the block to the next attempt's prompt.
         self._validation_feedback: Dict[str, str] = {}
+        # Per-run log file. One file per pipeline run captures full stdout
+        # /stderr from every script/validate/publish step, separated by step
+        # headers. Filename embeds pipeline name + start timestamp so reruns
+        # don't overwrite. Path is finalised in execute() once data_dir is
+        # known; cleanup of files older than 48h runs there too.
+        from datetime import datetime as _datetime
+        self._log_started_at: _datetime = _datetime.now()
+        self._log_filename: str = (
+            f"{self.task.name}_{self._log_started_at.strftime('%Y-%m-%d-%H%M%S')}_"
+            f"{self._run_id.split('-')[-1]}.log"
+        )
+        self._log_path: Optional[Path] = None
+
+    def _cleanup_old_logs(self, log_dir: Path) -> None:
+        """Delete pipeline log files older than 48 hours.
+
+        Runs at the start of every pipeline execution. Active pipelines
+        self-clean; long-dormant pipelines accumulate at most one log file
+        per run that doesn't fire (negligible).
+        """
+        cutoff = time.time() - 48 * 3600
+        try:
+            for f in log_dir.glob("*.log"):
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            pass
+
+    def _write_step_log(self, step: PipelineStep, attempt: int,
+                         stdout: str, stderr: str,
+                         returncode: Optional[int],
+                         note: Optional[str] = None) -> None:
+        """Append step stdout/stderr to the per-run log file.
+
+        Captures FULL output (no truncation) — this is the audit trail for
+        debugging failures whose error string was truncated in Telegram /
+        sessions.json. Best-effort: write failures are logged but never raise.
+        """
+        if not self._log_path:
+            return
+        from datetime import datetime as _datetime
+        ts = _datetime.now().strftime("%H:%M:%S")
+        try:
+            with self._log_path.open("a", encoding="utf-8") as f:
+                header = (
+                    f"\n=== [{step.id}] type={step.type} attempt={attempt} "
+                    f"returncode={returncode} {ts} ==="
+                )
+                if note:
+                    header += f" ({note})"
+                f.write(header + "\n")
+                if stdout:
+                    f.write("--- stdout ---\n")
+                    f.write(stdout)
+                    if not stdout.endswith("\n"):
+                        f.write("\n")
+                if stderr:
+                    f.write("--- stderr ---\n")
+                    f.write(stderr)
+                    if not stderr.endswith("\n"):
+                        f.write("\n")
+        except OSError as exc:
+            logger.warning(
+                "Pipeline %s: failed to write step log %s: %s",
+                self.task.name, self._log_path, exc,
+            )
 
     def _compute_step_timings(self) -> Dict[str, int]:
         """Compute per-step durations (seconds) from recorded timestamps.
@@ -6262,6 +6818,18 @@ class PipelineExecutor:
             data_dir = self.workspace / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
+        # Per-run log file lives under data_dir/logs/. Created lazily on first
+        # _write_step_log() call. Old logs (>48h) are purged at run start so
+        # active pipelines self-clean without a separate cron.
+        log_dir = data_dir / "logs"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            self._log_path = log_dir / self._log_filename
+            self._cleanup_old_logs(log_dir)
+        except OSError as exc:
+            logger.warning("Pipeline %s: log dir setup failed: %s", self.task.name, exc)
+            self._log_path = None
+
         if self._resumed:
             # Resuming: steps already exist in state — just flip pipeline back to running
             self.state.set_pipeline_status(self.task.name, self.task.time_slot, "running",
@@ -6284,6 +6852,10 @@ class PipelineExecutor:
 
         start_time = time.time()
         self._start_time = start_time
+        # Refresh the progress message every PROGRESS_HEARTBEAT_INTERVAL so
+        # the user sees the elapsed counter tick during long-running steps
+        # (without this, the message looks frozen until a step transitions).
+        self._start_progress_heartbeat()
         try:
             self._run_dag_loop(data_dir)
         except Exception as exc:
@@ -6921,6 +7493,8 @@ class PipelineExecutor:
                 stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
+            self._write_step_log(step, attempt, stdout, stderr, proc.returncode,
+                                 note=f"timeout after {step.timeout}s")
             self._record_step_failure(
                 step, attempt,
                 f"script step {step.id!r} exceeded {step.timeout}s hard timeout",
@@ -6938,6 +7512,7 @@ class PipelineExecutor:
             if line.strip():
                 logger.warning("[%s/%s/stderr] %s", self.task.name, step.id, line)
 
+        self._write_step_log(step, attempt, stdout, stderr, proc.returncode)
         report = _parse_status_report(stdout, proc.returncode, output_file_path)
         self._apply_status_report(step, attempt, report)
 
@@ -7027,6 +7602,8 @@ class PipelineExecutor:
                 stdout, stderr = proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 stdout, stderr = "", ""
+            self._write_step_log(step, attempt, stdout, stderr, proc.returncode,
+                                 note=f"timeout after {step.timeout}s")
             self._record_step_failure(
                 step, attempt,
                 f"validate step {step.id!r} exceeded {step.timeout}s hard timeout",
@@ -7040,6 +7617,7 @@ class PipelineExecutor:
             if line.strip():
                 logger.warning("[%s/%s/stderr] %s", self.task.name, step.id, line)
 
+        self._write_step_log(step, attempt, stdout, stderr, proc.returncode)
         report = _parse_status_report(stdout, proc.returncode, output_file_path)
         report_status = report.get("status", "failed")
         reason = report.get("reason", "") or ""
@@ -7816,12 +8394,14 @@ class PipelineExecutor:
         return None
 
     def _compute_savings_summary(self) -> Optional[str]:
-        """Return a short Markdown line showing how many steps were auto-skipped
-        via the NO_REPLY early-exit and which models that saved, or None when
-        nothing was skipped for token-saving reasons.
+        """Return a short user-facing line showing how many steps were
+        auto-skipped via the NO_REPLY early-exit, or None when nothing was
+        skipped for token-saving reasons.
 
         Counts both direct NO_REPLY skips AND cascade skips that originate
-        from a NO_REPLY gate (not from a genuine failure).
+        from a NO_REPLY gate (not from a genuine failure). The returned
+        text is the body content (without leading icon) — the caller adds
+        the ⏭️ icon via _format_status_message's body tuples.
         """
         saved_steps: List[PipelineStep] = []
         for step in self.task.steps:
@@ -7833,12 +8413,9 @@ class PipelineExecutor:
                 saved_steps.append(step)
         if not saved_steps:
             return None
-        # Group by model to show the save breakdown
-        by_model: Dict[str, int] = {}
-        for step in saved_steps:
-            by_model[step.model] = by_model.get(step.model, 0) + 1
-        parts = [f"{cnt}×{model}" for model, cnt in sorted(by_model.items())]
-        return f"⏭️ Skipped: {len(saved_steps)} step(s) ({', '.join(parts)})"
+        n = len(saved_steps)
+        label = "Step Pulado" if n == 1 else "Steps Pulados"
+        return f"{n} {label}"
 
     def _maybe_send_savings_summary(self, elapsed: int) -> None:
         """Send a silent Telegram message summarising early-exit savings.
@@ -7860,16 +8437,23 @@ class PipelineExecutor:
             # Surface WHY the cascade started — the reason line is what the
             # user actually needs ("source convergence < 2", "no fresh items",
             # etc) so they don't have to dig into bot.log to understand the skip.
+            # The hardcoded NO_REPLY string is internal jargon — replace with a
+            # friendly canned line. Custom script reasons stay verbatim (they
+            # were written for the user).
+            body: List[Tuple[str, str]] = [("⏭️", summary)]
             root = self._find_skip_root_cause()
-            cause_line = ""
             if root is not None:
-                step_name, reason = root
-                short = reason if len(reason) <= 200 else reason[:200].rstrip() + "…"
-                cause_line = f"\n_Motivo: {short} (step: {step_name})_"
-            msg = (
-                f"{icon} *{self.task.title}*\n"
-                f"{summary}{cause_line}\n"
-                f"_Elapsed: {mins}m{secs:02d}s_"
+                _step_name, reason = root
+                if reason == "step returned NO_REPLY — nothing to publish":
+                    cause_text = "Nada novo para publicar"
+                else:
+                    cause_text = reason if len(reason) <= 200 else reason[:200].rstrip() + "…"
+                body.append(("ℹ️", f"Motivo: {cause_text}"))
+            msg = _format_status_message(
+                title=self.task.title,
+                icon=icon,
+                body=body,
+                duration_seconds=elapsed,
             )
             self.bot.send_message(
                 msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
@@ -7878,11 +8462,30 @@ class PipelineExecutor:
         except Exception as exc:
             logger.debug("Savings summary send failed: %s", exc)
 
+    def _build_cancel_keyboard(self) -> Dict:
+        """Inline keyboard with a Cancel button keyed to this pipeline's name.
+
+        The callback_data is `cancel_run:<task.name>` — short enough to fit
+        within Telegram's 64-byte callback_data limit for any reasonable
+        pipeline name (typical names are 15-30 chars). Tapping routes
+        through `_handle_callback` → `cancel_run:` branch which looks up
+        the active executor and calls `executor.cancel()`. The keyboard is
+        attached to both the initial send and every heartbeat edit while
+        the pipeline runs; `_finalize_progress` strips it on success
+        (delete) or failure/cancellation (edit without reply_markup).
+        """
+        return {"inline_keyboard": [[
+            {"text": "🛑 Cancelar pipeline",
+             "callback_data": f"cancel_run:{self.task.name}"},
+        ]]}
+
     def _send_progress_message(self) -> None:
-        """Send the initial progress message and store its message_id."""
+        """Send the initial progress message + Cancel button."""
         try:
             text = self._build_progress_text()
-            msg_id = self.bot.send_message(text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
+            msg_id = self.bot.send_message(text, chat_id=self.ctx.chat_id,
+                                           thread_id=self.ctx.thread_id,
+                                           reply_markup=self._build_cancel_keyboard())
             self._progress_msg_id = msg_id
             if msg_id:
                 self.bot._active_msgs.register(
@@ -7891,19 +8494,80 @@ class PipelineExecutor:
         except Exception as exc:
             logger.debug("Failed to send pipeline progress: %s", exc)
 
+    # Interval between heartbeat re-edits of the progress message. 30s is
+    # well below Telegram's per-chat edit rate limit and short enough that
+    # the user can see the pipeline is alive during long LLM steps.
+    PROGRESS_HEARTBEAT_INTERVAL = 30.0
+
+    def _start_progress_heartbeat(self) -> None:
+        """Start the daemon thread that ticks the progress message duration.
+
+        Idempotent — noop if the heartbeat is already running or there's
+        no progress message to refresh.
+        """
+        if self._progress_msg_id is None:
+            return
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_stop.clear()
+        self._heartbeat_thread = threading.Thread(
+            target=self._progress_heartbeat_loop,
+            name=f"pipeline-heartbeat-{self.task.name}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
+
+    def _stop_progress_heartbeat(self) -> None:
+        """Signal the heartbeat thread to exit. Does not join — daemon thread."""
+        self._heartbeat_stop.set()
+
+    def _progress_heartbeat_loop(self) -> None:
+        """Background loop that re-edits the progress message periodically.
+
+        Waits PROGRESS_HEARTBEAT_INTERVAL seconds between edits. Exits when
+        _heartbeat_stop is set, _progress_msg_id is cleared, or the pipeline
+        is cancelled. Edit errors (including Telegram's "message is not
+        modified") are swallowed via _update_progress's existing try/except.
+        """
+        while not self._heartbeat_stop.wait(self.PROGRESS_HEARTBEAT_INTERVAL):
+            if self._progress_msg_id is None or self._cancelled.is_set():
+                return
+            try:
+                self._update_progress()
+            except Exception as exc:
+                logger.debug("Progress heartbeat update failed: %s", exc)
+
     def _update_progress(self) -> None:
-        """Edit the progress message with current step statuses."""
+        """Edit the progress message with current step statuses.
+
+        Re-attaches the Cancel keyboard on every edit. Telegram requires the
+        full reply_markup on each `editMessageText` — omitting it would strip
+        the button. The keyboard is intentionally stripped only by
+        `_finalize_progress` when the pipeline ends.
+        """
         if not self._progress_msg_id:
             return
         try:
             elapsed = int(time.time() - (self._start_time if hasattr(self, '_start_time') else time.time()))
             text = self._build_progress_text(elapsed)
-            self.bot.edit_message(self._progress_msg_id, text)
+            self.bot.edit_message(self._progress_msg_id, text,
+                                   reply_markup=self._build_cancel_keyboard())
         except Exception as exc:
             logger.debug("Failed to update pipeline progress: %s", exc)
 
     def _finalize_progress(self, success: bool, error: str = "", elapsed: int = 0) -> None:
-        """Finalize the progress message: delete on success, update with error/cancelled on failure."""
+        """Finalize the progress message: delete on success, update with error/cancelled on failure.
+
+        Failure/cancelled state is rendered with the canonical user-facing
+        format (_format_status_message): bold title with state suffix, body
+        lines for each step's status (✅/❌/⏭️/⏳), then an error line
+        (when failed, not cancelled), then duration. No italic — Telegram
+        MD V1 leaks underscores across line breaks.
+        """
+        # Stop the heartbeat first so it doesn't race the final edit. Safe
+        # to call even if the heartbeat never started (idempotent on a
+        # cleared event).
+        self._stop_progress_heartbeat()
         if not self._progress_msg_id:
             return
         # Unregister from active message tracking
@@ -7911,26 +8575,32 @@ class PipelineExecutor:
         try:
             if success:
                 self.bot.delete_message(self._progress_msg_id, chat_id=self.ctx.chat_id)
-            else:
-                cancelled = self._cancelled.is_set()
-                icons = {"completed": "✅", "failed": "❌", "skipped": "⏭", "running": "🔄", "pending": "⏳"}
-                if cancelled:
-                    header = f"🛑 *Pipeline: {self.task.title}* — CANCELADO"
-                else:
-                    header = f"❌ *Pipeline: {self.task.title}* — FAILED"
-                lines = [header, ""]
-                for step in self.task.steps:
-                    st = self._step_status.get(step.id, "pending")
-                    icon = icons.get(st, "⏳")
-                    err_detail = ""
-                    if st == "failed" and step.id in self._step_errors:
-                        err_detail = f" — `{self._step_errors[step.id][:60]}`"
-                    lines.append(f"{icon} {step.name}{err_detail}")
-                mins, secs = elapsed // 60, elapsed % 60
-                if not cancelled:
-                    lines.append(f"\n_Erro: {error[:100]}_")
-                lines.append(f"_Duração: {mins}m{secs:02d}s_")
-                self.bot.edit_message(self._progress_msg_id, "\n".join(lines))
+                return
+            cancelled = self._cancelled.is_set()
+            agent = load_agent(_agent_id_or_main(self.task.agent))
+            agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+            state_icon = "🛑" if cancelled else "❌"
+            state_label = "CANCELADO" if cancelled else "FAILED"
+            title = f"Pipeline: {self.task.title} — {state_label}"
+            step_icons = {"completed": "✅", "failed": "❌", "skipped": "⏭️",
+                          "running": "🔄", "pending": "⏳"}
+            body: List[Tuple[str, str]] = []
+            for step in self.task.steps:
+                st = self._step_status.get(step.id, "pending")
+                step_icon = step_icons.get(st, "⏳")
+                err_detail = ""
+                if st == "failed" and step.id in self._step_errors:
+                    err_detail = f" — `{self._step_errors[step.id][:60]}`"
+                body.append((step_icon, f"{step.name}{err_detail}"))
+            if not cancelled and error:
+                body.append(("ℹ️", f"Erro: {error[:200]}"))
+            msg = _format_status_message(
+                title=title,
+                icon=f"{state_icon} {agent_icon}",
+                body=body,
+                duration_seconds=elapsed,
+            )
+            self.bot.edit_message(self._progress_msg_id, msg)
         except Exception as exc:
             logger.debug("Failed to finalize pipeline progress: %s", exc)
 
@@ -8288,6 +8958,8 @@ class PipelineExecutor:
         msg = (f"Pipeline *{self.task.title}* FAILED\n"
                f"Error: `{error[:100]}`\n"
                f"Steps: {steps_summary}")
+        if self._log_path and self._log_path.exists():
+            msg += f"\n📄 Log: `{self._log_path}`"
         try:
             self.bot.send_message(msg, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id)
         except Exception as exc:
@@ -8818,7 +9490,13 @@ class ClaudeTelegramBot:
                 logger.error("Routine %s crashed: %s", task.name, exc, exc_info=True)
                 self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
                 try:
-                    self.send_message(f"❌ Rotina *{task.name}* crashed: `{exc}`")
+                    agent = load_agent(_agent_id_or_main(task.agent))
+                    agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+                    self.send_message(_format_status_message(
+                        title=f"Rotina: {task.name} — CRASHED",
+                        icon=f"💥 {agent_icon}",
+                        body=[("ℹ️", f"Erro: {str(exc)[:200]}")],
+                    ))
                 except Exception:
                     pass
             finally:
@@ -8857,7 +9535,13 @@ class ClaudeTelegramBot:
                 logger.error("Pipeline %s crashed: %s", task.name, exc, exc_info=True)
                 self.routine_state.set_status(task.name, task.time_slot, "failed", str(exc)[:200])
                 try:
-                    self.send_message(f"❌ Pipeline *{task.name}* crashed: `{exc}`")
+                    agent = load_agent(_agent_id_or_main(task.agent))
+                    agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+                    self.send_message(_format_status_message(
+                        title=f"Pipeline: {task.name} — CRASHED",
+                        icon=f"💥 {agent_icon}",
+                        body=[("ℹ️", f"Erro: {str(exc)[:200]}")],
+                    ))
                 except Exception:
                     pass
             finally:
@@ -8962,6 +9646,26 @@ class ClaudeTelegramBot:
             self._recover_inflight_prompts()
         except Exception as exc:
             logger.error("Inflight recovery failed: %s", exc)
+
+        # Phase 0.5: Purge expired pending-action button payloads (TTL 24h)
+        try:
+            n_purged = _purge_expired_actions()
+            if n_purged:
+                logger.info("Purged %d expired pending-action(s) on startup", n_purged)
+        except Exception as exc:
+            logger.warning("Pending-actions purge failed: %s", exc)
+
+        # Phase 0.6: Purge expired edit-mode states (TTL 30min). State that
+        # outlived a restart is almost certainly stale — the user has long
+        # moved on, and re-routing their next message as feedback would be
+        # surprising. Better to clear and let them re-trigger from a fresh
+        # preview if they still want to edit.
+        try:
+            n_purged_em = _purge_expired_edit_modes()
+            if n_purged_em:
+                logger.info("Purged %d expired edit-mode(s) on startup", n_purged_em)
+        except Exception as exc:
+            logger.warning("Edit-modes purge failed: %s", exc)
 
         # Phase 1: Clean up orphaned Telegram messages
         self._cleanup_orphaned_messages()
@@ -9126,7 +9830,10 @@ class ClaudeTelegramBot:
         total = len(task.steps)
 
         # Notify on Telegram
-        self._send_to_all(f"🔄 Retomando pipeline *{name}* \\({completed}/{total} steps completos\\)")
+        self._send_to_all(
+            f"🔄 Retomando pipeline *{_md2_escape(name)}* "
+            f"\\({completed}/{total} steps completos\\)"
+        )
         logger.info("Resuming pipeline %s: %d/%d steps completed", name, completed, total)
 
         resume = {
@@ -9174,7 +9881,7 @@ class ClaudeTelegramBot:
             effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
         )
 
-        self._send_to_all(f"🔄 Retomando rotina *{name}*\\.\\.\\.")
+        self._send_to_all(f"🔄 Retomando rotina *{_md2_escape(name)}*\\.\\.\\.")
         logger.info("Resuming routine %s", name)
         self._enqueue_routine(task)
 
@@ -9444,13 +10151,20 @@ class ClaudeTelegramBot:
                     return json.loads(resp.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
                 retry_after = 2
+                description = ""
                 try:
                     err_body = json.loads(exc.read().decode("utf-8"))
                     retry_after = err_body.get("parameters", {}).get("retry_after", retry_after)
+                    description = err_body.get("description", "") or ""
                 except Exception:
                     pass
-                logger.warning("tg_request %s attempt %d HTTP %s: %s (retry_after=%s)",
-                               method, attempt + 1, exc.code, exc.reason, retry_after)
+                # Surface the description (Telegram's actual reason) — without
+                # it a 400 looks like an opaque "Bad Request" and you have no
+                # idea whether it's a Markdown parse error, missing chat,
+                # rate limit, or something else.
+                desc_suffix = f" — {description}" if description else ""
+                logger.warning("tg_request %s attempt %d HTTP %s: %s (retry_after=%s)%s",
+                               method, attempt + 1, exc.code, exc.reason, retry_after, desc_suffix)
                 if attempt < 2:
                     time.sleep(min(retry_after, 30))
             except Exception as exc:
@@ -10466,6 +11180,11 @@ class ClaudeTelegramBot:
         if not os.path.isfile(script):
             self.send_message("❌ Script de restart não encontrado.")
             return
+        # Clear all inflight markers so the next startup doesn't send
+        # spurious "crash/restart" notifications for intentional restarts.
+        if INFLIGHT_DIR.exists():
+            for p in INFLIGHT_DIR.glob("*.json"):
+                self._clear_inflight(p)
         self.send_message("🔄 Reiniciando...")
         subprocess.Popen(
             ["bash", script],
@@ -11730,6 +12449,549 @@ class ClaudeTelegramBot:
         return False
 
     # -- Run command (manual trigger) --
+
+    def _handle_action_callback(self, callback: Dict, action_id: str) -> None:
+        """Handle ``callback_data = act:<id>`` from a Pipeline v2 ACTIONS button.
+
+        Routes by the loaded payload's ``type`` field:
+          - ``trigger_pipeline`` (default for backward compat) — fire the
+            target pipeline with overrides, edit msg to show "Disparada por X"
+          - ``enter_edit_mode`` — register edit-mode state for the chat
+            (next msg becomes feedback), replace keyboard with single
+            "❌ Cancelar Edição" button
+          - ``cancel`` — mark all related_actions consumed, drop keyboard,
+            edit msg to show "Cancelado por X"
+          - ``cancel_edit`` — special: cancels an active edit-mode (taps
+            on the "❌ Cancelar Edição" button); restores the original
+            keyboard from the saved state
+
+        All branches: authorize first, then enforce idempotency via
+        consumed_at, then act. Errors are surfaced via answer_callback toast.
+        """
+        cb_id = callback.get("id", "")
+        from_user = callback.get("from", {}) or {}
+        msg = callback.get("message", {}) or {}
+        chat = msg.get("chat", {}) or {}
+        chat_id = chat.get("id")
+        thread_id = msg.get("message_thread_id")
+        username = (from_user.get("username")
+                    or from_user.get("first_name")
+                    or str(from_user.get("id", "?")))
+
+        # Authorization — same check as interactive messages
+        if str(chat_id) not in self.authorized_ids:
+            self.answer_callback(cb_id, "❌ Não autorizado")
+            return
+
+        payload = _load_pending_action(action_id)
+        if payload is None:
+            self.answer_callback(cb_id, "❌ Esta ação expirou ou não existe")
+            return
+
+        # Idempotency — second click after consumed_at gets a friendly toast
+        if payload.get("consumed_at"):
+            consumed_by = payload.get("consumed_by") or "?"
+            self.answer_callback(cb_id, f"ℹ️ Já processada por {consumed_by}")
+            return
+
+        action_type = str(payload.get("type", "trigger_pipeline"))
+
+        # Dispatch by action type
+        if action_type == "trigger_pipeline":
+            self._handle_trigger_pipeline_action(callback, action_id, payload, username)
+        elif action_type == "enter_edit_mode":
+            self._handle_enter_edit_mode_action(callback, action_id, payload, username,
+                                                 chat_id, thread_id)
+        elif action_type == "cancel":
+            self._handle_cancel_action(callback, action_id, payload, username,
+                                        chat_id, thread_id)
+        elif action_type == "cancel_edit":
+            self._handle_cancel_edit_action(callback, action_id, payload, username,
+                                             chat_id, thread_id)
+        else:
+            self.answer_callback(cb_id, f"❌ Tipo de ação desconhecido: {action_type}")
+            logger.warning("Unknown action type %r for action_id=%s", action_type, action_id)
+
+    def _handle_trigger_pipeline_action(self, callback: Dict, action_id: str,
+                                          payload: Dict, username: str) -> None:
+        """Action type 'trigger_pipeline' — fire the target pipeline."""
+        cb_id = callback.get("id", "")
+        msg = callback.get("message", {}) or {}
+        chat = msg.get("chat", {}) or {}
+        chat_id = chat.get("id")
+
+        if not _consume_pending_action(action_id, by_user=username):
+            self.answer_callback(cb_id, "ℹ️ Já disparada (corrida)")
+            return
+
+        ok, message = self._trigger_pipeline_from_action(
+            pipeline=str(payload.get("pipeline", "")),
+            agent=payload.get("agent"),
+            overrides=payload.get("overrides") or {},
+            by_user=username,
+        )
+        self.answer_callback(cb_id, message)
+
+        if not ok:
+            self._rollback_consumed(action_id)
+            return
+
+        msg_id = msg.get("message_id")
+        msg_text = msg.get("text", "")
+        if msg_id and msg_text:
+            stamp = time.strftime("%H:%M")
+            footer = f"\n\n✅ Disparada por @{username} às {stamp}"
+            try:
+                self.tg_request("editMessageText", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": self._sanitize_markdown_v2(msg_text + footer),
+                    "parse_mode": "MarkdownV2",
+                })
+            except Exception as exc:
+                logger.debug("Failed to edit action message footer: %s", exc)
+
+    def _handle_enter_edit_mode_action(self, callback: Dict, action_id: str,
+                                         payload: Dict, username: str,
+                                         chat_id: Optional[int],
+                                         thread_id: Optional[int]) -> None:
+        """Action type 'enter_edit_mode' — register edit-mode state, swap
+        keyboard for a single "Cancelar Edição" button, prompt user to send
+        their feedback as the next message in this chat/topic."""
+        cb_id = callback.get("id", "")
+        msg = callback.get("message", {}) or {}
+        msg_id = msg.get("message_id")
+        msg_text = msg.get("text", "")
+
+        if not msg_id or chat_id is None:
+            self.answer_callback(cb_id, "❌ Mensagem inválida")
+            return
+
+        # Don't consume the edit-mode action — if the user cancels edit,
+        # we want to be able to flip back. The action gets consumed when
+        # the user actually sends feedback (via _intercept_edit_feedback).
+
+        # Build a dedicated "Cancelar Edição" pending action so the user
+        # can back out without typing anything. Stores original_msg_text so
+        # cancel_edit can restore the message exactly as it was before the
+        # "✏️ Modo edição ativo..." footer was appended.
+        cancel_edit_payload = {
+            "type": "cancel_edit",
+            "edit_mode_action_id": action_id,
+            "original_msg_text": msg_text,
+            "original_action_ids": payload.get("original_action_ids", []),
+        }
+        cancel_edit_id = _save_pending_action(cancel_edit_payload)
+
+        # Save edit-mode state — the message interceptor in _handle_text
+        # checks this dict at the top of every message and intercepts free
+        # text as feedback.
+        _save_edit_mode(str(chat_id), thread_id, {
+            "msg_id": msg_id,
+            "original_text": msg_text,
+            "original_action_ids": payload.get("original_action_ids", []),
+            "edit_pipeline": str(payload.get("edit_pipeline", "")),
+            "edit_agent": payload.get("edit_agent"),
+            "edit_overrides_template": payload.get("edit_overrides_template") or {},
+            "cancel_edit_action_id": cancel_edit_id,
+        })
+
+        # Swap keyboard: remove the 3 original buttons, show only the
+        # "Cancelar Edição" escape hatch. Append a footer line telling the
+        # user what to do next.
+        footer = (f"\n\n_✏️ Modo edição ativo \\(por @{_md2_escape(username)}\\)_\n"
+                  f"_Envie sua próxima mensagem com o feedback desejado, "
+                  f"ou cancele a edição abaixo\\._")
+        new_markup = {"inline_keyboard": [[
+            {"text": "❌ Cancelar Edição", "callback_data": f"act:{cancel_edit_id}"},
+        ]]}
+        try:
+            self.tg_request("editMessageText", {
+                "chat_id": chat_id,
+                "message_id": msg_id,
+                "text": self._sanitize_markdown_v2(msg_text) + footer,
+                "parse_mode": "MarkdownV2",
+                "reply_markup": new_markup,
+            })
+        except Exception as exc:
+            logger.debug("Failed to swap keyboard for edit mode: %s", exc)
+
+        self.answer_callback(cb_id, "✏️ Aguardando seu feedback")
+
+    def _handle_cancel_action(self, callback: Dict, action_id: str,
+                                payload: Dict, username: str,
+                                chat_id: Optional[int],
+                                thread_id: Optional[int]) -> None:
+        """Action type 'cancel' — drop the publish workflow entirely. Mark
+        all related actions consumed (so subsequent clicks on Publicar/
+        Editar are no-ops) and edit the message to show the cancellation."""
+        cb_id = callback.get("id", "")
+        msg = callback.get("message", {}) or {}
+        msg_id = msg.get("message_id")
+        msg_text = msg.get("text", "")
+        chat = msg.get("chat", {}) or {}
+
+        # Consume the cancel action itself
+        if not _consume_pending_action(action_id, by_user=username):
+            self.answer_callback(cb_id, "ℹ️ Já cancelada")
+            return
+
+        # Mark related actions consumed so they can't be triggered later
+        related = payload.get("related_actions", [])
+        for rid in related:
+            try:
+                _consume_pending_action(rid, by_user=f"cancel-by:{username}")
+            except Exception as exc:
+                logger.debug("Failed to consume related action %s: %s", rid, exc)
+
+        # If there's an active edit-mode for this chat, clear it (the
+        # cancel is implicitly canceling the edit too).
+        if chat_id is not None:
+            _clear_edit_mode(str(chat_id), thread_id)
+
+        self.answer_callback(cb_id, "❌ Cancelado")
+
+        if msg_id and msg_text:
+            stamp = time.strftime("%H:%M")
+            footer = f"\n\n❌ Cancelado por @{username} às {stamp}"
+            try:
+                self.tg_request("editMessageText", {
+                    "chat_id": chat.get("id"),
+                    "message_id": msg_id,
+                    "text": self._sanitize_markdown_v2(msg_text + footer),
+                    "parse_mode": "MarkdownV2",
+                })
+            except Exception as exc:
+                logger.debug("Failed to edit cancelled message: %s", exc)
+
+    def _handle_cancel_edit_action(self, callback: Dict, action_id: str,
+                                     payload: Dict, username: str,
+                                     chat_id: Optional[int],
+                                     thread_id: Optional[int]) -> None:
+        """Action type 'cancel_edit' — exit edit-mode and restore the
+        original 3-button keyboard so the user can continue (publish or
+        cancel-publish or re-enter-edit) without typing feedback."""
+        cb_id = callback.get("id", "")
+        msg = callback.get("message", {}) or {}
+        msg_id = msg.get("message_id")
+        chat = msg.get("chat", {}) or {}
+
+        if not _consume_pending_action(action_id, by_user=username):
+            self.answer_callback(cb_id, "ℹ️ Já cancelada (corrida)")
+            return
+
+        # Clear edit-mode state — message interceptor will stop intercepting
+        if chat_id is not None:
+            _clear_edit_mode(str(chat_id), thread_id)
+
+        # Restore the original keyboard. The original action IDs stored in
+        # the cancel-edit payload still point at valid (unconsumed) pending
+        # actions because _handle_enter_edit_mode_action did NOT consume them.
+        original_action_ids = payload.get("original_action_ids", [])
+        # Re-load each to discover labels — we don't store labels in payload
+        # to keep it small. Fall back to generic labels if any expired.
+        labels_by_id: Dict[str, str] = {}
+        for aid in original_action_ids:
+            p = _load_pending_action(aid)
+            if not p:
+                continue
+            if p.get("type") == "trigger_pipeline":
+                labels_by_id[aid] = "📤 Publicar no Notion"
+            elif p.get("type") == "enter_edit_mode":
+                labels_by_id[aid] = "✏️ Editar"
+            elif p.get("type") == "cancel":
+                labels_by_id[aid] = "❌ Cancelar"
+
+        # original_msg_text was stored on this cancel_edit payload itself
+        # when "Editar" was tapped, so we can restore the message exactly.
+        original_text = payload.get("original_msg_text", "")
+        if not original_text:
+            # Fallback: strip the "_✏️ Modo edição ativo..._" footer we added
+            cur_text = msg.get("text", "")
+            footer_marker = "\n\n✏️ Modo edição ativo"
+            if footer_marker in cur_text:
+                original_text = cur_text.split(footer_marker, 1)[0].rstrip()
+            else:
+                original_text = cur_text
+
+        if not labels_by_id:
+            # All originals expired — can't restore keyboard. Just clean up.
+            self.answer_callback(cb_id, "❌ Edição cancelada (botões expiraram)")
+            try:
+                self.tg_request("editMessageText", {
+                    "chat_id": chat.get("id"),
+                    "message_id": msg_id,
+                    "text": self._sanitize_markdown_v2(original_text or "(preview expirado)"),
+                    "parse_mode": "MarkdownV2",
+                })
+            except Exception:
+                pass
+            return
+
+        # Rebuild the 3-button keyboard, ordering by the original list
+        rows = []
+        for aid in original_action_ids:
+            label = labels_by_id.get(aid)
+            if label:
+                rows.append([{"text": label, "callback_data": f"act:{aid}"}])
+        new_markup = {"inline_keyboard": rows}
+
+        try:
+            self.tg_request("editMessageText", {
+                "chat_id": chat.get("id"),
+                "message_id": msg_id,
+                "text": self._sanitize_markdown_v2(original_text),
+                "parse_mode": "MarkdownV2",
+                "reply_markup": new_markup,
+            })
+        except Exception as exc:
+            logger.debug("Failed to restore keyboard after cancel-edit: %s", exc)
+
+        self.answer_callback(cb_id, "↩️ Edição cancelada")
+
+    def _handle_cancel_running_pipeline_callback(self, callback: Dict,
+                                                    pipeline_name: str) -> None:
+        """Handle the 🛑 Cancelar pipeline button on a live progress message.
+
+        Looks up the active executor by pipeline name and calls
+        `executor.cancel()` (idempotent — sets the `_cancelled` event). The
+        executor's normal flow then runs `_finalize_progress(success=False,
+        cancelled=True)` which strips the keyboard and updates the message
+        to show CANCELED state. We do NOT edit the message ourselves here —
+        that's the executor's job and racing it would clobber its update.
+
+        Race conditions handled:
+          - Pipeline already finished between render and tap → executor
+            absent from `_active_pipelines` → friendly "já terminou" toast
+          - Cancel tapped twice → second tap also finds the executor
+            (still in `_active_pipelines` until cancellation completes),
+            calls cancel() again (idempotent), shows "cancelando" toast
+          - Bot restarted mid-pipeline → executor gone, new bot's
+            `_active_pipelines` empty → toast "já terminou" (correct, the
+            run is dead from the user's perspective)
+
+        Authorization mirrors interactive-message guard: chat must be in
+        `authorized_ids`.
+        """
+        cb_id = callback.get("id", "")
+        from_user = callback.get("from", {}) or {}
+        msg = callback.get("message", {}) or {}
+        chat = msg.get("chat", {}) or {}
+        chat_id = chat.get("id")
+        username = (from_user.get("username")
+                    or from_user.get("first_name")
+                    or str(from_user.get("id", "?")))
+
+        if str(chat_id) not in self.authorized_ids:
+            self.answer_callback(cb_id, "❌ Não autorizado")
+            return
+
+        pipeline_name = pipeline_name.strip()
+        if not pipeline_name:
+            self.answer_callback(cb_id, "❌ Nome de pipeline ausente")
+            return
+
+        with self._active_pipelines_lock:
+            executor = self._active_pipelines.get(pipeline_name)
+
+        if executor is None:
+            self.answer_callback(cb_id, "ℹ️ Pipeline já terminou")
+            return
+
+        # Idempotency check via the executor's own cancellation event —
+        # if cancel() was already called, the second tap shouldn't surprise
+        # the user with "cancelando" (which sounds like it just happened).
+        if executor._cancelled.is_set():
+            self.answer_callback(cb_id, "ℹ️ Já cancelando…")
+            return
+
+        logger.info("Pipeline %s cancellation requested by @%s via inline button",
+                    pipeline_name, username)
+        try:
+            executor.cancel()
+        except Exception as exc:
+            logger.error("Pipeline %s cancel() failed: %s", pipeline_name, exc, exc_info=True)
+            self.answer_callback(cb_id, f"❌ Falha ao cancelar: {str(exc)[:80]}")
+            return
+
+        self.answer_callback(cb_id, f"🛑 Cancelando {pipeline_name}…")
+        # NOTE: do NOT edit the progress message here. The executor's
+        # `_finalize_progress(success=False)` will detect `_cancelled.is_set()`
+        # and render the canonical CANCELADO state with the agent icon, step
+        # icons, and duration. Editing here races that.
+
+    def _rollback_consumed(self, action_id: str) -> None:
+        """Helper: clear consumed_at/consumed_by on a pending action so it
+        can be retried. Used when a trigger fails after marking consumed."""
+        try:
+            p = PENDING_ACTIONS_DIR / f"{action_id}.json"
+            doc = json.loads(p.read_text(encoding="utf-8"))
+            doc["consumed_at"] = None
+            doc["consumed_by"] = None
+            p.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+        except Exception:
+            pass
+
+    def _consume_edit_feedback(self, em_state: Dict, feedback: str,
+                                 user_msg_id: Optional[int]) -> None:
+        """Called when a free-text message arrives in edit-mode. Consumes
+        the original action IDs (so their buttons can no longer be tapped),
+        edits the original message to show "Editando: {feedback}...", and
+        dispatches the edit pipeline with the user's feedback as override.
+
+        On dispatch failure, surfaces the error to the user and clears
+        edit-mode (the user must re-trigger from a fresh preview — the
+        original action IDs are already consumed so the previous preview's
+        buttons no longer work either).
+        """
+        chat_id = em_state.get("chat_id")
+        thread_id = em_state.get("thread_id")
+        msg_id = em_state.get("msg_id")
+        original_text = em_state.get("original_text", "")
+        original_action_ids = em_state.get("original_action_ids", [])
+        cancel_edit_aid = em_state.get("cancel_edit_action_id")
+        edit_pipeline = em_state.get("edit_pipeline", "")
+        edit_agent = em_state.get("edit_agent")
+        overrides_template = em_state.get("edit_overrides_template") or {}
+
+        # Mark all related actions consumed so the original buttons can't
+        # be tapped after we send the new preview. The new preview will
+        # carry fresh action IDs, so the old ones are dead.
+        for aid in list(original_action_ids) + ([cancel_edit_aid] if cancel_edit_aid else []):
+            try:
+                _consume_pending_action(aid, by_user="edit-feedback")
+            except Exception as exc:
+                logger.debug("Failed to consume action %s on feedback capture: %s", aid, exc)
+
+        # Clear edit-mode FIRST — if the dispatch fails below, we don't
+        # want the user stuck in a state that intercepts their next message.
+        _clear_edit_mode(str(chat_id), thread_id)
+
+        # Edit the preview message: drop the "Cancelar Edição" keyboard,
+        # show the feedback we captured. Truncate long feedback for the
+        # message; the full text goes through to the pipeline.
+        feedback_preview = feedback if len(feedback) <= 80 else feedback[:80].rstrip() + "…"
+        edit_footer = (
+            f"\n\n_✏️ Editando \\(feedback de @{_md2_escape(self._user_handle())}\\):_\n"
+            f"_{_md2_escape(feedback_preview)}_"
+        )
+        if msg_id:
+            try:
+                self.tg_request("editMessageText", {
+                    "chat_id": chat_id,
+                    "message_id": msg_id,
+                    "text": self._sanitize_markdown_v2(original_text) + edit_footer,
+                    "parse_mode": "MarkdownV2",
+                })
+            except Exception as exc:
+                logger.debug("Failed to edit preview msg on feedback capture: %s", exc)
+
+        # Merge feedback into overrides_template — the apply-edit step's
+        # `feedback` slot is where the user's text goes.
+        overrides = {k: dict(v) if isinstance(v, dict) else v
+                     for k, v in overrides_template.items()}
+        apply_edit = overrides.setdefault("apply-edit", {})
+        if isinstance(apply_edit, dict):
+            apply_edit["feedback"] = feedback
+
+        ok, message = self._trigger_pipeline_from_action(
+            pipeline=edit_pipeline,
+            agent=edit_agent,
+            overrides=overrides,
+            by_user=self._user_handle(),
+        )
+        if not ok:
+            try:
+                self.send_message(
+                    f"❌ Falha ao iniciar a edição: `{_md2_escape(message)}`\n"
+                    f"Use uma das opções da nova preview \\(quando o pipeline rodar de novo\\)."
+                )
+            except Exception:
+                pass
+            return
+        logger.info("Pipeline %s dispatched from edit-feedback (chat=%s, feedback_len=%d)",
+                    edit_pipeline, chat_id, len(feedback))
+
+    def _user_handle(self) -> str:
+        """Best-effort current user handle for audit footers. Falls back to
+        chat_id when unavailable (e.g. webhook trigger with no associated
+        user). Used by edit-feedback footers and pipeline-action audits."""
+        ctx = self._ctx
+        if ctx is None:
+            return "?"
+        # Try the most recently seen username first (set by _process_update)
+        return getattr(ctx, "last_username", None) or str(ctx.chat_id)
+
+    def _trigger_pipeline_from_action(self, pipeline: str,
+                                       agent: Optional[str],
+                                       overrides: Optional[Dict],
+                                       by_user: str) -> Tuple[bool, str]:
+        """Programmatic pipeline trigger used by inline-keyboard callbacks.
+
+        Mirrors `cmd_run`'s pipeline-dispatch path (find md_file, parse,
+        validate overrides, enqueue) without consuming the user-typed flag
+        parser. Returns ``(success, message)`` — message is suitable for
+        ``answer_callback`` (≤200 chars) on success or failure.
+
+        Resolves the md_file via ``routines_dir(agent)`` first (the action's
+        declared owning agent), then falls back to global lookup. This keeps
+        actions emitted by, e.g., a crypto-bro pipeline scoped to crypto-bro
+        even if a same-named pipeline exists in another agent.
+        """
+        name = pipeline.replace(".md", "").strip()
+        if not name:
+            return False, "❌ Pipeline name vazio"
+
+        # Locate the pipeline file (prefer the declared agent's namespace)
+        candidate = None
+        if agent:
+            candidate = routines_dir(agent) / f"{name}.md"
+            if not candidate.is_file():
+                candidate = None
+        if candidate is None:
+            candidate = _find_routine_file(name)
+        if candidate is None:
+            return False, f"❌ Pipeline `{name}` não encontrada"
+
+        # Reject re-trigger if already running (idempotency safety net —
+        # primary guard is the consumed_at flag in the pending-action file)
+        with self._active_pipelines_lock:
+            if name in self._active_pipelines:
+                return False, f"⚠️ Pipeline `{name}` já está rodando"
+
+        fm, body = get_frontmatter_and_body(candidate)
+        if not fm or not body:
+            return False, f"❌ Pipeline `{name}` inválida"
+
+        if str(fm.get("type", "routine")) != "pipeline":
+            return False, f"❌ `{name}` não é uma pipeline"
+
+        model = str(fm.get("model", "sonnet"))
+        time_slot = f"action-{by_user[:20]}-{time.strftime('%H:%M:%S')}"
+
+        applied_overrides: Optional[Dict] = None
+        if overrides:
+            preview_task = _parse_pipeline_task(candidate, fm, body, name, model, time_slot)
+            if preview_task is None:
+                return False, f"❌ Falha ao parsear `{name}`"
+            try:
+                applied_overrides = validate_overrides(preview_task, overrides)
+            except OverrideValidationError as exc:
+                return False, f"❌ Override inválido: {str(exc)[:120]}"
+
+        try:
+            self.scheduler._enqueue_pipeline_from_file(
+                candidate, fm, body, name, model, time_slot,
+                applied_overrides=applied_overrides,
+            )
+        except Exception as exc:
+            logger.error("Pipeline action trigger failed for %s: %s", name, exc, exc_info=True)
+            return False, f"❌ Falha ao disparar: {str(exc)[:120]}"
+
+        logger.info("Pipeline %s triggered via inline-keyboard action by %s "
+                    "(overrides=%s)", name, by_user, bool(applied_overrides))
+        return True, f"✅ `{name}` disparada"
 
     def cmd_run(self, arg: str) -> None:
         """Manually trigger a routine or pipeline by name.
@@ -14143,14 +15405,27 @@ class ClaudeTelegramBot:
                     vault_checkpoint_restore(checkpoint_ref)
                 self.routine_state.set_status(task.name, task.time_slot, "cancelled")
                 if progress_msg_id:
-                    self.edit_message(progress_msg_id, f"🛑 Rotina *{task.name}* cancelada.")
+                    agent = load_agent(_agent_id_or_main(task.agent))
+                    agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+                    self.edit_message(progress_msg_id, _format_status_message(
+                        title=f"Rotina: {task.name} — CANCELADA",
+                        icon=f"🛑 {agent_icon}",
+                        duration_seconds=int(time.time() - routine_start_time),
+                    ))
             elif effective_error:
                 # Error — restore checkpoint
                 if checkpoint_ref:
                     vault_checkpoint_restore(checkpoint_ref)
                 self.routine_state.set_status(task.name, task.time_slot, "failed", effective_error[:200])
                 if progress_msg_id:
-                    self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {effective_error[:200]}")
+                    agent = load_agent(_agent_id_or_main(task.agent))
+                    agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+                    self.edit_message(progress_msg_id, _format_status_message(
+                        title=f"Rotina: {task.name} — FAILED",
+                        icon=f"❌ {agent_icon}",
+                        body=[("ℹ️", f"Erro: {effective_error[:200]}")],
+                        duration_seconds=int(time.time() - routine_start_time),
+                    ))
                 _append_execution_report(
                     agent=task.agent, kind="routine", name=task.name,
                     status="failed", elapsed=int(time.time() - routine_start_time),
@@ -14195,10 +15470,18 @@ class ClaudeTelegramBot:
                 status="failed", elapsed=int(time.time() - routine_start_time),
                 error=str(exc)[:150],
             )
+            agent = load_agent(_agent_id_or_main(task.agent))
+            agent_icon = (agent.get("icon", "🔗") if agent else "🔗")
+            failure_msg = _format_status_message(
+                title=f"Rotina: {task.name} — FAILED",
+                icon=f"❌ {agent_icon}",
+                body=[("ℹ️", f"Erro: {str(exc)[:300]}")],
+                duration_seconds=int(time.time() - routine_start_time),
+            )
             if progress_msg_id:
-                self.edit_message(progress_msg_id, f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+                self.edit_message(progress_msg_id, failure_msg)
             else:
-                self.send_message(f"❌ Rotina *{task.name}* falhou: {str(exc)[:300]}")
+                self.send_message(failure_msg)
             # Compound engineering: draft a lesson from this failure
             lesson_path = record_lesson_draft(
                 task.name, str(exc), kind="routine",
@@ -14256,6 +15539,21 @@ class ClaudeTelegramBot:
         text = text.strip()
         if not text:
             return
+
+        # Pipeline v2 edit-mode interceptor — when an "✏️ Editar" button was
+        # tapped on a publish-step preview, the next free-form message in
+        # this chat/topic is captured as feedback for the re-edit pipeline.
+        # Commands (text starting with /) bypass the interceptor so the
+        # user can still run /help, /status, etc. in edit-mode without
+        # inadvertently submitting a slash command as feedback.
+        if not text.startswith("/"):
+            chat_id_for_em = str(self._ctx.chat_id) if self._ctx else None
+            thread_id_for_em = self._ctx.thread_id if self._ctx else None
+            if chat_id_for_em:
+                em_state = _load_edit_mode(chat_id_for_em, thread_id_for_em)
+                if em_state:
+                    self._consume_edit_feedback(em_state, text, user_msg_id)
+                    return
 
         # Check for pending manual review feedback (edit mode) — intercept before command handling
         for _rev_id, _rev_entry in list(self._pending_manual_reviews.items()):
@@ -14385,6 +15683,16 @@ class ClaudeTelegramBot:
     def _handle_callback(self, callback: Dict) -> None:
         cb_id = callback.get("id", "")
         data = callback.get("data", "")
+
+        # Pipeline action button (Pipeline v2 ACTIONS block)
+        if data.startswith("act:"):
+            self._handle_action_callback(callback, data[4:])
+            return
+
+        # Cancel a currently-running pipeline (button on the live progress message)
+        if data.startswith("cancel_run:"):
+            self._handle_cancel_running_pipeline_callback(callback, data[len("cancel_run:"):])
+            return
 
         # Voice pick: update selection without removing keyboard
         if data.startswith("voicepick:"):
@@ -14866,6 +16174,14 @@ class ClaudeTelegramBot:
 
         user_msg_id = msg.get("message_id")
         reply_ctx = self._extract_reply_context(msg)
+
+        # Capture sender's @handle on the active context so audit footers
+        # (edit-feedback "✏️ Editando (feedback de @user)", etc) can show it.
+        if self._ctx is not None:
+            sender = msg.get("from", {}) or {}
+            self._ctx.last_username = (sender.get("username")
+                                        or sender.get("first_name")
+                                        or str(sender.get("id", "")))
 
         text = msg.get("text", "")
         if text:

@@ -18,7 +18,7 @@ tags: [oss, radar, watchlist, monitoring]
 
 ## How this list is used
 
-`vault/main/Routines/oss-radar/steps/analyze.md` reads this file during the daily routine. For each active watch, the analyze step checks the collected GitHub data for state changes (merged / closed / major update) and surfaces them under a `⚠️ Watchlist update` header in the Telegram report.
+`vault/main/Routines/oss-radar-v2/steps/analyze.md` reads this file during the daily pipeline. For each active watch, the analyze step checks the collected GitHub data for state changes (merged / closed / major update) and surfaces them under a `⚠️ Watchlist update` header in the Telegram report.
 
 ## Resolving a watch
 

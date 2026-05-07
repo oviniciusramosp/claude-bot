@@ -33,7 +33,9 @@ response=$(curl -sf -w "\n%{http_code}" \
     -H "Content-Type: application/json" \
     -d "{\"name\": \"${ROUTINE}\"}" 2>&1 || true)
 
-body=$(printf '%s' "$response" | head -n -1)
+# `head -n -1` is GNU-only — BSD/macOS `head` errors with "illegal line count".
+# awk is POSIX and emits every line except the final one regardless of platform.
+body=$(printf '%s' "$response" | awk 'NR>1{print prev}{prev=$0}')
 code=$(printf '%s' "$response" | tail -n 1)
 
 if [[ "$code" == "200" ]]; then

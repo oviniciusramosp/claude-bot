@@ -71,7 +71,7 @@ Three routing env vars are also injected for direct use in curl/urllib if needed
 Use this whenever your task requires a follow-up routine. **Never ask the user to `/run` it manually** — call the script yourself via Bash.
 
 ```bash
-bash scripts/run-routine.sh crypto-news-produce
+bash scripts/run-routine.sh crypto-news-produce-v2
 bash scripts/run-routine.sh vault-indexes-update
 ```
 

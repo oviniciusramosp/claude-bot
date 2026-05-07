@@ -339,6 +339,26 @@ def main():
                   file=sys.stderr)
             sys.exit(1)
 
+    # Pipeline v2 anti-pattern detection: when this script is invoked from
+    # inside a v2 step subprocess (PIPELINE_DATA_DIR is set by the executor
+    # for every script/validate/llm step), it's almost always a leak — the
+    # v2 convention is that ONLY `publish` steps with declared sinks reach
+    # the user, and the publish sink uses bot.send_message() internally,
+    # NOT this script. We emit a loud warning to stderr so the leak surfaces
+    # in pipeline logs (and grep audits) without breaking legitimate v1
+    # routine use (routines don't set PIPELINE_DATA_DIR).
+    pipeline_data_dir = os.environ.get("PIPELINE_DATA_DIR", "").strip()
+    if pipeline_data_dir:
+        step_id = os.environ.get("PIPELINE_STEP_ID", "<unknown>")
+        print(
+            f"WARN: telegram_notify.py invoked from inside Pipeline v2 step "
+            f"'{step_id}' (PIPELINE_DATA_DIR={pipeline_data_dir}). This is a "
+            f"leak — only `publish` steps with declared sinks may reach the "
+            f"user. See vault/Skills/create-pipeline.md §9 (Telegram-safe "
+            f"stdout) for the right pattern. Sending anyway for backcompat.",
+            file=sys.stderr,
+        )
+
     # Resolve agent (auto-detect if not explicit)
     try:
         agent_id = detect_agent(args.agent)

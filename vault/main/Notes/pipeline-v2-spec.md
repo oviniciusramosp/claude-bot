@@ -23,7 +23,7 @@ The current production implementation lives in `/Users/viniciusramos/claude-bot/
 - `_is_no_reply_output()` (line 1214) — soft-skip sentinel detector
 - `_inject_temp_parent_link()` (line 1501) — `[[<agent>/agent-temp|Temp]]` prepender
 
-A reference v1 pipeline is `/Users/viniciusramos/claude-bot/vault/crypto-bro/Routines/crypto-ta-analise.md`.
+A reference v2 pipeline is `/Users/viniciusramos/claude-bot/vault/crypto-bro/Routines/crypto-ta-analise-v2.md` (the original v1 was deleted after migration; see git history if you need the pre-migration shape).
 
 ## 1. Motivation
 
@@ -331,9 +331,9 @@ A rejection returns a structured error to the caller (slash command sees a Teleg
 
 The user says "Crypto Bro, roda a TA com foco em ETH". The crypto-bro session:
 
-1. Reads `vault/crypto-bro/Routines/crypto-ta-analise.md` to find the steps that accept `focus_asset`.
+1. Reads `vault/crypto-bro/Routines/crypto-ta-analise-v2.md` to find the steps that accept `focus_asset`.
 2. Builds the overrides dict: `{"analyst": {"focus_asset": "ETH"}, "writer": {"focus_asset": "ETH"}}`.
-3. Invokes `python3 scripts/run_pipeline.py crypto-ta-analise --overrides '<json>'`.
+3. Invokes `python3 scripts/run_pipeline.py crypto-ta-analise-v2 --overrides '<json>'`.
 4. The runner script calls into the bot's pipeline-spawning helper (today: `_enqueue_pipeline`) with overrides attached to the run.
 
 The agent does NOT call the executor in-process. The trigger is always out-of-band so the agent's own LLM session doesn't block waiting for a 20-min pipeline to finish.

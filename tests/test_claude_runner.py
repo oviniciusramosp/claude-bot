@@ -271,7 +271,10 @@ class GetSnapshot(unittest.TestCase):
     def setUpClass(cls):
         cls.bot = load_bot_module()
 
-    def test_snapshot_combines_text_and_tools(self):
+    def test_snapshot_returns_text_only_tool_log_separate(self):
+        # Tool calls are surfaced via get_tool_log_snapshot (rendered inside
+        # the Reasoning toggle). get_snapshot returns only the model's
+        # accumulated reply text so the main streaming message stays clean.
         runner = self.bot.ClaudeRunner()
         runner.running = True
         runner._handle_event({
@@ -286,8 +289,10 @@ class GetSnapshot(unittest.TestCase):
             }]},
         })
         snapshot = runner.get_snapshot()
-        self.assertIsInstance(snapshot, str)
-        self.assertGreater(len(snapshot), 0)
+        self.assertEqual(snapshot, "hello")
+        tool_snapshot = runner.get_tool_log_snapshot()
+        self.assertIn("Read", tool_snapshot)
+        self.assertIn("x.py", tool_snapshot)
 
 
 class ProviderRouting(unittest.TestCase):

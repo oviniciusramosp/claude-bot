@@ -322,7 +322,9 @@ Step prompt files live under `Routines/{pipeline}/steps/*.md` — they have **no
 
 **Optional `## Example Output` / `## Expected Output` sections.** When a routine or pipeline step produces structured output and the format matters for correctness or downstream parsing, include an inline example at the end of the prompt body. This is especially important for pipeline steps whose output feeds another step. See `Skills/create-routine.md` and `Skills/create-pipeline.md` for detailed guidance and examples.
 
-**Telegram notifications from steps.** To send additional Telegram messages from a pipeline step or routine, use `scripts/telegram_notify.py "message"`. The script auto-detects the owning agent from the `AGENT_ID` env var (injected by the bot harness) and reads `chat_id`/`thread_id` from the agent's frontmatter. The harness's `notify: final` and `output: telegram` handle the main pipeline output automatically.
+**Telegram notifications from routines.** A v1-style routine (single-step `type: routine`) may use `scripts/telegram_notify.py "message"` to send extra Telegram messages — the script auto-detects the owning agent from the `AGENT_ID` env var and reads `chat_id`/`thread_id` from the agent's frontmatter.
+
+**Telegram notifications from Pipeline v2 steps — DO NOT use telegram_notify.py.** In Pipeline v2 (`pipeline_version: 2`), the contract is: **only `publish` steps with declared sinks reach the user**. `script` / `validate` / `llm` steps that subprocess `telegram_notify.py` are a leak — they bypass the harness's structural anti-leak gates (the `_sink_telegram` enforcement, the title-prefix wrapping, the cascade-skip logic). To deliver user-facing content from a v2 pipeline, declare a `publish` step with `sink: telegram`. The harness sets `PIPELINE_DATA_DIR` on every v2 step subprocess; if `telegram_notify.py` is invoked with that env present, the script emits a loud `WARN:` to stderr (visible in `bot.log` and pipeline logs) so the leak surfaces in audits even when the message went through. See `vault/Skills/create-pipeline.md` §9 (Telegram-safe stdout) and §3.5 (Publish-step extras) for the right shapes.
 
 ### Agent
 ```yaml
