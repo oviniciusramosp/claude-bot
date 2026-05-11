@@ -46,6 +46,8 @@ tags: [index, notes]
 - [[main/Notes/launchd-authoritative|launchd-authoritative]] — `com.vr.claude-bot-menubar` LaunchAgent is the sole process manager; never start manually via nohup
 - [[main/Notes/launchd-is-authoritative|launchd-is-authoritative]] — `com.vr.claude-bot-menubar` LaunchAgent owns the menubar process — manual launches cause duplicate instances
 - [[main/Notes/launchd-menubar|launchd-menubar]] — launchd plist `com.vr.claude-bot-menubar` is the only process manager for the menubar app — never start manually with nohup
+- [[main/Notes/mdv2-table-converter|mdv2-table-converter]] — `_convert_md_tables` pre-processor added to `ClaudeTelegramBot` converts markdown tables to ASCII code blocks before MDv2 escaping
+- [[main/Notes/mdv2-tilde-bug|mdv2-tilde-bug]] — Greedy `~` parser in `_escape_mdv2_segment` escaped `*` inside strikethrough spans, breaking bold rendering — removed in v3.68.3
 - [[main/Notes/menubar-app-path|menubar-app-path]] — Menubar app at `~/claude-bot/claude-bot-menubar.py`; managed exclusively by launchd `com.vr.claude-bot-menubar`
 - [[main/Notes/menubar-launchd-only|menubar-launchd-only]] — Only launchd (`com.vr.claude-bot-menubar`) should manage the menubar process — manual launches create duplicates
 - [[main/Notes/menubar-python|menubar-python]] — rumps requires Python 3.9 from CLI tools, not Homebrew Python
@@ -84,6 +86,8 @@ tags: [index, notes]
 - [[main/Notes/vault-agent-detection|vault-agent-detection]] — Agent directories detected solely by presence of `agent-<dirname>.md` file
 - [[main/Notes/vault-agent-isolation|vault-agent-isolation]] — Agent dirs detected by presence of `agent-<dirname>.md`; no cross-agent inheritance
 - [[main/Notes/vault-routine-index|vault-routine-index]] — `vault/Routines/Routines.md` is the single index of all active routines
+- [[main/Notes/vault-skill-wikilink-rule|vault-skill-wikilink-rule]] — Skills must `[[wikilink]]` to sub-files; backtick text paths do not register as graph edges and cause orphans
+- [[main/Notes/weekly-rollup-broken-wikilinks|weekly-rollup-broken-wikilinks]] — `journal-weekly-rollup.py` links all 7 days of the week without checking file existence — must filter to existing files
 - [[main/Notes/wikilink-basename-collision|wikilink-basename-collision]] — Obsidian resolves `[[agent-notes]]` globally; identical basenames across agents force path-qualified links
 - [[main/Notes/zai-glm51-thinking|zai-glm51-thinking]] — GLM 5.1 reasons by default — always pass `{"thinking":{"type":"disabled"}}` via `extra_body` to avoid token burn
 - [[main/Notes/zai-glm51-thinking-disabled|zai-glm51-thinking-disabled]] — glm-5.1 reasons by default; always pass {"thinking":{"type":"disabled"}} via extra_body unless deep reasoning needed

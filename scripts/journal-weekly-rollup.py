@@ -220,7 +220,10 @@ def _write_weekly_file(
     cur = monday
     end = _dt.date.fromisoformat(date_to)
     while cur <= end:
-        days_list.append(cur.isoformat())
+        day_iso = cur.isoformat()
+        day_file = month_dir / f"{day_iso}.md"
+        if day_file.exists():
+            days_list.append(day_iso)
         cur += _dt.timedelta(days=1)
     days_yaml = ", ".join(days_list)
     frontmatter = (

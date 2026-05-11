@@ -68,6 +68,8 @@ EXCLUDED_LINT_DIRS = {
     ".workspace",  # v3.5: pipeline runtime data (dot-prefixed so Obsidian hides it)
     "workspace",   # pre-v3.5 fallback — still ignored by the linter
     "Reactions",   # webhook config, see vault/CLAUDE.md "Files that are NOT graph nodes"
+    "data",        # runtime pipeline data (inputs/outputs), not knowledge nodes
+    "course-pt-br",  # levain course content — runtime reading material, not graph nodes
 }
 
 

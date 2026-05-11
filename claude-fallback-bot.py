@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.68.1"  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
+BOT_VERSION = "3.68.3"  # fix: Telegram MarkdownV2 formatting — (1) greedy ~ strikethrough parser consumed content between any two tildes (e.g. ~/path) eating bold markers inside; removed, ~ now always escapes as \~. (2) markdown tables converted to fenced code blocks before MDv2 processing so columns render readably instead of escaped \| garbage.  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
 
 import hmac
 import hashlib
@@ -541,6 +541,7 @@ MODEL_PROVIDERS = {
     "glm-4.5-air": "zai",
     "gpt-5": "openai",
     "gpt-5-codex": "openai",
+    "gpt-5.5": "openai",
 }
 
 # Short alias → full API model ID, used in the response signature.
@@ -553,6 +554,7 @@ MODEL_FULL_IDS: dict = {
     "glm-4.5-air": "glm-4.5-air",
     "gpt-5":       "gpt-5",
     "gpt-5-codex": "gpt-5-codex",
+    "gpt-5.5":     "gpt-5.5",
 }
 DEFAULT_MODEL = "sonnet"
 
@@ -1562,6 +1564,7 @@ class PipelineTask:
     minimal_context: bool = False
     voice: bool = False
     effort: Optional[str] = None
+    notify_skip: bool = True  # False = suppress skip-summary notification when all steps skipped
     # --- Pipeline v2 (v3.55+) ---
     pipeline_version: int = 1  # 2 opts the pipeline into v2 dispatch (also requires PIPELINE_V2_ENABLED)
     applied_overrides: dict = field(default_factory=dict)  # {step_id: {attr: val}} merged at runtime by caller
@@ -3223,6 +3226,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         minimal_context=bool(fm.get("context") == "minimal"),
         voice=bool(fm.get("voice", False)),
         effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+        notify_skip=bool(fm.get("notify_skip", True)),
         pipeline_version=_pipeline_version,
     )
 
@@ -6143,7 +6147,7 @@ class CodexRunner:
     def run(
         self,
         prompt: str,
-        model: str = "gpt-5-codex",
+        model: str = "gpt-5.5",
         session_id: Optional[str] = None,
         workspace: str = CLAUDE_WORKSPACE,
         max_budget: Optional[float] = None,  # unused (Codex has no --max-budget)
@@ -6194,12 +6198,15 @@ class CodexRunner:
         # Working directory is set via Popen(cwd=workspace) below — Codex has
         # no --cd/--cwd flag; the subprocess cwd is what it uses.
         #
-        # IMPORTANT: `--model` is intentionally omitted. When authenticated via
-        # `codex login` (ChatGPT Plus/Pro OAuth), Codex rejects any explicit
-        # --model value with `400 The 'X' model is not supported when using
-        # Codex with a ChatGPT account`. The CLI picks the right model based
-        # on the user's subscription tier. API-key users who want a specific
-        # model should set it in `~/.codex/config.toml`.
+        # `--model` policy under ChatGPT Plus/Pro OAuth (verified 2026-05-08):
+        # the server rejects models OUTSIDE the OAuth-allowed list with HTTP 400
+        # ("The 'X' model is not supported when using Codex with a ChatGPT
+        # account"). `gpt-5-codex` is rejected; `gpt-5.5` is allowed and is the
+        # current Plus/Pro default. We pass --model when the caller asked for an
+        # OAuth-allowed slug (gpt-5*, NOT gpt-5-codex). For gpt-5-codex requests
+        # we omit --model and let the server pick the tier default — this
+        # preserves backward-compat for any caller still requesting the old slug.
+        OAUTH_ALLOWED_PREFIXES = ("gpt-5.5", "gpt-5.4")
         flags = [
             "--json",
             # Full trust — same semantic as Claude's --dangerously-skip-permissions.
@@ -6208,6 +6215,8 @@ class CodexRunner:
             "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",  # vault workspace isn't always a git repo
         ]
+        if any(model.startswith(p) for p in OAUTH_ALLOWED_PREFIXES):
+            flags += ["--model", model]
         if effort:
             # Codex exposes reasoning effort via -c key=value global config override.
             # model_reasoning_effort accepts low|medium|high. # VERIFY key name.
@@ -8344,6 +8353,10 @@ class PipelineExecutor:
         # Use absolute paths so Claude writes to the correct location
         # regardless of the CLI's working directory (which may differ when agent is set)
         abs_data_dir = str(data_dir)
+        # Resolve agent base dir for path-translation hints (used by OpenAI/codex
+        # which doesn't infer absolute paths from prefix as reliably as Claude).
+        agent_id_for_paths = step.agent or self.task.agent or MAIN_AGENT_ID
+        abs_agent_base = str(agent_base(agent_id_for_paths))
         prefix_lines = [
             f"[PIPELINE: {self.task.name} | Step: {step.name} ({step.id})]",
             "",
@@ -8359,6 +8372,11 @@ class PipelineExecutor:
             "IMPORTANTE: execute a tarefa e escreva APENAS os dados/conteúdo solicitados no arquivo acima. "
             "NÃO escreva confirmações de execução, resumos de status, nem mensagens como '✅ Coleta concluída'. "
             "O arquivo deve conter exclusivamente o output da tarefa no formato especificado.",
+            "",
+            "RESOLUÇÃO DE CAMINHOS (use SEMPRE caminhos absolutos ao ler/escrever arquivos):",
+            f"- Quando o prompt mencionar `data/<arquivo>`, interprete como `{abs_data_dir}/<arquivo>`",
+            f"- Quando mencionar `Skills/<arquivo>` (ou `vault/<agente>/Skills/<arquivo>`), interprete como `{abs_agent_base}/Skills/<arquivo>`",
+            f"- Caminhos relativos NUNCA funcionam (cwd ≠ agent_base ≠ data_dir). Sempre use o caminho absoluto correto.",
             "",
             "---",
             "",
@@ -8512,6 +8530,8 @@ class PipelineExecutor:
         cascade.  Fails silently — visibility is best-effort, never blocks
         the pipeline lifecycle.
         """
+        if not self.task.notify_skip:
+            return
         try:
             summary = self._compute_savings_summary()
             if not summary:
@@ -10529,6 +10549,53 @@ class ClaudeTelegramBot:
     # Characters that must be escaped in MarkdownV2 outside code/pre blocks
     _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~>#\+\-=|{}.!\\])')
 
+    _TABLE_SEP_RE = re.compile(r'^\s*\|[\s|\-:]+\|\s*$')
+
+    @staticmethod
+    def _convert_md_tables(text: str) -> str:
+        """Convert markdown tables to plain-text code blocks.
+
+        Telegram MarkdownV2 has no table support — pipes would be escaped as
+        \\| producing ugly unformatted text. This replaces each detected table
+        with a fenced code block that preserves the columnar layout.
+        """
+        _sep = ClaudeTelegramBot._TABLE_SEP_RE
+        lines = text.split('\n')
+        result: List[str] = []
+        i = 0
+        while i < len(lines):
+            if '|' in lines[i] and i + 1 < len(lines) and _sep.match(lines[i + 1]):
+                table_lines = [lines[i]]
+                i += 1
+                while i < len(lines) and '|' in lines[i]:
+                    table_lines.append(lines[i])
+                    i += 1
+                data_rows = [r for r in table_lines if not _sep.match(r)]
+                parsed = [
+                    [c.strip() for c in row.strip().strip('|').split('|')]
+                    for row in data_rows
+                ]
+                if parsed:
+                    col_count = max(len(r) for r in parsed)
+                    widths = [
+                        max((len(r[j]) if j < len(r) else 0) for r in parsed)
+                        for j in range(col_count)
+                    ]
+                    result.append('```')
+                    for k, row in enumerate(parsed):
+                        cells = [
+                            (row[j] if j < len(row) else '').ljust(widths[j])
+                            for j in range(col_count)
+                        ]
+                        result.append('  '.join(c.rstrip() for c in cells))
+                        if k == 0:
+                            result.append('  '.join('-' * widths[j] for j in range(col_count)))
+                    result.append('```')
+                continue
+            result.append(lines[i])
+            i += 1
+        return '\n'.join(result)
+
     @staticmethod
     def _sanitize_markdown_v2(text: str) -> str:
         """Convert Claude's natural Markdown output to Telegram MarkdownV2.
@@ -10537,6 +10604,9 @@ class ClaudeTelegramBot:
         left untouched, and prose segments where special chars are escaped
         while preserving intended formatting (bold, italic, links, etc.).
         """
+        # Convert markdown tables first (MDv2 has no table support)
+        text = ClaudeTelegramBot._convert_md_tables(text)
+
         # Fix unbalanced triple-backtick code blocks first
         if text.count("```") % 2 != 0:
             text += "\n```"
@@ -10657,16 +10727,6 @@ class ClaudeTelegramBot:
                         continue
                     escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
                     result.append(f'_{escaped}_')
-                    pos = end + 1
-                    continue
-
-            # Strikethrough: ~text~
-            if text[pos] == '~':
-                end = text.find('~', pos + 1)
-                if end != -1 and end > pos + 1:
-                    inner = text[pos + 1:end]
-                    escaped = ClaudeTelegramBot._MDV2_ESCAPE_RE.sub(r'\\\1', inner)
-                    result.append(f'~{escaped}~')
                     pos = end + 1
                     continue
 
