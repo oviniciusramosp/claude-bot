@@ -217,15 +217,13 @@ README (root hub)
 
 **Linking rules:**
 
-| Type | Outlinks | Inlinks |
-|------|----------|---------|
-| README | `Agents` index + `Tooling` | none (root) |
-| `Agents/Agents.md` | each agent hub `{id}.md` | README |
-| Agent hub `{id}.md` | the agent's own knowledge sub-files only | `Agents` index |
-| Index inside an agent (`Skills.md`, `Routines.md`, …) | the direct children in the same folder | agent hub |
-| Leaf (routine, note) | `[[ParentIndex]]` on first line + genuine cross-links | its index |
-| Skill | NO wikilinks (use paths). Exception: links to own sub-files | Skills index |
-| Tooling | none (terminal) | README |
+- README → `Agents` index + `Tooling`. Inlinks: none (root).
+- `Agents/Agents.md` → each agent hub `{id}.md`. Inlinks: README.
+- Agent hub `{id}.md` → the agent's own knowledge sub-files only. Inlinks: `Agents` index.
+- Folder index (`Skills.md`, `Routines.md`, `README.md`, …) → direct children in the same folder. Inlinks: agent hub or parent folder. Auto-populated via `vault-query:start` marker blocks.
+- Leaf (routine, note, lesson) → genuine cross-links only. **No `[[ParentIndex]]` backlink required** — reachability comes from the folder index linking *down* (see "Folder-as-parent" above). Inlinks: its folder index.
+- Skill → its own sub-files only (no wikilinks otherwise; use paths in prose). Inlinks: folder index.
+- Tooling → none (terminal). Inlinks: README.
 
 **Files that are NOT graph nodes** (excluded by `vault-graph-builder.py`):
 - Daily journal entries (`<agent>/Journal/YYYY-MM/YYYY-MM-DD.md`) — ephemeral chronological logs
@@ -256,21 +254,38 @@ Each folder has an index that functions as a graph hub. These are auto-regenerat
 - `Agents/Agents.md` → lists every agent via `{parent}` field
 - `Agents/<id>/Skills/Skills.md`, `Routines/Routines.md`, `Journal/Journal.md`, … → per-agent listings scoped by `scope="<id>/<Sub>"`
 
+## Folder-as-parent (v3.69+)
+
+Every folder inside an agent that contains markdown files is its own parent. The folder hierarchy itself is the graph structure — files don't need to declare a `[[ParentIndex]]` backlink in their body. Reachability is enforced *down* (from the folder's index file to its children), not *up*.
+
+**The contract:**
+- Every non-ephemeral folder under `<agent>/` must contain an index file (`<dirname>.md`, `README.md`, or a sibling with `type: index`).
+- The index lists its children as wikilinks (typically via a `vault-query:start` marker block that auto-populates).
+- A file is reachable iff it lives in a folder whose index exists — no backlink required from the child.
+- `scripts/vault_indexes.py` auto-bootstraps `README.md` in any folder lacking an index, then auto-populates the marker block on the next run. The daily `vault-indexes-update` routine keeps this honest.
+
+**Why this satisfies both graphs:**
+- **Obsidian Graph View** sees real wikilinks (index → child) in the auto-generated marker blocks. Clean hub-and-spoke per folder, no external plugin needed.
+- **`.graphs/graph.json` (bot)** sees the same wikilinks via `vault-graph-builder.py`. Active Memory reflects folder structure automatically.
+
+**Ephemeral folders excluded from auto-bootstrap** (mirrors `vault_lint.EXCLUDED_LINT_DIRS`): `.workspace`, `.history`, `Reactions`, `data`, `steps`, `course-pt-br`, `original-course`, `Journal/YYYY-MM/` daily-month folders, and any dot-prefixed folder.
+
 ## Wikilinks — when to use
 
 **Create a link when:**
-- First line of body → `[[ParentIndex]]` (same-folder)
 - Pipeline parent → its steps (via the `## Steps` section)
 - Skill → its own sub-files
-- Leaf → its parent index
+- Index → its children (auto-handled by `vault_indexes.py` marker blocks — don't hand-curate)
+- Cross-folder references that represent a real semantic dependency
 
 **DO NOT create a link when:**
+- The relationship is already covered by folder-as-parent — leaves don't need `[[ParentIndex]]` backlinks
 - Mentioning something in the Journal (use plain text)
 - Referencing Tooling from within leaves
 - Mentioning something "related" that is not a real dependency
 - Citing an entity for context without dependency
 
-Each `[[wikilink]]` adds an edge to the Obsidian graph. Fewer edges = a more navigable graph.
+Each `[[wikilink]]` adds an edge to the Obsidian graph. Fewer edges = a more navigable graph. The folder-as-parent rule means the *down* edges (index → children) carry the structural weight; *up* backlinks from leaves are redundant noise.
 
 ## Writing principles for the graph
 
@@ -285,11 +300,11 @@ Each `[[wikilink]]` adds an edge to the Obsidian graph. Fewer edges = a more nav
 
 **1. Complete frontmatter** (see above).
 
-**2. First line of body = link to parent index, path-qualified:** Routine → `[[<agent>/Routines/agent-routines|Routines]]`, Note → `[[<agent>/Notes/agent-notes|Notes]]`, Lesson → `[[<agent>/Lessons/agent-lessons|Lessons]]`. The path prefix is **required** because every agent has its own `agent-notes.md`/`agent-routines.md`/etc. — bare `[[agent-notes]]` is ambiguous and Obsidian resolves it to a single file across the whole vault, leaving the others without inlinks. **Exception: Skills DO NOT link to parent index** — Skills.md links to the skills, not the other way around.
+**2. No parent backlink required.** Drop the file in its folder. The folder's index file (auto-generated or hand-curated) links *down* to it on the next `vault_indexes.py` run, satisfying the folder-as-parent contract. Save the `[[wikilink]]` budget for real cross-folder dependencies.
 
 **3. Cross-links only for real dependencies.** When in doubt, don't link.
 
-**4. Update the folder's index.** (Or let `scripts/vault_indexes.py` regenerate it — the `vault-indexes-update` routine does this daily.)
+**4. If you create a new folder**, `scripts/vault_indexes.py` will auto-create a `README.md` in it on the next run. To bootstrap immediately: `python3 scripts/vault_indexes.py` from the repo root.
 
 **5. Record in the day's Journal** (without creating a wikilink to the new file — mention in plain text).
 

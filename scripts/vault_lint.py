@@ -70,6 +70,7 @@ EXCLUDED_LINT_DIRS = {
     "Reactions",   # webhook config, see vault/CLAUDE.md "Files that are NOT graph nodes"
     "data",        # runtime pipeline data (inputs/outputs), not knowledge nodes
     "course-pt-br",  # levain course content — runtime reading material, not graph nodes
+    "original-course",  # imported reference material, not graph nodes
 }
 
 
@@ -184,6 +185,28 @@ def _is_index_file(f: VaultFile) -> bool:
     return name in ("README.md", "Tooling.md")
 
 
+def _compute_folder_index_dirs(vi: VaultIndex) -> Set[Path]:
+    """Pre-compute directories that contain a folder-index file.
+
+    Folder-as-parent rule: a directory has an "index" if it contains a sibling
+    .md file that acts as the folder's hub. We recognize three patterns:
+
+      1. ``<dirname>.md`` — e.g. ``Skills/Skills.md`` (the v3.1 per-folder hub)
+      2. ``README.md`` — Obsidian convention for folder-level docs
+      3. Any sibling with ``type: index`` in frontmatter
+
+    Any file whose parent dir is in the returned set is considered reachable
+    through the folder hierarchy and is exempt from the orphan check.
+    """
+    dirs: Set[Path] = set()
+    for f in vi:
+        parent = f.path.parent
+        name = f.path.name
+        if name == f"{parent.name}.md" or name == "README.md" or f.type == "index":
+            dirs.add(parent)
+    return dirs
+
+
 def _resolve_wikilink_target(link: str, source_dir: Path, vault_dir: Path) -> Optional[Path]:
     """Resolve a wikilink, mirroring vault-graph-builder.resolve_wikilink."""
     link = link.split("#")[0].strip()
@@ -270,9 +293,19 @@ def lint_broken_wikilinks(vi: VaultIndex, report: LintReport) -> None:
 
 
 def lint_orphans(vi: VaultIndex, report: LintReport) -> None:
-    """A file is an orphan if it is a knowledge node and no other file links
-    to it via wikilink. Indexes, step files, daily journals, history rollups,
-    and ephemeral files are exempt."""
+    """A file is an orphan if it is a knowledge node, no other file links to
+    it via wikilink, AND its parent directory has no folder-index sibling.
+
+    Folder-as-parent contract: every directory inside an agent that contains
+    markdown files should have a sibling index (`<dirname>.md`, `README.md`,
+    or any file with `type: index`). When that sibling exists, all .md
+    children of the folder are considered reachable via the folder hierarchy
+    — they don't need explicit `[[ParentIndex]]` backlinks. The auto-bootstrap
+    in vault_indexes.py ensures every non-excluded folder gets an index, so
+    this exemption covers the common case by construction.
+    """
+    folder_index_dirs = _compute_folder_index_dirs(vi)
+
     inbound: Dict[str, int] = {}
     for f in vi:
         if not _is_lintable(f):
@@ -298,13 +331,15 @@ def lint_orphans(vi: VaultIndex, report: LintReport) -> None:
             continue
         if f.type in ("agent", "context", "history"):
             continue  # Reachable through their parent agent dir
+        if f.path.parent in folder_index_dirs:
+            continue  # Reachable via folder-as-parent
         if inbound.get(f.rel_path, 0) == 0:
             report.add(
                 LintIssue(
                     category=3,
                     severity="warning",
                     file=f.rel_path,
-                    message="Orphan file (no inbound wikilinks)",
+                    message="Orphan file (no inbound wikilinks, no folder index)",
                 )
             )
 

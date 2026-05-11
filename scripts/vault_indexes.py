@@ -151,7 +151,11 @@ def _sort_files(files: List[VaultFile], sort_spec: str) -> List[VaultFile]:
     return sorted(files, key=key, reverse=reverse)
 
 
-def _render_block(vi: VaultIndex, directives: Dict[str, str]) -> str:
+def _render_block(
+    vi: VaultIndex,
+    directives: Dict[str, str],
+    source_rel_path: Optional[str] = None,
+) -> str:
     """Render a single marker block from directives + vault index.
 
     The ``scope`` directive is an ergonomic shortcut for
@@ -159,6 +163,10 @@ def _render_block(vi: VaultIndex, directives: Dict[str, str]) -> str:
     restrict listings to a single ``<agent>/<sub>/`` folder, e.g.
 
         <!-- vault-query:start filter="type=skill" scope="main/Skills" sort="title" -->
+
+    ``source_rel_path`` is the vault-relative path of the file containing this
+    marker block. When provided, the rendering automatically excludes that
+    file from the results so an index never lists itself.
     """
     filter_expr = directives.get("filter", "")
     fmt = directives.get("format", "- [[{stem}]] — {description}")
@@ -174,6 +182,8 @@ def _render_block(vi: VaultIndex, directives: Dict[str, str]) -> str:
         # which is posix style without the leading slash.
         filters["path__startswith"] = scope.rstrip("/") + "/"
     files = vi.find(**filters)
+    if source_rel_path:
+        files = [f for f in files if f.rel_path != source_rel_path]
     files = _sort_files(files, sort_spec)
     if limit:
         files = files[:limit]
@@ -258,7 +268,11 @@ def regenerate_file(filepath: Path, vi: VaultIndex) -> Tuple[bool, str]:
             out.append(original[start_match.end() :])
             break
         directives = _parse_directives(start_match.group(1))
-        rendered = _render_block(vi, directives)
+        try:
+            source_rel = filepath.relative_to(vi.vault_dir).as_posix()
+        except ValueError:
+            source_rel = None
+        rendered = _render_block(vi, directives, source_rel_path=source_rel)
         # Always sandwich the rendered block in newlines so the markers stay
         # on their own lines.
         new_block = "\n" + rendered + "\n"
@@ -302,6 +316,152 @@ def regenerate_vault(
             if not check_only:
                 f.write_text(new_text, encoding="utf-8")
     return changed, files
+
+
+# Folders that must never receive an auto-bootstrapped index. Mirrors
+# vault_lint.EXCLUDED_LINT_DIRS and vault-graph-builder.is_ephemeral, kept
+# in sync manually so all three scripts treat ephemera identically.
+BOOTSTRAP_EXCLUDED_DIRS = {
+    ".graphs", ".obsidian", ".claude", "__pycache__",
+    ".workspace", "workspace",
+    "Reactions",
+    "data",
+    ".history",
+    "steps",                 # pipeline step prompts — no frontmatter allowed
+    "course-pt-br",
+    "original-course",
+}
+
+# Inside Journal/ we only bootstrap the agent-journal.md hub (handled by the
+# bot), never the year/month subfolders — daily/weekly/monthly files are
+# explicitly NOT graph nodes (see vault/CLAUDE.md).
+JOURNAL_SUBDIR_RE = re.compile(r"^\d{4}-\d{2}$")
+
+
+def _is_agent_root(d: Path) -> bool:
+    """A folder is an agent root iff it contains `agent-<dirname>.md`."""
+    return (d / f"agent-{d.name}.md").is_file()
+
+
+def _folder_already_has_index(folder: Path) -> Optional[Path]:
+    """Return the index file path if `folder` already has one, else None.
+
+    Patterns (folder-as-parent contract):
+      1. ``<dirname>.md``   — v3.1 per-folder hub
+      2. ``README.md``      — Obsidian convention
+      3. Any sibling .md whose frontmatter declares ``type: index``
+      4. ``agent-<dirname>.md`` — agent root hub
+    """
+    candidates = [
+        folder / f"{folder.name}.md",
+        folder / "README.md",
+        folder / f"agent-{folder.name}.md",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    # Fallback: scan for any .md with type: index in frontmatter
+    for md in folder.glob("*.md"):
+        try:
+            head = md.read_text(encoding="utf-8")[:600]
+        except (OSError, UnicodeDecodeError):
+            continue
+        if re.search(r"^type:\s*index\b", head, re.MULTILINE):
+            return md
+    return None
+
+
+def _folder_should_have_index(folder: Path, vault_dir: Path) -> bool:
+    """Return True if `folder` should be auto-bootstrapped with an index.
+
+    Rules:
+      - Must be inside an agent subtree (not the vault root itself)
+      - Must not match BOOTSTRAP_EXCLUDED_DIRS at any path part
+      - Must not be the agent root itself (the hub is `agent-<id>.md`)
+      - Must not be a Journal year-month subfolder (`YYYY-MM/`)
+      - Must contain at least one .md file (else nothing to index)
+    """
+    try:
+        rel_parts = folder.relative_to(vault_dir).parts
+    except ValueError:
+        return False
+    if not rel_parts:
+        return False  # vault root
+    if any(part in BOOTSTRAP_EXCLUDED_DIRS for part in rel_parts):
+        return False
+    if any(part.startswith(".") for part in rel_parts):
+        return False
+    # Journal/ year-month subfolders are intentionally NOT graph nodes
+    if "Journal" in rel_parts:
+        for part in rel_parts:
+            if JOURNAL_SUBDIR_RE.match(part):
+                return False
+    # Agent root itself is anchored by `agent-<id>.md`, not by README.md
+    if len(rel_parts) == 1 and _is_agent_root(folder):
+        return False
+    # Folder must contain at least one .md file
+    if not any(folder.glob("*.md")):
+        return False
+    return True
+
+
+def _today_iso() -> str:
+    from datetime import date as _date
+    return _date.today().isoformat()
+
+
+def _bootstrap_one_index(folder: Path, vault_dir: Path) -> Path:
+    """Create a minimal README.md inside `folder` and return its path.
+
+    The README has:
+      - Full vault frontmatter (type: index)
+      - A `vault-query:start` marker block listing siblings as wikilinks
+      - Title derived from the folder name (with humanization)
+    """
+    rel = folder.relative_to(vault_dir).as_posix()
+    title = folder.name.replace("-", " ").replace("_", " ").strip().title() or "Index"
+    today = _today_iso()
+    scope = rel.rstrip("/") + "/"
+    body = (
+        f"---\n"
+        f"title: \"{title}\"\n"
+        f"description: \"Folder index for {rel}. Auto-bootstrapped to satisfy the "
+        f"folder-as-parent rule; lists all sibling files in this directory.\"\n"
+        f"type: index\n"
+        f"created: {today}\n"
+        f"updated: {today}\n"
+        f"tags: [index, auto]\n"
+        f"---\n"
+        f"\n"
+        f"# {title}\n"
+        f"\n"
+        f"<!-- vault-query:start filter=\"type__exists=true\" scope=\"{scope}\" "
+        f"sort=\"title\" format=\"- [[{{link}}|{{stem}}]] — {{description}}\" "
+        f"empty=\"_(no files yet)_\" -->\n"
+        f"_(pending first regenerate_vault run)_\n"
+        f"{MARKER_END}\n"
+    )
+    target = folder / "README.md"
+    target.write_text(body, encoding="utf-8")
+    return target
+
+
+def bootstrap_folder_indexes(vault_dir: Path) -> List[Path]:
+    """Walk the vault and create README.md indexes for folders missing one.
+
+    Returns the list of newly created index files.
+    """
+    created: List[Path] = []
+    for folder in sorted(vault_dir.rglob("*")):
+        if not folder.is_dir():
+            continue
+        if not _folder_should_have_index(folder, vault_dir):
+            continue
+        if _folder_already_has_index(folder) is not None:
+            continue
+        new_index = _bootstrap_one_index(folder, vault_dir)
+        created.append(new_index)
+    return created
 
 
 def _default_vault_dir() -> Path:
@@ -377,7 +537,19 @@ def main() -> int:
         action="store_true",
         help="Don't write — exit 1 if any file would change",
     )
+    p.add_argument(
+        "--no-bootstrap",
+        action="store_true",
+        help="Skip folder-index auto-bootstrap (only regenerate existing markers)",
+    )
     args = p.parse_args()
+
+    if not args.no_bootstrap and not args.check:
+        created = bootstrap_folder_indexes(args.vault)
+        if created:
+            print(f"📁 Bootstrapped {len(created)} folder index(es):")
+            for f in created:
+                print(f"  + {f.relative_to(args.vault)}")
 
     changed, scanned = regenerate_vault(args.vault, check_only=args.check)
     if not scanned:
