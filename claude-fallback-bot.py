@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.68.3"  # fix: Telegram MarkdownV2 formatting — (1) greedy ~ strikethrough parser consumed content between any two tildes (e.g. ~/path) eating bold markers inside; removed, ~ now always escapes as \~. (2) markdown tables converted to fenced code blocks before MDv2 processing so columns render readably instead of escaped \| garbage.  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
+BOT_VERSION = "3.68.4"  # fix: dedupe interrupted pipeline/routine recovery — restart no longer sends N "Retomando pipeline" notifications for the same task across stale slots (yesterday/earlier today); superseded slots are marked failed silently. # fix: Telegram MarkdownV2 formatting — (1) greedy ~ strikethrough parser consumed content between any two tildes (e.g. ~/path) eating bold markers inside; removed, ~ now always escapes as \~. (2) markdown tables converted to fenced code blocks before MDv2 processing so columns render readably instead of escaped \| garbage.  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
 
 import hmac
 import hashlib
@@ -1992,7 +1992,106 @@ class RoutineStateManager:
                     else:
                         routines.append(info)
 
+        # Dedupe by name: keep only the newest slot per task. Older slots
+        # (from a prior day, or earlier in the same day) are stale — their
+        # scheduled moment has passed, so the scheduler will queue the next
+        # slot at the right time. Resuming N slots of the same pipeline on
+        # restart spams the user with N "Retomando pipeline" notifications
+        # for what is effectively one task. Mark superseded slots as failed
+        # silently so the recovery loop never sees them.
+        pipelines = self._dedupe_by_name(pipelines, kind="pipeline")
+        routines = self._dedupe_by_name(routines, kind="routine")
+
         return pipelines, routines
+
+    def _dedupe_by_name(self, tasks: list, kind: str) -> list:
+        """Keep only the newest slot per task name; mark older slots failed.
+
+        Sort key per task: (day, slot) lexicographically — both fields use
+        ISO-style ordering (YYYY-MM-DD, HH:MM) so string compare is correct.
+        The newest entry survives; every older sibling is persisted as
+        `failed` with a "superseded" error so it doesn't get retried on the
+        next restart.
+        """
+        if len(tasks) <= 1:
+            return tasks
+
+        groups: Dict[str, list] = {}
+        for t in tasks:
+            groups.setdefault(t["name"], []).append(t)
+
+        kept: list = []
+        for name, slots in groups.items():
+            if len(slots) == 1:
+                kept.append(slots[0])
+                continue
+            slots_sorted = sorted(slots, key=lambda s: (s.get("day", ""), s.get("time_slot", "")))
+            survivor = slots_sorted[-1]
+            superseded = slots_sorted[:-1]
+            kept.append(survivor)
+            for old in superseded:
+                err = (
+                    f"Superseded by newer slot {survivor.get('day')}/"
+                    f"{survivor.get('time_slot')} on restart recovery"
+                )
+                try:
+                    self._mark_slot_failed_on_day(
+                        name=old["name"],
+                        slot=old["time_slot"],
+                        day_str=old["day"],
+                        error=err,
+                        is_pipeline=(kind == "pipeline"),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to mark superseded %s %s@%s (%s) as failed: %s",
+                        kind, old["name"], old["time_slot"], old["day"], exc,
+                    )
+            logger.info(
+                "Recovery dedupe: %s '%s' had %d running slots; kept %s/%s, marked %d as superseded",
+                kind, name, len(slots),
+                survivor.get("day"), survivor.get("time_slot"), len(superseded),
+            )
+        return kept
+
+    def _mark_slot_failed_on_day(
+        self, name: str, slot: str, day_str: str, error: str, is_pipeline: bool,
+    ) -> None:
+        """Day-aware variant of mark_interrupted_as_failed.
+
+        ``mark_interrupted_as_failed`` always writes to today's state file via
+        ``_state_file()``. When deduplicating yesterday's stale slots we need
+        to update yesterday's file instead — otherwise the superseded slot
+        stays 'running' forever and the dedup runs again on the next restart.
+        """
+        sf = ROUTINES_STATE_DIR / f"{day_str}.json"
+        if not sf.exists():
+            return
+        with self._lock:
+            try:
+                data = json.loads(sf.read_text(encoding="utf-8"))
+            except Exception:
+                return
+            entry = data.get(name, {}).get(slot)
+            if not isinstance(entry, dict):
+                return
+            entry["status"] = "failed"
+            entry["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            entry["error"] = error
+            if is_pipeline and isinstance(entry.get("steps"), dict):
+                for step_entry in entry["steps"].values():
+                    if step_entry.get("status") == "running":
+                        step_entry["status"] = "failed"
+                        step_entry["error"] = "Bot restarted (superseded)"
+            data.setdefault(name, {})[slot] = entry
+            sf.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            _append_routine_history(
+                name, slot, "failed", error,
+                kind="pipeline" if is_pipeline else "routine",
+            )
+        except Exception:
+            pass
 
     def _heal_resume_target(
         self, name: str, slot: str, day_str: str, status: str, error: str,
