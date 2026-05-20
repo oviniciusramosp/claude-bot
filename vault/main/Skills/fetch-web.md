@@ -1,12 +1,12 @@
 ---
 title: Fetch Web Content
-description: Standard procedure for fetching and parsing web content. Covers tool selection (PinchTab vs curl), RSS parsing, HTML extraction, retries, and rate limiting.
+description: Standard procedure for fetching and parsing web content. Covers tool selection (PinchTab vs curl), PinchTab single-flight concurrency, RSS parsing, HTML extraction, retries, and rate limiting.
 type: skill
 created: 2026-04-10
-updated: 2026-04-10
+updated: 2026-05-19
 trigger: "when a routine or pipeline step needs to fetch content from a web URL, RSS feed, or API — use /fetch-web or reference this skill"
 tags: [skill, web, fetch, scraping, pinchtab, rss]
-version: 1
+version: 2
 ---
 
 # Fetch Web Content
@@ -32,6 +32,35 @@ Is it a JS-heavy SPA or requires login?
 Is it rate-limited or behind bot detection?
   → PinchTab (real browser, authenticated)
 ```
+
+## Concurrency caveats — PinchTab single-flight
+
+PinchTab on a single port (`9870` is the canonical default) is **shared mutable state**: one browser session, one current URL. Concurrent calls against the same port from parallel pipeline steps create a race — they overwrite each other's navigation, causing intermittent empty `text` output, wrong-page content, or whichever step "won" the navigation race wins for everyone.
+
+**Rule:** in any pipeline where multiple steps fetch via PinchTab, force sequential execution via `depends_on:` instead of letting the harness parallelize. The cost (a few seconds of serialization) is far smaller than the cost of a flaky pipeline.
+
+```yaml
+# DON'T — both steps race on PinchTab port 9870
+steps:
+  - id: collect-x
+    method: pinchtab
+  - id: collect-threads
+    method: pinchtab
+```
+
+```yaml
+# DO — explicit chain forces serial execution
+steps:
+  - id: collect-x
+    method: pinchtab
+  - id: collect-threads
+    method: pinchtab
+    depends_on: [collect-x]
+```
+
+If you must truly fetch in parallel via PinchTab, spawn a second PinchTab instance on a different port (e.g. `9871`) and route each step to its own port. Most pipelines should NOT need this — sequential is simpler and matches the real-world rate limits of authenticated SPAs (X, Threads) anyway.
+
+Discovery context: this race was observed in ai-digest-v2 (week of 2026-05-12) when WebSearch was removed as a source and the X/Threads collectors started competing for the single PinchTab session. The fix landed in W20 — collectors were chained with `depends_on:`. See `main/Journal/2026-05/2026-W20.md`.
 
 ## Prerequisites
 
@@ -259,9 +288,10 @@ Return a consistent dict to callers:
 | 5xx | Server error | Retry 3x with backoff, then abort |
 | Connection timeout | Network / slow site | Retry with progressive timeout, then abort |
 | SSL error | Cert issue | Log, abort (do NOT skip SSL verification) |
-| Empty body | Soft block / JS required | Try PinchTab |
+| Empty body | Soft block / JS required | Try PinchTab (and verify no other step is racing on the same port — see "Concurrency caveats" above) |
 | Non-UTF8 content | Charset mismatch | Decode with `errors="replace"` + log warning |
 | PinchTab down | Service not running | Notify user to start PinchTab |
+| Wrong-page content from pinchtab | Another step navigated PinchTab mid-fetch | Add `depends_on:` to serialize — see "Concurrency caveats" |
 
 **All errors visible** — log with context (URL, method, attempt count) and notify user when the failure blocks a routine.
 
