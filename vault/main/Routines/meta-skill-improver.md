@@ -3,13 +3,13 @@ title: Meta Skill Improver
 description: Nightly self-improvement loop — reads last 7 days of Lessons + Journal, identifies skills with negative signals, drafts improved candidate versions, and archives them via the skill-versioning contract. Inspired by Meta's HyperAgents meta-agent loop.
 type: routine
 created: 2026-05-19
-updated: 2026-05-19
+updated: 2026-05-19T22:30
 tags: [routine, meta, self-improvement, skill, hyperagents]
 schedule:
   times: ["03:30"]
   days: ["*"]
 model: opus
-enabled: false
+enabled: true
 context: full
 effort: high
 ---
