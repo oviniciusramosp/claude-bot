@@ -92,7 +92,7 @@ Read `vault/Skills/routine-versioning.md` to refresh the exact archive format (c
 
 2. **Determine next version `N`.** List the existing files in `_archive/<name>/`, parse versions from `v<digits>.md`, and pick `N = max(existing) + 1`.
 
-3. **Pick a parent version (optional, open-ended).** Read `vault/Skills/skill-parent-selection.md` for the parent-picking logic — the skill is artifact-agnostic, substitute "routine" or "pipeline" for "skill" mentally. By default, `parent_version = N - 1`. The parent-selection logic MAY recommend a different ancestor if its open-ended search finds a better one (e.g. an older candidate with a higher score that was never promoted).
+3. **Pick a parent version (optional, open-ended).** Read `vault/Skills/artifact-parent-selection.md` for the parent-picking logic — the skill is artifact-agnostic, substitute "routine" or "pipeline" for "skill" mentally. By default, `parent_version = N - 1`. The parent-selection logic MAY recommend a different ancestor if its open-ended search finds a better one (e.g. an older candidate with a higher score that was never promoted).
 
 4. **Archive the current live content.** If `v<N-1>.md` does not already mirror the current live content, save it now with `status: archived` (and for v2 pipelines, also snapshot `steps/` as `v<N-1>-steps/`). If it already does (because a previous meta-routine-improver run archived it), skip — idempotency.
 
@@ -115,7 +115,7 @@ Read `vault/Skills/routine-versioning.md` to refresh the exact archive format (c
 
 ## Step 5 — Staged evaluation (score-gated, optional)
 
-Read `vault/Skills/skill-staged-eval.md` — the staged-eval contract applies to routines too. Substitute "routine" for "skill" mentally; the staged-eval scoring is artifact-agnostic and the cheap → full gating works identically. The only thing that changes is the EVALUATION INPUTS:
+Read `vault/Skills/artifact-staged-eval.md` — the staged-eval contract applies to routines too. Substitute "routine" for "skill" mentally; the staged-eval scoring is artifact-agnostic and the cheap → full gating works identically. The only thing that changes is the EVALUATION INPUTS:
 
 - **Routines:** the staged-eval skill scores against "past invocations". For routines, that means scoring the routine's prompt against actual past Journal entries that show its output (look for `## HH:MM — <routine-name> run` blocks in the last 7 daily files). Use those historical outputs as the reference for whether the patched prompt would produce equally good or better answers.
 - **Pipelines:** score per-step against the historical step-output files in `vault/main/.workspace/data/<pipeline-name>/`. Each step writes its output to `data/<step-id>.md`; the latest few runs there are the ground truth. Score the patched step prompt against the most recent successful run plus the most recent failed run.

@@ -1,11 +1,11 @@
 ---
-title: Skill Parent Selection
-description: Picks a parent version from a skill's archive to seed the next mutation — biased toward latest but occasionally backtracks to a non-latest ancestor to maintain open-ended search. Mirrors HyperAgents' select_next_parent.py.
+title: Artifact Parent Selection
+description: Picks a parent version from an artifact's archive (skill, routine, or pipeline) to seed the next mutation — biased toward latest but occasionally backtracks to a non-latest ancestor to maintain open-ended search. Mirrors HyperAgents' select_next_parent.py. Renamed from skill-parent-selection on 2026-05-19 to reflect artifact-agnostic scope.
 type: skill
 created: 2026-05-19
 updated: 2026-05-19
-trigger: "when a routine needs to pick which historical skill version to mutate next — usually invoked by meta-skill-improver before drafting a candidate"
-tags: [skill, meta, self-improvement, search, hyperagents]
+trigger: "when a routine needs to pick which historical artifact version to mutate next — usually invoked by meta-skill-improver or meta-routine-improver before drafting a candidate"
+tags: [skill, meta, self-improvement, search, hyperagents, artifact]
 ---
 
 ## 1. Why this exists
@@ -14,12 +14,15 @@ Mutating only from the latest version creates a greedy hill-climber that gets st
 
 The fundamental insight: every "improvement" step is also a commitment. If you always mutate from the latest, you implicitly assume the last mutation was strictly better than every ancestor. That assumption is wrong often enough — especially when the fitness signal is noisy (LLM-judged scores) — that you want to keep a door open to backtracking. This skill is that door.
 
+The logic works identically whether the artifact is a skill, a routine, or a pipeline — the only thing that changes is the archive directory we glob (`Skills/_archive/<name>/` vs `Routines/_archive/<name>/`). Throughout the rest of this document "skill" reads as a stand-in for "the artifact being mutated"; the procedure does not branch by artifact kind.
+
 ## 2. Inputs
 
 The caller provides:
 
 - `agent` — the agent id (e.g. `main`)
-- `skill` — the skill name (e.g. `fetch-web`)
+- `name` — the artifact's name (e.g. `fetch-web` for a skill, `oss-radar-v2` for a pipeline)
+- `kind` — one of `skill | routine | pipeline`. Used only to pick the archive directory: `skill` → `Skills/_archive/<name>/`, `routine`/`pipeline` → `Routines/_archive/<name>/`.
 - `strategy` (optional) — one of `latest | recency-weighted | random | best`. Defaults to `recency-weighted`.
 
 ## 3. Read the archive

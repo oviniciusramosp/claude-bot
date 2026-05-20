@@ -78,7 +78,7 @@ version: <int>                       # e.g. 3 — same as the N in the filename
 parent_version: <int|null>           # version this was branched from; null only for v1
 live_routine: <agent>/Routines/<routine-name>.md
 lineage: "v<P> → v<N>"               # human-readable single-hop chain; v1 has "v0 → v1"
-score: <float|null>                  # populated by skill-staged-eval (artifact-agnostic); null = not yet evaluated
+score: <float|null>                  # populated by artifact-staged-eval (artifact-agnostic); null = not yet evaluated
 lessons_applied: ["<agent>/Lessons/<file>.md", ...]   # paths that motivated this version; [] for v1 bootstrap
 promoted_at: <YYYY-MM-DDTHH:MM>|null  # null until/unless promoted to live
 status: candidate|live|archived|deprecated
@@ -91,7 +91,7 @@ Field notes:
 - **`parent_version`** — for `v1` this is always `null`. For any later version it is the integer of the ancestor this version was mutated from. The parent is **not necessarily** `N - 1`; see §7.
 - **`live_routine`** — vault-relative path to the live routine file. For multi-file pipelines this points at the parent file inside the routine's folder (e.g. `main/Routines/oss-radar-v2/oss-radar-v2.md`), not the folder itself. Lets a tool find "the canonical home" of an archive without inferring it from directory structure.
 - **`lineage`** — single-hop human-readable string; long chains are reconstructed by walking `parent_version` repeatedly, not by stuffing them into one field.
-- **`score`** — populated by the evaluation skill (`Skills/skill-staged-eval.md` is artifact-agnostic and applies to routines too) after evaluation. `null` means "not yet evaluated" — the parent-selection skill treats `null` distinctly from a low score.
+- **`score`** — populated by the evaluation skill (`Skills/artifact-staged-eval.md` is artifact-agnostic and applies to routines too) after evaluation. `null` means "not yet evaluated" — the parent-selection skill treats `null` distinctly from a low score.
 - **`lessons_applied`** — paths to lesson files (`<agent>/Lessons/*.md`) that motivated the mutation. Empty array `[]` for the `v1` bootstrap. The meta-improver uses this both for auditability and to avoid re-applying the same lesson twice in a row.
 - **`promoted_at`** — ISO-ish `YYYY-MM-DDTHH:MM` local time when this version was written to the live file. `null` while the version is still a candidate or was never promoted.
 - **`status`** — see §4.
@@ -168,7 +168,7 @@ The `parent_version` field is the open-ended-search hook. When the meta-improver
 
 Concrete consequence: if linear promotion produced `v1 → v2 → v3 → v4` and the parent-selector decides `v2` is the most promising base for the next mutation (e.g. because `v3` and `v4` scored worse and the search space wants exploration), then `v5` will have `parent_version: 2` and `lineage: "v2 → v5"`. The integer in the filename is monotonic (5 > 4 > 3 > 2 > 1), but the `parent_version` graph is a tree, not a line.
 
-This is the substrate that makes the loop **open-ended** in the HyperAgents sense — without it, every mutation overwrites the latest, the search collapses to greedy hill-climbing, and a single bad mutation poisons all descendants. The decision of *which* parent to pick lives entirely in `Skills/skill-parent-selection.md`; that skill is artifact-agnostic — substitute "routine" for "skill" mentally; the parent-picking logic works identically for both. This file only guarantees that the disk layout supports any choice the selection skill makes.
+This is the substrate that makes the loop **open-ended** in the HyperAgents sense — without it, every mutation overwrites the latest, the search collapses to greedy hill-climbing, and a single bad mutation poisons all descendants. The decision of *which* parent to pick lives entirely in `Skills/artifact-parent-selection.md`; that skill is artifact-agnostic — substitute "routine" for "skill" mentally; the parent-picking logic works identically for both. This file only guarantees that the disk layout supports any choice the selection skill makes.
 
 ---
 
@@ -228,13 +228,13 @@ A typical audit query (best non-deprecated version with a known score) is:
 
 A typical parent-selection query is:
 
-> List `v*.md` where `status in {archived, live}` (NEVER `candidate`, which hasn't been promoted and shouldn't be a base) and `score is not null OR version == 1` (the bootstrap is always a legitimate fallback), then apply the open-ended-search policy from `Skills/skill-parent-selection.md`.
+> List `v*.md` where `status in {archived, live}` (NEVER `candidate`, which hasn't been promoted and shouldn't be a base) and `score is not null OR version == 1` (the bootstrap is always a legitimate fallback), then apply the open-ended-search policy from `Skills/artifact-parent-selection.md`.
 
 These access patterns are what makes the frontmatter schema in §3 the actual contract — every field there exists because one of the readers below needs it:
 
 - `meta-routine-improver` reads `lessons_applied`, `lineage`, `parent_version`, and writes new versions.
 - The evaluation skill reads any version's body (and step snapshots for v2 pipelines), populates `score`, and may trigger rollback via §6.
-- `skill-parent-selection` reads `version`, `parent_version`, `score`, `status` to decide what to mutate next.
+- `artifact-parent-selection` reads `version`, `parent_version`, `score`, `status` to decide what to mutate next.
 
 Any change to the schema in §3 MUST update all three consumer skills in the same commit. Diverging the schema silently is the failure mode this file is here to prevent.
 

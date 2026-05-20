@@ -84,7 +84,7 @@ Read `vault/Skills/skill-versioning.md` to refresh the exact archive format (cre
 
 2. **Determine next version `N`.** List the existing files in `_archive/<skill-name>/`, parse versions from `v<digits>.md`, and pick `N = max(existing) + 1`.
 
-3. **Pick a parent version (optional, open-ended).** Read `vault/Skills/skill-parent-selection.md` for the parent-picking logic. By default, `parent_version = N - 1`. The parent-selection skill MAY recommend a different ancestor if its open-ended search finds a better one (e.g. an older candidate with a higher score that was never promoted).
+3. **Pick a parent version (optional, open-ended).** Read `vault/Skills/artifact-parent-selection.md` for the parent-picking logic. By default, `parent_version = N - 1`. The parent-selection skill MAY recommend a different ancestor if its open-ended search finds a better one (e.g. an older candidate with a higher score that was never promoted).
 
 4. **Archive the current live content.** If `v<N-1>.md` does not already mirror the current live content, save it now with `status: archived`. If it already does (because a previous meta-skill-improver run archived it), skip — idempotency.
 
@@ -107,7 +107,7 @@ Read `vault/Skills/skill-versioning.md` to refresh the exact archive format (cre
 
 ## Step 5 — Staged evaluation (score-gated, optional)
 
-Read `vault/Skills/skill-staged-eval.md` — it defines the cheap → full eval gating contract created in parallel.
+Read `vault/Skills/artifact-staged-eval.md` — it defines the cheap → full eval gating contract created in parallel.
 
 For each candidate:
 

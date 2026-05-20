@@ -1,22 +1,25 @@
 ---
-title: Skill Staged Eval
-description: Defines a two-stage evaluation procedure (cheap sample-of-3 → expensive sample-of-15) for scoring candidate skill versions before promotion. Mirrors HyperAgents' test_more_threshold gating to avoid burning tokens on bad candidates.
+title: Artifact Staged Eval
+description: Defines a two-stage evaluation procedure (cheap sample-of-3 → expensive sample-of-15) for scoring candidate artifact versions — skills, routines, or pipelines — before promotion. Mirrors HyperAgents' test_more_threshold gating to avoid burning tokens on bad candidates. Renamed from skill-staged-eval on 2026-05-19 to reflect artifact-agnostic scope.
 type: skill
 created: 2026-05-19
 updated: 2026-05-19
-trigger: "when a routine or agent needs to score a candidate skill version against historical inputs before promoting it"
-tags: [skill, meta, self-improvement, evaluation, hyperagents]
+trigger: "when a routine or agent needs to score a candidate artifact (skill, routine, or pipeline) version against historical inputs before promoting it"
+tags: [skill, meta, self-improvement, evaluation, hyperagents, artifact]
 ---
 
 ## 1. When to invoke
 
-This skill is consumed by [[meta-skill-improver]] (or any future routine that needs to evaluate a candidate skill). The caller MUST provide three arguments:
+This skill is consumed by [[meta-skill-improver]] and [[meta-routine-improver]] (or any future routine that needs to evaluate a candidate artifact — skill, routine, or pipeline). The mechanism is identical across artifact kinds; only the file paths and the input sources differ. The caller MUST provide four arguments:
 
-- `candidate_path` — path to the candidate skill file (e.g. `vault/<agent>/Skills/_archive/<skill-name>/v<N>.md`)
-- `live_path` — path to the current live skill (e.g. `vault/<agent>/Skills/<skill-name>.md`)
+- `candidate_path` — path to the candidate artifact file (e.g. `vault/<agent>/Skills/_archive/<name>/v<N>.md` for a skill, or `vault/<agent>/Routines/_archive/<name>/v<N>.md` for a routine/pipeline)
+- `live_path` — path to the current live artifact (e.g. `vault/<agent>/Skills/<name>.md` or `vault/<agent>/Routines/<name>.md`)
 - `agent_id` — the owning agent (used to locate Journal, Lessons, Reactions)
+- `kind` — one of `skill | routine | pipeline`. Determines the default places to look for "past invocations" in §2.
 
 This skill ONLY scores. It does not promote, deprecate, or move files. The caller decides what to do with the score.
+
+Throughout the rest of this document, "skill" should be read as a stand-in for "the artifact being evaluated" — most paragraphs apply identically to routines and pipelines. Where the procedure genuinely diverges by kind (e.g. how to source historical inputs in §2), it is called out explicitly.
 
 ## 2. Pick historical inputs
 
