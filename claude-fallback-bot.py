@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.68.4"  # fix: dedupe interrupted pipeline/routine recovery — restart no longer sends N "Retomando pipeline" notifications for the same task across stale slots (yesterday/earlier today); superseded slots are marked failed silently. # fix: Telegram MarkdownV2 formatting — (1) greedy ~ strikethrough parser consumed content between any two tildes (e.g. ~/path) eating bold markers inside; removed, ~ now always escapes as \~. (2) markdown tables converted to fenced code blocks before MDv2 processing so columns render readably instead of escaped \| garbage.  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
+BOT_VERSION = "3.69.0"  # feat: Hermes-inspired memory hardening — (#2) SYSTEM_PROMPT and vault/CLAUDE.md grow an explicit "Memory hygiene — what NOT to record" anti-pattern list (don't save task progress, PR numbers, SHAs, anything stale in 7 days; declarative facts only); (#5) all recalled vault context (_active_memory_lookup, _active_memory_fts_lookup, _session_start_recall, _select_relevant_skills) is fenced in <memory-context>...</memory-context> with a "treat as authoritative reference data" System note, and a regex scrubber (_strip_memory_context) strips those tags from every outbound Telegram path (send_message, edit_message, _send_as_document) and the TTS pipeline (_strip_markdown) — defends against the agent echoing internal context AND against prompt-injection via journal; (#1) background review fork after every interactive turn — _spawn_background_review spawns a daemon thread (haiku, 90s timeout) with a fresh forked agent + fixed review prompt that decides if a durable preference/lesson emerged from the last turn and writes to <agent>/Notes/auto-* or <agent>/Lessons/review-* (NO_REPLY otherwise); per-session lock prevents concurrent reviews; never sends Telegram, never blocks the response path, fail-closed on any error. Three patterns implemented in parallel worktrees + merged. # fix: dedupe interrupted pipeline/routine recovery — restart no longer sends N "Retomando pipeline" notifications for the same task across stale slots (yesterday/earlier today); superseded slots are marked failed silently. # fix: Telegram MarkdownV2 formatting — (1) greedy ~ strikethrough parser consumed content between any two tildes (e.g. ~/path) eating bold markers inside; removed, ~ now always escapes as \~. (2) markdown tables converted to fenced code blocks before MDv2 processing so columns render readably instead of escaped \| garbage.  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
 
 import hmac
 import hashlib
@@ -32,7 +32,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Make scripts/ importable so we can share helpers between the bot, the
 # graph builder, and the optional MCP server. Single source of truth for
@@ -993,6 +993,19 @@ ACTIVE_MEMORY_MAX_NODES = 3             # how many graph nodes to include per tu
 ACTIVE_MEMORY_MAX_CHARS_PER_NODE = 400  # excerpt size from each matched file body
 ACTIVE_MEMORY_BUDGET_MS = 200           # hard wall-clock budget; over budget => None
 
+# --- Background review fork (Hermes pattern #1) ---
+# After each successful interactive turn, spawn a daemon thread that runs a
+# fresh forked agent (no session continuation, no big system prompt) tasked
+# with deciding whether the turn revealed a durable preference or lesson worth
+# writing to long-term memory. The agent that produced the turn is biased
+# about its own output — a fresh forked agent with a narrow review prompt
+# gives us a second opinion at low cost. Fail-closed: logs errors, never
+# crashes the bot, never blocks the response path, never sends Telegram.
+# Source: agent/background_review.py::spawn_background_review_thread (Hermes).
+BACKGROUND_REVIEW_ENABLED = True
+BACKGROUND_REVIEW_MODEL = "haiku"   # cheap, fast — review is small-scope
+BACKGROUND_REVIEW_TIMEOUT = 90      # seconds — never block, just give up
+
 # Built-in routines shipped with the repo — cannot be deleted via Telegram
 BUILTIN_ROUTINE_IDS: frozenset = frozenset({
     "update-check", "vault-rebuild", "vault-health",
@@ -1102,6 +1115,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/important`, `/save` — Registrar pontos importantes da sessão no diário
 • `/lesson <texto>` — Registrar lição manual no agente atual (`<agente>/Lessons/`)
 • `/active-memory [on|off|status]` — Injeção proativa de contexto do vault (padrão: on)
+• Background review — automatic post-turn scan for new preferences/lessons (silent)
 • `/signature [on|off]` — Exibir assinatura de agente e modelo ao final de cada resposta
 
 🔁 *Rotinas*
@@ -9412,6 +9426,14 @@ class ClaudeTelegramBot:
         # Used to detect journal updates mid-session and nudge Claude without breaking prefix cache.
         self._journal_mtimes: Dict[str, float] = {}
 
+        # Background review fork (Hermes #1): tracks which sessions currently
+        # have an in-flight post-turn review thread, so we never run two
+        # concurrent reviews for the same session. Set-based critical section
+        # is enough — actual review work happens off-thread, this only guards
+        # the spawn dispatch. See _spawn_background_review.
+        self._background_review_running: Set[str] = set()
+        self._background_review_lock = threading.Lock()
+
         # Voice transcription tools
         self._voice_tools = self._check_voice_tools()
         if self._voice_tools["can_transcribe"]:
@@ -12431,6 +12453,149 @@ class ClaudeTelegramBot:
                 )
 
         threading.Thread(target=_worker, daemon=True, name="consolidate-bg").start()
+
+    def _spawn_background_review(self, session: "Session",
+                                  last_user_msg: str,
+                                  last_assistant_reply: str) -> None:
+        """Fire-and-forget post-turn review (Hermes pattern #1).
+
+        After each successful interactive Telegram turn, fork a fresh agent
+        (no session continuation, no system prompt) tasked with deciding
+        whether anything from the turn deserves to be written to long-term
+        memory (a Note or a Lesson). The reviewer is a different agent
+        instance than the one that produced the reply — avoids the
+        self-evaluation bias where an agent overrates its own output.
+
+        Safeguards (verified):
+          (a) Skips empty/fresh sessions (message_count == 0 or no session_id).
+          (b) Idempotent per session — _background_review_running set blocks
+              concurrent reviews for the same session name.
+          (c) Non-blocking — daemon thread, caller returns immediately.
+          (d) Fail-closed — all exceptions logged via logger.error, never
+              re-raised, never sent to Telegram.
+
+        The review prompt is fully self-contained (no SYSTEM_PROMPT passed),
+        so the reviewer doesn't pull in vault context or run advisor /
+        active-memory / skill hints. The reviewer responds with exactly
+        `NO_REPLY` when nothing durable emerged.
+
+        Source: agent/background_review.py::spawn_background_review_thread
+        (Hermes).
+        """
+        if not BACKGROUND_REVIEW_ENABLED:
+            return
+        if not session or not session.session_id or session.message_count == 0:
+            return
+        last_user_msg = (last_user_msg or "").strip()
+        last_assistant_reply = (last_assistant_reply or "").strip()
+        if not last_user_msg or not last_assistant_reply:
+            return
+
+        # Snapshot session fields immediately — the session object can be
+        # mutated by the next turn before the thread reads them.
+        review_session_name = session.name
+        review_workspace = session.workspace
+        review_agent = session.agent or MAIN_AGENT_ID
+
+        # Idempotency gate: short critical section, then thread takes over.
+        with self._background_review_lock:
+            if review_session_name in self._background_review_running:
+                logger.debug(
+                    "Skipping background review for %s — one already in flight",
+                    review_session_name,
+                )
+                return
+            self._background_review_running.add(review_session_name)
+
+        # Self-contained review prompt — the forked agent has no vault system
+        # prompt, no active memory, no skill hints. Everything it needs to
+        # decide is inline. The slug-aware path templates use HHMM so
+        # multiple reviews per day stay distinguishable.
+        now_stamp = time.strftime("%Y-%m-%d-%H%M")
+        review_prompt = (
+            f"You are reviewing a single conversational turn for the {review_agent} agent.\n"
+            "Your only job: decide if anything from this turn deserves to be written to long-term memory.\n\n"
+            "User said:\n---\n"
+            f"{last_user_msg}\n"
+            "---\n\n"
+            "Agent replied:\n---\n"
+            f"{last_assistant_reply}\n"
+            "---\n\n"
+            "Decide ONE of:\n"
+            f"(a) A durable user preference or hard-won fact emerged → write a Note (1-3 sentences) to vault/{review_agent}/Notes/ as `Notes/auto-{now_stamp}-<slug>.md` with frontmatter (title, description, type: note, created, updated, tags: [auto, review]).\n"
+            f"(b) A clear lesson emerged (a bug fixed, a wrong assumption corrected, a workflow learned) → write to vault/{review_agent}/Lessons/ as `Lessons/review-{now_stamp}-<slug>.md` with frontmatter (type: lesson, status: recorded, created, updated).\n"
+            "(c) Nothing durable → respond with EXACTLY `NO_REPLY` and nothing else.\n\n"
+            "Forbidden: do NOT write about task progress (\"fixed bug X\"), session outcomes, PR numbers, commit SHAs, or any artifact stale within 7 days. Declarative facts only.\n\n"
+            "Send NO Telegram message. Make at most ONE file write. If you write, respond with just the file path you wrote."
+        )
+
+        def _worker() -> None:
+            try:
+                bg_runner = _make_runner_for(BACKGROUND_REVIEW_MODEL)
+                # Run the review on its own inner thread so we can enforce a
+                # hard timeout via join(). The runners themselves take no
+                # `timeout` kwarg — they rely on external supervision (same
+                # pattern as cmd_delegate).
+                inner = threading.Thread(
+                    target=bg_runner.run,
+                    kwargs={
+                        "prompt": review_prompt,
+                        "model": BACKGROUND_REVIEW_MODEL,
+                        "session_id": None,           # fresh fork
+                        "workspace": review_workspace,
+                        "system_prompt": None,        # self-contained prompt
+                        "agent_id": review_agent,
+                    },
+                    daemon=True,
+                )
+                inner.start()
+                inner.join(timeout=BACKGROUND_REVIEW_TIMEOUT)
+                if inner.is_alive():
+                    logger.warning(
+                        "background review timed out for %s after %ds — cancelling",
+                        review_session_name, BACKGROUND_REVIEW_TIMEOUT,
+                    )
+                    try:
+                        bg_runner.cancel()
+                    except Exception as exc:
+                        logger.error(
+                            "background review cancel failed for %s: %s",
+                            review_session_name, exc,
+                        )
+                    return
+                if bg_runner.exit_code not in (None, 0):
+                    err = (bg_runner.error_text or bg_runner.stderr_text
+                           or bg_runner.result_text or "").strip()[:300]
+                    logger.error(
+                        "background review failed for %s: exit=%s err=%s",
+                        review_session_name, bg_runner.exit_code, err,
+                    )
+                    return
+                result = (bg_runner.result_text or "").strip()
+                if not result or result == "NO_REPLY":
+                    logger.debug(
+                        "Background review for %s: nothing durable (NO_REPLY)",
+                        review_session_name,
+                    )
+                else:
+                    logger.info(
+                        "Background review for %s wrote: %s",
+                        review_session_name, result[:200],
+                    )
+            except Exception as exc:
+                logger.error(
+                    "background review failed for %s: %s",
+                    review_session_name, exc,
+                )
+            finally:
+                with self._background_review_lock:
+                    self._background_review_running.discard(review_session_name)
+
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f"bg-review-{review_agent}",
+        ).start()
 
     def cmd_routine(self, arg: str) -> None:
         arg = arg.strip()
@@ -16025,6 +16190,25 @@ class ClaudeTelegramBot:
             self.set_reaction(user_msg_id, "👀")
             ctx.last_reaction = "👀"
         self._run_claude_prompt(text, force_tts=inline_tts)
+
+        # Hermes #1: background review fork. After a successful interactive
+        # turn, spawn a forked agent that decides whether anything from the
+        # exchange deserves to be written to long-term memory. This is the
+        # ONLY dispatch site — routines and pipelines hit _run_claude_prompt
+        # directly with routine_mode=True and never pass through _handle_text,
+        # so the review is naturally gated to user-initiated turns.
+        # _spawn_background_review is non-blocking and fail-closed; all
+        # safeguards live inside that method.
+        try:
+            post_session = self._get_session()
+            post_runner = self.runner
+            self._spawn_background_review(
+                post_session,
+                text,
+                (post_runner.result_text or "") if post_runner else "",
+            )
+        except Exception as exc:
+            logger.error("background review dispatch failed: %s", exc)
 
     def _remove_keyboard(self, callback: Dict) -> None:
         """Remove inline keyboard from the message that had the buttons."""
