@@ -136,6 +136,27 @@ Each agent's `Journal/` is organized as a tree, NOT a flat list of dailies:
 
 The folder for a new month is created on demand by the bot the first time something is written that day. A placeholder `YYYY-MM.md` is dropped immediately so the hub never points at a missing file; the LLM rollup enriches it on the 1st of next month.
 
+### Memory hygiene — what NOT to record
+
+Hierarchical recall only works if the journal stays signal-dense. Most of what happens in a session is **ephemera** and should never make it past the daily file. Use this filter every time you're about to add a durable entry (monthly summary, weekly summary, Lessons, Notes) — daily files are forgiving, the levels above are not.
+
+**Do NOT save:**
+
+- **Task progress and session outcomes.** "Phase 2 done", "fixed bug X", "merged PR #123", "added 4 new tests", "refactored auth module" — these are stale within a week. The commit history already records them, and recall queries don't ask "what did we do on Tuesday." They ask "how does the auth module work." Save the answer to the second question, not the first.
+- **Commit SHAs, PR numbers, file counts, line numbers.** All transient. The repo already tracks them with vastly better tooling. Naming them in the journal couples the entry to a moving target — every rebase rots the reference.
+- **Instructions to yourself.** "Remember to use the MEXC API key" is useless next month, because *next month* you've forgotten the context that made the reminder make sense. Write the **declarative fact** instead — what is true about the world, not what you intend to do:
+  - ❌ "Remember to add Bearer prefix to MEXC requests"
+  - ✅ "MEXC API requires Bearer auth in the Authorization header, not an `X-API-Key` header. The docs at example.com say `X-API-Key` but that endpoint 401s — Bearer is correct."
+- **Speculation and intentions.** "We might want to migrate to Postgres later." If you migrate, record that fact; if you don't, the speculation rots into noise.
+
+**DO save:**
+
+- **Durable user preferences.** Tool choices, naming conventions, response style — things the user has explicitly stated and that won't flip in a month.
+- **Hard-won technical facts.** API quirks, undocumented endpoints, rate limits you hit, schema details you discovered, hostnames, ports, auth flows. The kind of thing you'd grep for at 2am next time the same surface breaks.
+- **Lessons from concrete failures.** Not "this was hard" — *what specifically failed, what was the diagnostic path, what's the fix?* Stored in `Lessons/`, not the daily.
+
+**Rule of thumb — the 30-day test:** before writing to memory, ask "will this be irrelevant or wrong 30 days from now?" If yes, it doesn't belong above the daily-file level. The point of the hierarchy is that monthly summaries should be readable a year later and still be useful; if they're full of "fixed bug X on the 12th," they fail that test and recall costs explode.
+
 ### Knowledge graph (`.graphs/graph.json`)
 
 The vault has a lightweight knowledge graph at `.graphs/graph.json`, regenerated daily by the `vault-graph-update` routine. Every node now carries an `agent` attribute derived from its path (`Agents/<id>/…`), which the Active Memory and skill hint helpers use to enforce isolamento total.
