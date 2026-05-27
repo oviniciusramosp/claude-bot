@@ -64,8 +64,15 @@ NOTION_VERSION = "2022-06-28"
 # Status report helpers
 # ---------------------------------------------------------------------------
 
-def emit_status(status: str, output_file: Optional[str], reason: str = "") -> None:
-    print(json.dumps({"status": status, "output_file": output_file, "reason": reason}))
+def emit_status(status: str, output_file: Optional[str], reason: str = "",
+                post_id: Optional[str] = None) -> None:
+    payload: Dict[str, Any] = {"status": status, "output_file": output_file, "reason": reason}
+    if post_id:
+        # The harness's _execute_publish_step lifts this into sink_config so
+        # _sink_telegram can backfill the published-index entry with the
+        # delivered message_id (closes the reply-feedback loop).
+        payload["post_id"] = post_id
+    print(json.dumps(payload))
     sys.exit(0 if status in ("ready", "skipped") else 1)
 
 
@@ -235,17 +242,20 @@ def make_news_topic_key(post: Dict[str, Any]) -> str:
     return f"news:{digest}"
 
 
-def record_in_published_index(post: Dict[str, Any], page_id: str, page_url: str) -> None:
+def record_in_published_index(post: Dict[str, Any], page_id: str, page_url: str) -> Optional[str]:
     """Append the published entry to the unified parmeirense JSONL store.
 
-    Best-effort: an error here is logged but does NOT fail the publish (the
-    Notion POST already succeeded and feed-state.json was updated).
+    Returns the generated ``post_id`` (the harness propagates it into
+    ``_sink_telegram`` so the telegram message_id can be backfilled after
+    delivery — closes the reply-feedback loop). Returns ``None`` on any
+    failure; the publish itself is NOT failed (the Notion POST already
+    succeeded and feed-state.json was updated).
     """
     try:
         from published_index import PublishedIndex  # type: ignore
     except ImportError as exc:
         print(f"WARN: published_index import failed: {exc}", file=sys.stderr)
-        return
+        return None
     try:
         idx = PublishedIndex(agent_id="parmeirense")
         source_urls: List[str] = []
@@ -261,7 +271,7 @@ def record_in_published_index(post: Dict[str, Any], page_id: str, page_url: str)
             "topic_type": "news",
             "tone": post.get("tom") or post.get("tone"),
         }
-        idx.add(
+        pid = idx.add(
             pipeline="palmeiras-feed-v2",
             topic_key=make_news_topic_key(post),
             title=post.get("titulo") or "",
@@ -270,9 +280,11 @@ def record_in_published_index(post: Dict[str, Any], page_id: str, page_url: str)
             cover_image=cover,
             features={k: v for k, v in features.items() if v is not None},
         )
+        return pid
     except Exception as exc:
         print(f"WARN: published-index write failed (non-fatal): {exc}",
               file=sys.stderr)
+        return None
 
 
 def update_posts_history(post: Dict[str, Any]) -> None:
@@ -432,7 +444,7 @@ def main() -> int:
         # Step 6 — record in the unified published-index.jsonl. The legacy
         # posts-history.md write was removed (the file remains on disk as a
         # backup but is no longer updated — see published_index.py).
-        record_in_published_index(post, page_id, page_url)
+        pid = record_in_published_index(post, page_id, page_url)
 
         # Step 7 — write Telegram-format output
         telegram_msg = (
@@ -441,7 +453,8 @@ def main() -> int:
         )
         output.write_text(telegram_msg, encoding="utf-8")
         emit_status("ready", str(output),
-                    reason=f"published to Notion: {page_url}")
+                    reason=f"published to Notion: {page_url}",
+                    post_id=pid)
 
     finally:
         release_lock()

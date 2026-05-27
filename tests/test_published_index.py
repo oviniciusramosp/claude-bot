@@ -276,5 +276,60 @@ class CliSmoke(_BaseCase):
         self.assertEqual(row["telegram"]["chat_id"], -100)
 
 
+    def test_cli_update_message_id_on_entry_without_telegram_block(self) -> None:
+        """Mirrors the publish-step flow: add an entry WITHOUT any telegram
+        fields (script runs before delivery), then have a separate process
+        backfill the message_id after Telegram returns (the path
+        _sink_telegram now takes in claude-fallback-bot.py).
+        """
+        # 1. add (no --telegram-* flags — entry has no `telegram` block)
+        r = self._run(
+            "add",
+            "--agent", self.agent,
+            "--pipeline", "feed",
+            "--topic-key", "news:nochat",
+            "--title", "No telegram block at add time",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        pid = r.stdout.strip()
+        self.assertEqual(len(pid), 32)
+
+        # 2. confirm the entry lacks a telegram block
+        r = self._run("get", "--agent", self.agent, "--post-id", pid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = json.loads(r.stdout.strip())
+        self.assertNotIn("telegram", row)
+
+        # 3. backfill message_id (simulating _sink_telegram after delivery)
+        r = self._run(
+            "update-telegram-message-id",
+            "--agent", self.agent,
+            "--post-id", pid,
+            "--message-id", "777",
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        # 4. verify it landed
+        r = self._run("get", "--agent", self.agent, "--post-id", pid)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row = json.loads(r.stdout.strip())
+        self.assertEqual(row.get("telegram", {}).get("message_id"), 777)
+
+    def test_cli_update_message_id_unknown_post_id_fails(self) -> None:
+        # Seed an entry so the file exists (otherwise the CLI never opens
+        # the index in update mode — we want to exercise the "post not
+        # found" branch specifically).
+        self._run("add", "--agent", self.agent, "--pipeline", "feed",
+                  "--topic-key", "x:1")
+        r = self._run(
+            "update-telegram-message-id",
+            "--agent", self.agent,
+            "--post-id", "deadbeef" * 4,
+            "--message-id", "1",
+        )
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("not found", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

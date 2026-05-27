@@ -3120,6 +3120,40 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         bot.send_message(visible_text, **kwargs)
+        # Backfill telegram.message_id into the unified published-index entry
+        # that the publish-step script wrote BEFORE this delivery. Without
+        # this, every entry stays with an empty message_id and the reply-
+        # feedback hook in _handle_text cannot match user replies to the
+        # post they replied to.
+        #
+        # post_id / agent_id are injected into sink_config by
+        # _execute_publish_step from the script's JSON status report
+        # (Approach A — see commit message). Both must be present and the
+        # send must have produced a first-chunk message_id; otherwise we
+        # silently skip the backfill (delivery already succeeded — never
+        # let a bookkeeping failure surface as a sink error).
+        try:
+            post_id = sink_config.get("_post_id")
+            backfill_agent = sink_config.get("_agent_id")
+            first_msg_id = getattr(bot, "_last_first_message_id", None)
+            if post_id and backfill_agent and first_msg_id is not None:
+                repo_root = Path(__file__).resolve().parent
+                pi_script = repo_root / "scripts" / "published_index.py"
+                subprocess.run(
+                    [sys.executable, str(pi_script),
+                     "update-telegram-message-id",
+                     "--agent", str(backfill_agent),
+                     "--post-id", str(post_id),
+                     "--message-id", str(first_msg_id)],
+                    check=False,
+                    capture_output=True,
+                    timeout=10,
+                )
+        except Exception as backfill_exc:
+            logger.warning(
+                "published-index backfill failed (non-fatal, message already sent): %s",
+                backfill_exc,
+            )
         result = {"emitted": True, "sink": "telegram"}
         if saved_action_ids:
             result["actions"] = saved_action_ids
@@ -8231,8 +8265,20 @@ class PipelineExecutor:
         # CONDITION (c): content_path is always a real file at this point.
         # Sink CANNOT receive raw stdout from the script — only the file's bytes.
         sink_fn = PIPELINE_V2_SINKS[step.sink]
+        # Approach A — propagate post_id from the publish script's JSON status
+        # report into the sink so the telegram sink can backfill the
+        # published-index entry with the resulting message_id. Underscore-
+        # prefixed keys are internal-only (sinks ignore unknown keys).
+        sink_config_runtime = dict(step.sink_config or {})
+        if step.command:
+            _post_id = (report.get("post_id") if isinstance(report, dict) else None)
+            if _post_id:
+                sink_config_runtime["_post_id"] = _post_id
+                sink_config_runtime["_agent_id"] = (
+                    self.task.agent or MAIN_AGENT_ID
+                )
         try:
-            result = sink_fn(self, step, content_path, step.sink_config or {})
+            result = sink_fn(self, step, content_path, sink_config_runtime)
         except Exception as exc:
             self._record_step_failure(
                 step, attempt, f"sink {step.sink!r} raised unexpectedly: {exc}",
@@ -9446,6 +9492,14 @@ class ClaudeTelegramBot:
 
         # Active message registry (must be created before recovery)
         self._active_msgs = ActiveMessageRegistry()
+
+        # Set by ``send_message`` on every call: the Telegram message_id of the
+        # FIRST chunk that was successfully delivered (or None if delivery
+        # failed). Callers that need the reply-anchor id — e.g. _sink_telegram
+        # backfilling published-index — read this after the call. We track
+        # first-chunk because Telegram replies always target the first message
+        # in a multi-chunk send.
+        self._last_first_message_id: Optional[int] = None
 
         # Routine scheduler
         self.routine_state = RoutineStateManager()
@@ -10738,6 +10792,7 @@ class ClaudeTelegramBot:
             text = self._sanitize_markdown(text)
         chunks = self._split_message(text)
         last_msg_id = None
+        first_msg_id: Optional[int] = None
         if chat_id is None:
             chat_id = self._chat_id
         if thread_id is None:
@@ -10761,6 +10816,8 @@ class ClaudeTelegramBot:
             resp = self.tg_request("sendMessage", data)
             if resp and resp.get("ok"):
                 last_msg_id = resp["result"]["message_id"]
+                if first_msg_id is None:
+                    first_msg_id = last_msg_id
             else:
                 if parse_mode:
                     data.pop("parse_mode", None)
@@ -10770,6 +10827,11 @@ class ClaudeTelegramBot:
                     resp = self.tg_request("sendMessage", data)
                     if resp and resp.get("ok"):
                         last_msg_id = resp["result"]["message_id"]
+                        if first_msg_id is None:
+                            first_msg_id = last_msg_id
+        # Expose the first-chunk id for backfill consumers (see
+        # _sink_telegram → published-index update). None if every chunk failed.
+        self._last_first_message_id = first_msg_id
         return last_msg_id
 
     def edit_message(self, message_id: int, text: str, parse_mode: str = "MarkdownV2",
