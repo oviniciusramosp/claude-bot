@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns="http://www.w3.org/2005/Atom">
+  <link rel="self" href="http://www.youtube.com/feeds/videos.xml?channel_id=UCBKc-rPDivvwFiWdG-81wxw"/>
+  <id>yt:channel:BKc-rPDivvwFiWdG-81wxw</id>
+  <yt:channelId>BKc-rPDivvwFiWdG-81wxw</yt:channelId>
+  <title>Palmeiras</title>
+  <author>
+    <name>Palmeiras</name>
+    <uri>http://www.youtube.com/channel/UCBKc-rPDivvwFiWdG-81wxw</uri>
+  </author>
+  <published>2014-08-12T18:00:00+00:00</published>
+
+  <entry>
+    <id>yt:video:aaaaaaaaaaa</id>
+    <yt:videoId>aaaaaaaaaaa</yt:videoId>
+    <yt:channelId>BKc-rPDivvwFiWdG-81wxw</yt:channelId>
+    <title>Bastidores: vitória sobre o Sporting Cristal</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=aaaaaaaaaaa"/>
+    <author><name>Palmeiras</name></author>
+    <published>2026-05-26T18:30:00+00:00</published>
+    <updated>2026-05-26T18:35:00+00:00</updated>
+    <media:group>
+      <media:title>Bastidores: vitória sobre o Sporting Cristal</media:title>
+      <media:content url="https://www.youtube.com/v/aaaaaaaaaaa?version=3" type="application/x-shockwave-flash" width="640" height="390"/>
+      <media:thumbnail url="https://i.ytimg.com/vi/aaaaaaaaaaa/hqdefault.jpg" width="480" height="360"/>
+      <media:description>Imagens exclusivas dos bastidores da vitória do Verdão.</media:description>
+    </media:group>
+  </entry>
+
+  <entry>
+    <id>yt:video:bbbbbbbbbbb</id>
+    <yt:videoId>bbbbbbbbbbb</yt:videoId>
+    <yt:channelId>BKc-rPDivvwFiWdG-81wxw</yt:channelId>
+    <title>AO VIVO: Coletiva de Abel Ferreira</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=bbbbbbbbbbb"/>
+    <author><name>Palmeiras</name></author>
+    <published>2026-05-25T22:00:00+00:00</published>
+    <updated>2026-05-25T23:30:00+00:00</updated>
+    <media:group>
+      <media:title>AO VIVO: Coletiva de Abel Ferreira</media:title>
+      <media:thumbnail url="https://i.ytimg.com/vi/bbbbbbbbbbb/hqdefault.jpg" width="480" height="360"/>
+      <media:description>Coletiva pós-jogo direto da Academia de Futebol.</media:description>
+    </media:group>
+  </entry>
+
+  <entry>
+    <id>yt:video:ccccccccccc</id>
+    <yt:videoId>ccccccccccc</yt:videoId>
+    <yt:channelId>BKc-rPDivvwFiWdG-81wxw</yt:channelId>
+    <title>AO VIVO: Treino aberto</title>
+    <link rel="alternate" href="https://www.youtube.com/watch?v=ccccccccccc"/>
+    <author><name>Palmeiras</name></author>
+    <published>2026-05-24T14:00:00+00:00</published>
+    <updated>2026-05-24T16:00:00+00:00</updated>
+    <media:group>
+      <media:title>AO VIVO: Treino aberto</media:title>
+      <media:thumbnail url="https://i.ytimg.com/vi/ccccccccccc/hqdefault.jpg" width="480" height="360"/>
+      <media:description>Treino aberto à imprensa.</media:description>
+    </media:group>
+  </entry>
+</feed>
