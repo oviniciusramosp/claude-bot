@@ -52,6 +52,13 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     os.environ["HOME"] = str(tmp_home)
     # Point CLAUDE_WORKSPACE somewhere safe so the bot doesn't pick the real vault
     os.environ["CLAUDE_WORKSPACE"] = str(vault_dir)
+    # Force the v2 pipeline kill-switch OFF inside the test harness. The bot
+    # reads this flag from the real .env file at import time; if the
+    # developer has it enabled locally, dispatcher / parser tests that
+    # exercise the "flag off" branch would otherwise leak the developer's
+    # ambient config and fail. Tests that need the flag ON use
+    # `patch.object(bot, "PIPELINE_V2_ENABLED", True)` per-case.
+    os.environ["PIPELINE_V2_ENABLED"] = "false"
 
     spec = importlib.util.spec_from_file_location("bot_under_test", str(BOT_FILE))
     if spec is None or spec.loader is None:

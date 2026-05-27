@@ -321,7 +321,10 @@ class PublishStepHandlerTests(DispatcherTestBase):
 
     def test_telegram_sink_calls_bot_send_message_with_file_content(self):
         upstream = self._make_step("writer")
-        step = self._make_step("send", type="publish", publishes="writer", sink="telegram")
+        # `title: False` keeps the test focused on the body — the title-prefix
+        # wrapping (agent icon + pipeline title) is covered separately.
+        step = self._make_step("send", type="publish", publishes="writer",
+                               sink="telegram", sink_config={"title": False})
         ex = self._make_executor([upstream, step], pipeline_version=2)
         self._seed_upstream_output(ex, "writer", content="post body")
         ex._execute_publish_step(step, self.data_dir)
