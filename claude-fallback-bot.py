@@ -368,6 +368,113 @@ def workspace_dir(agent_id: Optional[str]) -> Path:
     return agent_base(agent_id) / ".workspace"
 
 
+def _load_published_post(chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+    """Scan vault/<agent>/.workspace/published-index.jsonl across all agents and
+    return the entry matching (chat_id, message_id), or None.
+
+    The published-index files are produced by scripts/published_index.py (parallel
+    work-stream). Each line is a JSON record with at minimum a ``telegram``
+    sub-object containing ``chat_id`` and ``message_id``. Returns the matched
+    record with ``agent_id`` filled in from the folder name (also defensively
+    preserving any existing ``agent_id`` already present in the line).
+
+    Tolerates missing files and malformed lines. Stops on first match.
+    """
+    try:
+        agent_ids = iter_agent_ids()
+    except Exception as exc:
+        logger.warning("published-index: iter_agent_ids failed: %s", exc)
+        return None
+
+    for aid in agent_ids:
+        idx_path = workspace_dir(aid) / "published-index.jsonl"
+        if not idx_path.is_file():
+            continue
+        try:
+            with idx_path.open("r", encoding="utf-8") as fh:
+                for line_no, raw in enumerate(fh, start=1):
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        entry = json.loads(raw)
+                    except Exception as exc:
+                        logger.warning(
+                            "published-index: malformed JSON in %s:%d (%s)",
+                            idx_path, line_no, exc,
+                        )
+                        continue
+                    tg = entry.get("telegram") or {}
+                    try:
+                        if int(tg.get("chat_id")) == int(chat_id) and \
+                           int(tg.get("message_id")) == int(message_id):
+                            entry.setdefault("agent_id", aid)
+                            return entry
+                    except (TypeError, ValueError):
+                        continue
+        except Exception as exc:
+            logger.warning("published-index: read failed for %s: %s", idx_path, exc)
+            continue
+    return None
+
+
+def _record_post_reply(post_entry: Dict[str, Any], msg: Dict[str, Any]) -> None:
+    """Append a captured reply to vault/<agent_id>/.workspace/post-replies.jsonl.
+
+    Uses fcntl.flock for write safety. Schema:
+        post_id, agent_id, reply_text, user{id,username,first_name},
+        telegram{chat_id,message_id,reply_to_message_id}, received_at(ISO+TZ).
+    """
+    import fcntl as _fcntl  # local import — fcntl is POSIX-only
+    from datetime import datetime as _dt
+
+    agent_id = post_entry.get("agent_id")
+    if not agent_id:
+        logger.warning("post-reply: entry missing agent_id, skipping record")
+        return
+
+    sender = msg.get("from", {}) or {}
+    chat = msg.get("chat", {}) or {}
+    reply_to = msg.get("reply_to_message", {}) or {}
+    record = {
+        "post_id": post_entry.get("post_id"),
+        "agent_id": agent_id,
+        "reply_text": msg.get("text") or msg.get("caption") or "",
+        "user": {
+            "id": sender.get("id"),
+            "username": sender.get("username"),
+            "first_name": sender.get("first_name"),
+        },
+        "telegram": {
+            "chat_id": chat.get("id"),
+            "message_id": msg.get("message_id"),
+            "reply_to_message_id": reply_to.get("message_id"),
+        },
+        "received_at": _dt.now().astimezone().isoformat(),
+    }
+
+    out_dir = workspace_dir(agent_id)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning("post-reply: mkdir failed for %s: %s", out_dir, exc)
+        return
+    out_path = out_dir / "post-replies.jsonl"
+    try:
+        with out_path.open("a", encoding="utf-8") as fh:
+            try:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX)
+            except OSError:
+                pass  # best-effort; not all FS support flock
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            try:
+                _fcntl.flock(fh.fileno(), _fcntl.LOCK_UN)
+            except OSError:
+                pass
+    except Exception as exc:
+        logger.warning("post-reply: append failed for %s: %s", out_path, exc)
+
+
 # Names at the vault root that are NEVER agents — shared files and internal
 # directories. Any other top-level directory that contains `agent-<dir>.md`
 # is treated as an agent.
@@ -5540,7 +5647,7 @@ def parse_rate_limit_reset(raw: str) -> Optional[float]:
 #   <!-- ACTIONS:
 #   [
 #     {"text": "📝 Publicar",
-#      "pipeline": "crypto-news-produce-v2",
+#      "pipeline": "crypto-write",
 #      "agent": "crypto-bro",
 #      "overrides": {"collect": {"link": "https://...", "notes": "..."}}}
 #   ]
@@ -13509,7 +13616,7 @@ class ClaudeTelegramBot:
         Pipeline v2: supports ``/run <name> --overrides '<json>'`` to pass
         runtime overrides per step:
 
-            /run crypto-ta-analise --overrides '{"analyst": {"focus_asset": "ETH"}}'
+            /run crypto-ta-dia --overrides '{"analyst": {"focus_asset": "ETH"}}'
 
         Overrides are validated against each step's accepts_overrides schema
         before the pipeline starts. Validation errors return a friendly message
@@ -16709,6 +16816,29 @@ class ClaudeTelegramBot:
             return
 
         # Context and onboarding already handled in polling loop
+
+        # ------------------------------------------------------------------
+        # Reply-capture hook (purely additive — does NOT short-circuit).
+        # If the message is a reply to a bot post tracked in
+        # vault/<agent>/.workspace/published-index.jsonl, archive the reply
+        # to post-replies.jsonl and react 👀 so the user sees it landed.
+        # The reply still flows through normal handling below.
+        # ------------------------------------------------------------------
+        try:
+            reply_to_obj = msg.get("reply_to_message") or {}
+            replied_msg_id = reply_to_obj.get("message_id")
+            chat_obj = msg.get("chat", {}) or {}
+            chat_numeric_id = chat_obj.get("id")
+            if replied_msg_id and chat_numeric_id is not None:
+                matched = _load_published_post(int(chat_numeric_id), int(replied_msg_id))
+                if matched:
+                    _record_post_reply(matched, msg)
+                    try:
+                        self.set_reaction(msg.get("message_id"), "👀")
+                    except Exception as exc:
+                        logger.warning("Failed to react 👀 to reply: %s", exc)
+        except Exception as exc:
+            logger.warning("post-reply capture hook failed: %s", exc)
 
         user_msg_id = msg.get("message_id")
         reply_ctx = self._extract_reply_context(msg)
