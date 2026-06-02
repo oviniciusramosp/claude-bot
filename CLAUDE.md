@@ -110,8 +110,13 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager. Contains cr
 | `CODEX_PATH` | No | `/opt/homebrew/bin/codex` | Path to OpenAI Codex CLI — required for any `gpt-*` model. Install: `brew install --cask codex`, then `codex login` with ChatGPT Plus/Pro |
 | `ADVISOR_MODEL` | No | `opus` | Model used by `scripts/advisor.sh` when escalating |
 | `MODEL_FALLBACK_CHAIN` | No | `opus,glm-5.1,sonnet,glm-4.7,haiku` | Fallback order when a model fails. Configurable via macOS app. |
+| `DEFAULT_EFFORT` | No | `max` | Reasoning effort applied to Anthropic turns when nothing overrides it (`low\|medium\|high\|xhigh\|max`). Codex maps `max`→`high`; z.AI isn't forced. See `.claude/rules/multi-provider-models.md` |
+| `MAX_CONTEXT` | No | `true` | When on, appends the `[1m]` 1M-context variant to native Anthropic models. Auto-falls back to the base context if the account/plan rejects `[1m]`. Set `false`/`0`/`off` to disable |
+| `OPUS_MODEL` / `SONNET_MODEL` / `HAIKU_MODEL` | No | — | Pin a concrete model id for that alias when the CLI's bare alias lags a release (e.g. `OPUS_MODEL=claude-opus-4-8` while `--model opus` still resolves to 4.7). Unset → use the auto-tracking alias. Falls back to the alias if the pinned id is unavailable |
 
 Edited via: ClaudeBotManager → Settings, or directly.
+
+**Model versions auto-track upgrades.** The response signature shows the *real* model id the CLI reports at runtime (e.g. `claude-opus-4-8[1m]`) — captured from the init event, not a hardcoded map — so a model upgrade surfaces with zero code edits. Two upgrade paths: (1) the bare aliases (`opus`/`sonnet`/`haiku`) advance automatically when the installed CLI's alias mapping moves — keep the CLI current (the daily `update-check` routine flags brew/cask updates); (2) when a new model ships *before* the CLI alias catches up (as with Opus 4.8 — `--model opus` still resolves to 4.7 even on CLI 2.1.150, while `--model claude-opus-4-8` works), pin it via `OPUS_MODEL` until the alias advances. `MODEL_FULL_IDS` is only a display fallback for early failures / non-Anthropic providers.
 
 ### `vault/.env` — API keys for vault tasks
 

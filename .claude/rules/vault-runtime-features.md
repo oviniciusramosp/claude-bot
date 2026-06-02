@@ -31,7 +31,7 @@ Context for the Python implementation of the bot's runtime features: routines, v
 | `agent` | string | — | **Legacy in v3.0.** Folder location is the source of truth: `<id>/Routines/foo.md` implies `agent=id`. The `agent:` frontmatter field is still accepted for backcompat and logged with a warning if it disagrees with the folder. |
 | `enabled` | bool | `true` | Enable/disable the routine |
 | `context` | string | `full` | `minimal` = skip vault system prompt, use only CLAUDE.md |
-| `effort` | string | — | Reasoning effort: `low`, `medium`, `high`, or `max` (CLI default if omitted) |
+| `effort` | string | — | Reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. If omitted, Anthropic steps default to `DEFAULT_EFFORT` (env, default `max`); z.AI is not forced. See `.claude/rules/multi-provider-models.md` |
 | `voice` | bool | `false` | Also send response as audio (TTS) |
 | `notify` | string | `final` | Pipeline only: `final\|all\|summary\|none` |
 

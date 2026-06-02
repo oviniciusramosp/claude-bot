@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.69.0"  # feat: Hermes-inspired memory hardening — (#2) SYSTEM_PROMPT and vault/CLAUDE.md grow an explicit "Memory hygiene — what NOT to record" anti-pattern list (don't save task progress, PR numbers, SHAs, anything stale in 7 days; declarative facts only); (#5) all recalled vault context (_active_memory_lookup, _active_memory_fts_lookup, _session_start_recall, _select_relevant_skills) is fenced in <memory-context>...</memory-context> with a "treat as authoritative reference data" System note, and a regex scrubber (_strip_memory_context) strips those tags from every outbound Telegram path (send_message, edit_message, _send_as_document) and the TTS pipeline (_strip_markdown) — defends against the agent echoing internal context AND against prompt-injection via journal; (#1) background review fork after every interactive turn — _spawn_background_review spawns a daemon thread (haiku, 90s timeout) with a fresh forked agent + fixed review prompt that decides if a durable preference/lesson emerged from the last turn and writes to <agent>/Notes/auto-* or <agent>/Lessons/review-* (NO_REPLY otherwise); per-session lock prevents concurrent reviews; never sends Telegram, never blocks the response path, fail-closed on any error. Three patterns implemented in parallel worktrees + merged. # fix: dedupe interrupted pipeline/routine recovery — restart no longer sends N "Retomando pipeline" notifications for the same task across stale slots (yesterday/earlier today); superseded slots are marked failed silently. # fix: Telegram MarkdownV2 formatting — (1) greedy ~ strikethrough parser consumed content between any two tildes (e.g. ~/path) eating bold markers inside; removed, ~ now always escapes as \~. (2) markdown tables converted to fenced code blocks before MDv2 processing so columns render readably instead of escaped \| garbage.  # fix: _vault_index_upsert call site at line 4143 was using positional args (agent_id, rel) but the signature is keyword-only — caused "_vault_index_upsert() takes 0 positional arguments" warnings on every pipeline/routine execution report. Pre-existing bug surfaced when verifying the v3.68 rollout. # feat: hierarchical journal memory (Journal/YYYY-MM/{daily,weekly,monthly}). New path helpers (journal_month_dir, journal_daily_path, journal_monthly_index_path, journal_weekly_path, ensure_journal_month_skeleton) push every writer (_append_journal_entry, _consolidate_session_background, _append_execution_report, _snapshot_session_to_journal, MCP vault_append_journal) into <agent>/Journal/<YYYY-MM>/<YYYY-MM-DD>.md, drop a placeholder YYYY-MM.md monthly index on first write of each month, and let the LLM rollups (new journal-monthly-rollup.py + enriched journal-weekly-rollup.py) enrich frontmatter description+body with Themes/Highlights/Decisions/Lessons/Carry-forward narrative. SYSTEM_PROMPT and vault/CLAUDE.md teach agents to read top-down (hub → monthly → weekly → daily). vault_index.py walks the new YYYY-MM/ subfolders + recognizes journal_monthly kind; vault-graph-builder.py excludes monthlies/weeklies from the graph alongside dailies; agent-journal.md hubs rewritten to filter type=journal_monthly. Migration script scripts/migrate_journal_hierarchy.py promotes flat → hierarchical + kicks off LLM rollups. Routine vault/main/Routines/journal-monthly-rollup.md runs on day-1 at 05:30.
+BOT_VERSION = "3.70.0"  # feat: maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import hmac
 import hashlib
@@ -82,6 +82,10 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("CODEX_PATH", _v)
             elif _k == "PIPELINE_V2_ENABLED":
                 os.environ.setdefault("PIPELINE_V2_ENABLED", _v)
+            elif _k in ("DEFAULT_EFFORT", "MAX_CONTEXT",
+                        "OPUS_MODEL", "SONNET_MODEL", "HAIKU_MODEL"):
+                # Max-effort / max-context tuning + per-family model pins (v3.70).
+                os.environ.setdefault(_k, _v)
 # Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
 MODEL_FALLBACK_CHAIN = [
     m.strip() for m in
@@ -651,10 +655,16 @@ MODEL_PROVIDERS = {
     "gpt-5.5": "openai",
 }
 
-# Short alias → full API model ID, used in the response signature.
+# Short alias → full API model ID — *display fallback only*. The signature now
+# prefers the real model id the CLI resolves at runtime (captured from the init
+# event, see ClaudeRunner.captured_model + _build_signature), so a model upgrade
+# (e.g. opus 4.7 → 4.8) is reflected automatically the moment the CLI's `opus`
+# alias advances — no code edit needed. This map is only used when the live id
+# is unavailable (early failure, or non-Anthropic providers). Keep it current
+# anyway so those edge cases don't show a stale version.
 MODEL_FULL_IDS: dict = {
     "sonnet":      "claude-sonnet-4-6",
-    "opus":        "claude-opus-4-7",
+    "opus":        "claude-opus-4-8",
     "haiku":       "claude-haiku-4-5",
     "glm-5.1":     "glm-5.1",
     "glm-4.7":     "glm-4.7",
@@ -664,6 +674,29 @@ MODEL_FULL_IDS: dict = {
     "gpt-5.5":     "gpt-5.5",
 }
 DEFAULT_MODEL = "sonnet"
+
+# --- Maximum effort + maximum context (v3.70) -------------------------------
+# The bot runs Anthropic models at maximum reasoning effort and the 1M-token
+# context window by default. Both are env-tunable so a distribution user on a
+# plan without 1M access (or who wants to cap cost) can opt out, and the 1M
+# path falls back automatically if the API rejects the [1m] model variant.
+VALID_EFFORTS = ("low", "medium", "high", "xhigh", "max")  # per `claude --effort`
+DEFAULT_EFFORT = os.environ.get("DEFAULT_EFFORT", "max").lower().strip()
+if DEFAULT_EFFORT and DEFAULT_EFFORT not in VALID_EFFORTS:
+    DEFAULT_EFFORT = "max"
+# Codex (gpt-*) reasoning effort tops out at "high"; map our richer scale down.
+CODEX_EFFORT_MAP = {"low": "low", "medium": "medium", "high": "high",
+                    "xhigh": "high", "max": "high"}
+MAX_CONTEXT_ENABLED = os.environ.get("MAX_CONTEXT", "true").lower() not in (
+    "false", "0", "off", "no")
+
+# Per-family concrete-model override. The CLI's bare aliases (opus/sonnet/haiku)
+# can lag a model release — e.g. `--model opus` still resolves to claude-opus-4-7
+# even after 4.8 shipped and `--model claude-opus-4-8` works. Setting e.g.
+# OPUS_MODEL=claude-opus-4-8 pins the newer concrete id until the alias catches
+# up; unset → use the bare alias (safe default that auto-tracks the CLI). If the
+# pinned id isn't available to the account, run() falls back to the alias.
+MODEL_ALIAS_ENV = {"opus": "OPUS_MODEL", "sonnet": "SONNET_MODEL", "haiku": "HAIKU_MODEL"}
 
 # Model fallback chain — when a model fails after retries, try the next model.
 # Configurable via MODEL_FALLBACK_CHAIN env var (comma-separated model IDs).
@@ -698,15 +731,25 @@ def _agent_display_name(agent_id: str) -> str:
     return " ".join(w.capitalize() for w in agent_id.replace("-", " ").split())
 
 
-def _build_signature(session, effective_model: Optional[str] = None) -> str:
+def _build_signature(session, effective_model: Optional[str] = None,
+                     resolved_model: Optional[str] = None) -> str:
     """Build italic response signature: '\\n\\n_Agent Name · model-id_'.
 
     ``effective_model`` overrides ``session.model`` when the fallback chain
     routed the request to a different model than the one stored on the session.
+
+    ``resolved_model`` is the *real* model id the CLI reported at runtime
+    (e.g. ``claude-opus-4-8[1m]``). It is preferred for native Anthropic models
+    so the signature auto-tracks model upgrades instead of a hardcoded map. It
+    is ignored for z.AI (the proxy makes the CLI report a sonnet alias, not the
+    real GLM name) — those fall back to MODEL_FULL_IDS.
     """
     agent_label = _agent_display_name(session.agent or MAIN_AGENT_ID)
     raw_model = effective_model or session.model
-    model_id = MODEL_FULL_IDS.get(raw_model, raw_model)
+    if resolved_model and model_provider(raw_model) == "anthropic":
+        model_id = resolved_model
+    else:
+        model_id = MODEL_FULL_IDS.get(raw_model, raw_model)
     return f"\n\n_{agent_label} · {model_id}_"
 
 
@@ -722,6 +765,51 @@ def model_provider(model: str) -> str:
     if model.startswith("gpt-"):
         return "openai"
     return "anthropic"
+
+
+def resolve_model_alias(model: str) -> str:
+    """Map a bare Anthropic alias to a pinned concrete id via env override.
+
+    `opus` → $OPUS_MODEL (e.g. claude-opus-4-8) when set, else `opus`. Lets the
+    bot use a newer model than the CLI's lagging alias resolves to, while the
+    default (unset) keeps the auto-tracking alias. Non-alias / non-Anthropic
+    names pass through untouched.
+    """
+    env_key = MODEL_ALIAS_ENV.get(model)
+    if env_key:
+        override = os.environ.get(env_key, "").strip()
+        if override:
+            return override
+    return model
+
+
+def resolve_max_context_model(model: str) -> str:
+    """Return the model arg with the [1m] max-context variant when applicable.
+
+    Only native Anthropic aliases/ids get the suffix (z.AI has its own context
+    limits and is proxied; Codex is a different CLI). Already-suffixed names
+    (anything ending in ']') are returned untouched so we never double-append.
+    Gated by MAX_CONTEXT_ENABLED so it can be turned off via env.
+    """
+    if (MAX_CONTEXT_ENABLED and model_provider(model) == "anthropic"
+            and not model.endswith("]")):
+        return f"{model}[1m]"
+    return model
+
+
+def resolve_effort(effort: Optional[str], provider: str) -> Optional[str]:
+    """Resolve the reasoning effort to pass to a runner.
+
+    An explicit caller value (routine/pipeline frontmatter, /effort) always
+    wins. Otherwise Anthropic models default to DEFAULT_EFFORT (max). z.AI is
+    left alone — the gateway may not honour the CLI's thinking-budget config, so
+    we don't force it there (an explicit value still passes through untouched).
+    """
+    if effort:
+        return effort
+    if provider == "anthropic" and DEFAULT_EFFORT:
+        return DEFAULT_EFFORT
+    return None
 
 
 def _session_id_for(session, model: Optional[str] = None) -> Optional[str]:
@@ -1215,7 +1303,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/status` — Info da sessão e processo
 • `/timeout <seg>` — Alterar timeout (padrão 600s)
 • `/workspace <path>` — Alterar diretório de trabalho
-• `/effort <low|medium|high|max>` — Nível de esforço de raciocínio
+• `/effort <low|medium|high|xhigh|max>` — Nível de esforço de raciocínio (padrão: `max`)
 • `/btw <msg>` — Injetar mensagem ao Claude em execução (nativo)
 
 📓 *Journal & Memory*
@@ -3426,7 +3514,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
             output_type=out_type,
             output_file=s.get("output_file") or None,
             engine=_step_engine,
-            effort=_step_effort if _step_effort in ("low", "medium", "high", "max") else None,
+            effort=_step_effort if _step_effort in VALID_EFFORTS else None,
             loop_until=loop_until,
             loop_max_iterations=loop_max,
             loop_on_no_progress=loop_np,
@@ -3506,7 +3594,7 @@ def _parse_pipeline_task(md_file: Path, fm: Dict, body: str,
         notify=str(fm.get("notify", "final")),
         minimal_context=bool(fm.get("context") == "minimal"),
         voice=bool(fm.get("voice", False)),
-        effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+        effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
         notify_skip=bool(fm.get("notify_skip", True)),
         pipeline_version=_pipeline_version,
     )
@@ -3752,7 +3840,7 @@ class RoutineScheduler:
                             agent=owning_agent,
                             minimal_context=bool(fm.get("context") == "minimal"),
                             voice=bool(fm.get("voice", False)),
-                            effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+                            effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
                         )
                         self._enqueue(task)
                 else:
@@ -3800,7 +3888,7 @@ class RoutineScheduler:
                                     agent=owning_agent,
                                     minimal_context=bool(fm.get("context") == "minimal"),
                                     voice=bool(fm.get("voice", False)),
-                                    effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+                                    effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
                                 )
                                 self._enqueue(task)
             except Exception as exc:
@@ -6076,6 +6164,13 @@ class ClaudeRunner:
         self.cost_usd: float = 0.0
         self.total_cost_usd: float = 0.0
         self.captured_session_id: Optional[str] = None
+        # Real model id the CLI resolved this run (e.g. "claude-opus-4-8[1m]"),
+        # read from the init event. Used for the response signature so it tracks
+        # model upgrades automatically instead of a hardcoded map.
+        self.captured_model: Optional[str] = None
+        # True when this run appended the [1m] max-context variant — lets run()
+        # retry once on the base context if the API rejects 1M for this account.
+        self.context_1m_applied: bool = False
         self.error_text: str = ""
         self.stderr_text: str = ""
         self.exit_code: Optional[int] = None
@@ -6098,6 +6193,20 @@ class ClaudeRunner:
         global CLAUDE_PATH
         if not os.path.isfile(CLAUDE_PATH):
             CLAUDE_PATH = _detect_claude_path()
+
+        provider = model_provider(model)
+        # Maximum effort + maximum context defaults (Anthropic). resolve_effort
+        # keeps an explicit caller value; resolve_model_alias pins a newer
+        # concrete id when the CLI alias lags (env override);
+        # resolve_max_context_model appends [1m]. Both are no-ops for z.AI
+        # (proxied below) and Codex. `model` stays the bare, always-available
+        # baseline we fall back to if the enhanced variant is rejected.
+        effort = resolve_effort(effort, provider)
+        concrete = resolve_model_alias(model) if provider == "anthropic" else model
+        model_arg = resolve_max_context_model(concrete)
+        self.context_1m_applied = model_arg != concrete  # [1m] suffix was added
+        enhanced_model = model_arg != model              # override and/or [1m]
+
         cmd = [CLAUDE_PATH, "--print"]
         if restricted and agent_id:
             settings_path = _ensure_agent_settings(agent_id)
@@ -6105,7 +6214,7 @@ class ClaudeRunner:
         else:
             cmd += ["--dangerously-skip-permissions"]
         cmd += [
-            "--model", model,
+            "--model", model_arg,
             "--output-format", "stream-json",
             "--verbose",
         ]
@@ -6130,6 +6239,7 @@ class ClaudeRunner:
         self.cost_usd = 0.0
         self.total_cost_usd = 0.0
         self.captured_session_id = None
+        self.captured_model = None
         self.error_text = ""
         self.stderr_text = ""
         self.exit_code = None
@@ -6167,7 +6277,6 @@ class ClaudeRunner:
             # are rejected before any HTTP call is made. Fix: start a local proxy that
             # accepts ANY model name from Claude CLI and rewrites it to the real GLM name
             # before forwarding to z.AI. Claude CLI sees a valid alias ("claude-sonnet-4-6").
-            provider = model_provider(model)
             if provider == "zai":
                 if not ZAI_API_KEY:
                     self.error_text = (
@@ -6193,21 +6302,24 @@ class ClaudeRunner:
                         cmd[i + 1] = "claude-sonnet-4-6"
                         break
 
-            self.process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.PIPE,
-                cwd=workspace,
-                env=clean_env,
-                text=True,
-                bufsize=1,
-            )
-            # Close stdin immediately — prevents Claude CLI from waiting 3s
-            # for input. BTW injection falls back to queue when stdin is closed.
-            if self.process.stdin:
-                self.process.stdin.close()
-            self._read_stream()
+            self._spawn_and_read(cmd, workspace, clean_env)
+
+            # Model/context fail-safe: if we pinned a newer concrete id and/or
+            # appended [1m] but the account rejected that variant, retry once on
+            # the bare alias + base context so the turn still completes
+            # (distribution users without 4.8 or 1M access, etc.).
+            if enhanced_model and self._looks_like_model_unavailable():
+                logger.warning(
+                    "Model variant %s unavailable — retrying on base alias %s",
+                    model_arg, model,
+                )
+                self._reset_for_retry()
+                self.context_1m_applied = False
+                for i, arg in enumerate(cmd):
+                    if arg == "--model" and i + 1 < len(cmd):
+                        cmd[i + 1] = model  # bare alias: no override, no [1m]
+                        break
+                self._spawn_and_read(cmd, workspace, clean_env)
         except FileNotFoundError:
             if not os.path.isfile(cmd[0]):
                 self.error_text = f"❌ Claude CLI não encontrado em {cmd[0]}"
@@ -6223,6 +6335,64 @@ class ClaudeRunner:
             if _proxy_server is not None:
                 _proxy_server.shutdown()
             self._cleanup()
+
+    def _spawn_and_read(self, cmd: List[str], workspace: str,
+                        clean_env: Dict[str, str]) -> None:
+        """Spawn the CLI subprocess and drain its stream-json output.
+
+        Factored out of run() so the [1m] max-context fail-safe can re-spawn on
+        the base context without duplicating the Popen boilerplate.
+        """
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            cwd=workspace,
+            env=clean_env,
+            text=True,
+            bufsize=1,
+        )
+        # Close stdin immediately — prevents Claude CLI from waiting 3s
+        # for input. BTW injection falls back to queue when stdin is closed.
+        if self.process.stdin:
+            self.process.stdin.close()
+        self._read_stream()
+
+    def _reset_for_retry(self) -> None:
+        """Clear per-attempt output state before the 1M-fallback re-spawn so the
+        second attempt's output replaces the rejected one (cost is left
+        accumulating — a rejected 1M turn fails at validation, ~$0)."""
+        with self._lock:
+            self.accumulated_text = ""
+            self.accumulated_thinking = ""
+            self.result_text = ""
+            self.tool_log = []
+            self.error_text = ""
+            self.stderr_text = ""
+            self.activity_type = "thinking"
+            self.last_activity = time.time()
+
+    def _looks_like_model_unavailable(self) -> bool:
+        """Heuristic: did the just-finished attempt fail because the enhanced
+        model variant (a pinned newer id and/or the [1m] max-context suffix) is
+        unavailable to this account/plan?
+
+        Only consulted when an enhanced variant was applied, so the needle set
+        can be broad without affecting baseline runs. A successful turn (result
+        text, no error) is never treated as a rejection.
+        """
+        if not self.error_text and not self.stderr_text:
+            return False
+        if self.result_text and not self.error_text:
+            return False  # got a real answer — not a model-availability failure
+        blob = f"{self.error_text} {self.stderr_text}".lower()
+        needles = (
+            "1m", "context-1m", "context window", "200000", "200k",
+            "not_found", "not found", "does not support", "doesn't support",
+            "unsupported", "invalid model", "model_not_found", "beta",
+        )
+        return any(n in blob for n in needles)
 
     def _read_stream(self) -> None:
         assert self.process and self.process.stdout
@@ -6253,6 +6423,13 @@ class ClaudeRunner:
             if sid:
                 with self._lock:
                     self.captured_session_id = sid
+            # The init event reports the model the CLI actually resolved
+            # (e.g. "claude-opus-4-8[1m]"). Capture it for the signature so a
+            # model upgrade shows up without touching MODEL_FULL_IDS.
+            mdl = obj.get("model")
+            if mdl:
+                with self._lock:
+                    self.captured_model = mdl
         elif etype == "error":
             # Capture API-level errors from Claude CLI stream (e.g. overloaded, rate limit)
             err = obj.get("error", {})
@@ -6551,10 +6728,15 @@ class CodexRunner:
         ]
         if any(model.startswith(p) for p in OAUTH_ALLOWED_PREFIXES):
             flags += ["--model", model]
+        # Default to maximum reasoning effort when the caller didn't specify one.
+        # Codex tops out at "high", so DEFAULT_EFFORT ("max") maps down via
+        # CODEX_EFFORT_MAP. An explicit caller value still wins.
+        if not effort and DEFAULT_EFFORT:
+            effort = CODEX_EFFORT_MAP.get(DEFAULT_EFFORT)
         if effort:
             # Codex exposes reasoning effort via -c key=value global config override.
             # model_reasoning_effort accepts low|medium|high. # VERIFY key name.
-            flags += ["-c", f"model_reasoning_effort={effort}"]
+            flags += ["-c", f"model_reasoning_effort={CODEX_EFFORT_MAP.get(effort, effort)}"]
         if session_id:
             cmd = [CODEX_PATH, "exec", "resume"] + flags + [session_id, full_prompt]
         else:
@@ -10348,7 +10530,7 @@ class ClaudeTelegramBot:
             agent=owning_agent,
             minimal_context=bool(fm.get("context") == "minimal"),
             voice=bool(fm.get("voice", False)),
-            effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+            effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
         )
 
         self._send_to_all(f"🔄 Retomando rotina *{_md2_escape(name)}*\\.\\.\\.")
@@ -11254,7 +11436,9 @@ class ClaudeTelegramBot:
         else:
             lines.append("• Nenhuma sessão ativa")
         lines.append(f"• Inactivity timeout: {self.timeout_seconds}s")
-        lines.append(f"• Effort: {self.effort or 'padrão'}")
+        _effort_display = self.effort or (f"{DEFAULT_EFFORT} (padrão)" if DEFAULT_EFFORT else "padrão")
+        _ctx_display = "1M" if MAX_CONTEXT_ENABLED else "padrão"
+        lines.append(f"• Effort: {_effort_display} · Contexto: {_ctx_display}")
         lines.append(f"• Claude rodando: {'✅ Sim' if self.runner.running else '❌ Não'}")
         if self.runner.running and self.runner.process:
             lines.append(f"• PID: {self.runner.process.pid}")
@@ -12376,11 +12560,12 @@ class ClaudeTelegramBot:
 
     def cmd_effort(self, val: str) -> None:
         val = val.lower().strip()
-        if val in ("low", "medium", "high", "max"):
+        if val in VALID_EFFORTS:
             self.effort = val
             self.send_message(f"✅ Effort: `{val}`")
         else:
-            self.send_message("❌ Valores aceitos: `low`, `medium`, `high`, `max`")
+            accepted = ", ".join(f"`{e}`" for e in VALID_EFFORTS)
+            self.send_message(f"❌ Valores aceitos: {accepted}")
 
     def cmd_btw(self, text: str) -> None:
         ctx = self._ctx
@@ -13773,7 +13958,7 @@ class ClaudeTelegramBot:
                 agent=owning_agent,
                 minimal_context=bool(fm.get("context") == "minimal"),
                 voice=bool(fm.get("voice", False)),
-                effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+                effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
             )
             self._enqueue_routine(task)
             self.send_message(f"🚀 Rotina `{name}` disparada manualmente.")
@@ -15882,7 +16067,8 @@ class ClaudeTelegramBot:
             _track_cost(runner.cost_usd, model=session.model)
 
         if SHOW_SIGNATURE and not routine_mode and not suppress_text and (runner.result_text or runner.accumulated_text):
-            final_text += _build_signature(session, effective_model=effective_model)
+            final_text += _build_signature(session, effective_model=effective_model,
+                                            resolved_model=getattr(runner, "captured_model", None))
 
         # Build copy-code button if response has a single dominant code block
         copy_markup = None
@@ -16288,7 +16474,7 @@ class ClaudeTelegramBot:
                 "/stop": lambda: self.cmd_stop(arg),
                 "/timeout": lambda: self.cmd_timeout(arg) if arg else self.send_message(f"ℹ️ Timeout atual: {self.timeout_seconds}s"),
                 "/workspace": lambda: self.cmd_workspace(arg) if arg else self.send_message("❌ Use: `/workspace <path>`"),
-                "/effort": lambda: self.cmd_effort(arg) if arg else self.send_message(f"ℹ️ Effort atual: {self.effort or 'padrão'}"),
+                "/effort": lambda: self.cmd_effort(arg) if arg else self.send_message(f"ℹ️ Effort atual: {self.effort or (DEFAULT_EFFORT + ' (padrão)' if DEFAULT_EFFORT else 'padrão')}"),
                 "/btw": lambda: self.cmd_btw(arg) if arg else self.send_message("❌ Use: `/btw <mensagem>`"),
                 "/delegate": lambda: self.cmd_delegate(arg) if arg else self.send_message("❌ Use: `/delegate <prompt>`"),
                 "/clear": lambda: self.cmd_clear(),
@@ -17163,7 +17349,7 @@ class ClaudeTelegramBot:
                             time_slot=time_slot,
                             agent=owning_agent,
                             minimal_context=bool(fm.get("context") == "minimal"),
-                            effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+                            effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
                         )
                         bot.routine_state.set_status(name, time_slot, "running")
                         bot._enqueue_routine(task)
@@ -17485,7 +17671,7 @@ class ClaudeTelegramBot:
                                 agent=owning_agent,
                                 minimal_context=bool(r_fm.get("context") == "minimal"),
                                 voice=bool(r_fm.get("voice", False)),
-                                effort=_effort_raw if _effort_raw in ("low", "medium", "high", "max") else None,
+                                effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
                                 webhook_payload=raw_body,
                             )
                             bot.routine_state.set_status(routine_name, time_slot, "running")

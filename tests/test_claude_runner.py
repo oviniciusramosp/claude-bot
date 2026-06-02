@@ -6,6 +6,7 @@ flakiness.
 """
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from tests._botload import load_bot_module
@@ -402,6 +403,227 @@ class ProviderRouting(unittest.TestCase):
         self.assertEqual(self.bot.model_provider("opus"), "anthropic")
         self.assertEqual(self.bot.model_provider("haiku"), "anthropic")
         self.assertEqual(self.bot.model_provider("glm-4.7"), "zai")
+
+
+class MaxEffortAndContext(unittest.TestCase):
+    """v3.70 — Anthropic models default to max reasoning effort + 1M context.
+
+    Verifies the --model [1m] suffix and --effort flag are added for native
+    Anthropic models, skipped/handled correctly for GLM, and tunable via the
+    module globals.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def setUp(self):
+        # Snapshot the env-derived globals so a host that exported DEFAULT_EFFORT
+        # / MAX_CONTEXT doesn't skew the assertions; force known values.
+        self._eff = self.bot.DEFAULT_EFFORT
+        self._ctx = self.bot.MAX_CONTEXT_ENABLED
+        self._zai = self.bot.ZAI_API_KEY
+        self.bot.DEFAULT_EFFORT = "max"
+        self.bot.MAX_CONTEXT_ENABLED = True
+
+    def tearDown(self):
+        self.bot.DEFAULT_EFFORT = self._eff
+        self.bot.MAX_CONTEXT_ENABLED = self._ctx
+        self.bot.ZAI_API_KEY = self._zai
+
+    def _make_mock_popen_proc(self):
+        proc = MagicMock()
+        proc.stdout = iter([])
+        proc.stderr = MagicMock()
+        proc.stderr.read.return_value = ""
+        proc.stdin = MagicMock()
+        proc.wait.return_value = 0
+        proc.returncode = 0
+        proc.pid = 4321
+        return proc
+
+    @staticmethod
+    def _arg_after(cmd, flag):
+        for i, a in enumerate(cmd):
+            if a == flag and i + 1 < len(cmd):
+                return cmd[i + 1]
+        return None
+
+    def _run_capture_cmd(self, model, **kwargs):
+        runner = self.bot.ClaudeRunner()
+        with patch.object(self.bot.subprocess, "Popen") as mock_popen:
+            mock_popen.return_value = self._make_mock_popen_proc()
+            runner.run(prompt="hi", model=model, system_prompt=None, **kwargs)
+        return mock_popen, runner
+
+    # --- pure helpers ---
+    def test_resolve_max_context_model_anthropic(self):
+        self.assertEqual(self.bot.resolve_max_context_model("opus"), "opus[1m]")
+        self.assertEqual(self.bot.resolve_max_context_model("claude-opus-4-8"),
+                         "claude-opus-4-8[1m]")
+
+    def test_resolve_max_context_model_skips_glm_and_gpt(self):
+        self.assertEqual(self.bot.resolve_max_context_model("glm-4.7"), "glm-4.7")
+        self.assertEqual(self.bot.resolve_max_context_model("gpt-5"), "gpt-5")
+
+    def test_resolve_max_context_model_no_double_suffix(self):
+        self.assertEqual(self.bot.resolve_max_context_model("opus[1m]"), "opus[1m]")
+
+    def test_resolve_max_context_model_respects_disable(self):
+        self.bot.MAX_CONTEXT_ENABLED = False
+        self.assertEqual(self.bot.resolve_max_context_model("opus"), "opus")
+
+    def test_resolve_effort_default_anthropic(self):
+        self.assertEqual(self.bot.resolve_effort(None, "anthropic"), "max")
+
+    def test_resolve_effort_explicit_wins(self):
+        self.assertEqual(self.bot.resolve_effort("low", "anthropic"), "low")
+
+    def test_resolve_effort_not_forced_for_zai(self):
+        self.assertIsNone(self.bot.resolve_effort(None, "zai"))
+        # explicit still passes through
+        self.assertEqual(self.bot.resolve_effort("high", "zai"), "high")
+
+    def test_resolve_model_alias_default_passthrough(self):
+        os.environ.pop("OPUS_MODEL", None)
+        self.assertEqual(self.bot.resolve_model_alias("opus"), "opus")
+
+    def test_resolve_model_alias_env_override(self):
+        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        try:
+            self.assertEqual(self.bot.resolve_model_alias("opus"), "claude-opus-4-8")
+        finally:
+            os.environ.pop("OPUS_MODEL", None)
+
+    def test_resolve_model_alias_ignores_non_alias(self):
+        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        try:
+            self.assertEqual(self.bot.resolve_model_alias("sonnet"), "sonnet")
+            self.assertEqual(self.bot.resolve_model_alias("glm-4.7"), "glm-4.7")
+        finally:
+            os.environ.pop("OPUS_MODEL", None)
+
+    # --- run() integration (mocked Popen) ---
+    def test_anthropic_run_adds_1m_and_max_effort(self):
+        self.bot.ZAI_API_KEY = ""
+        mock_popen, runner = self._run_capture_cmd("opus")
+        cmd = mock_popen.call_args.args[0]
+        self.assertEqual(self._arg_after(cmd, "--model"), "opus[1m]")
+        self.assertEqual(self._arg_after(cmd, "--effort"), "max")
+        self.assertTrue(runner.context_1m_applied)
+
+    def test_alias_override_pins_concrete_id_with_1m(self):
+        self.bot.ZAI_API_KEY = ""
+        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        try:
+            mock_popen, _ = self._run_capture_cmd("opus")
+        finally:
+            os.environ.pop("OPUS_MODEL", None)
+        cmd = mock_popen.call_args.args[0]
+        self.assertEqual(self._arg_after(cmd, "--model"), "claude-opus-4-8[1m]")
+
+    def test_explicit_effort_overrides_default(self):
+        self.bot.ZAI_API_KEY = ""
+        mock_popen, _ = self._run_capture_cmd("sonnet", effort="low")
+        cmd = mock_popen.call_args.args[0]
+        self.assertEqual(self._arg_after(cmd, "--effort"), "low")
+
+    def test_max_context_disabled_no_suffix(self):
+        self.bot.ZAI_API_KEY = ""
+        self.bot.MAX_CONTEXT_ENABLED = False
+        mock_popen, runner = self._run_capture_cmd("opus")
+        cmd = mock_popen.call_args.args[0]
+        self.assertEqual(self._arg_after(cmd, "--model"), "opus")
+        self.assertFalse(runner.context_1m_applied)
+
+    def test_glm_run_no_1m_and_no_forced_effort(self):
+        self.bot.ZAI_API_KEY = "fake-key"
+        mock_popen, runner = self._run_capture_cmd("glm-4.7")
+        cmd = mock_popen.call_args.args[0]
+        # GLM is proxied: model arg is swapped to a valid Claude alias, never [1m]
+        self.assertEqual(self._arg_after(cmd, "--model"), "claude-sonnet-4-6")
+        self.assertNotIn("--effort", cmd)
+        self.assertFalse(runner.context_1m_applied)
+
+
+class CapturedModelAndSignature(unittest.TestCase):
+    """The signature prefers the real model id the CLI resolved (Anthropic),
+    so model upgrades surface without editing MODEL_FULL_IDS."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def _session(self, agent="main", model="opus"):
+        return SimpleNamespace(agent=agent, model=model)
+
+    def test_init_event_captures_model(self):
+        runner = self.bot.ClaudeRunner()
+        runner.running = True
+        runner._handle_event({
+            "type": "system", "subtype": "init",
+            "session_id": "s1", "model": "claude-opus-4-8[1m]",
+        })
+        self.assertEqual(runner.captured_model, "claude-opus-4-8[1m]")
+
+    def test_signature_prefers_resolved_model_for_anthropic(self):
+        sig = self.bot._build_signature(
+            self._session(model="opus"),
+            effective_model="opus",
+            resolved_model="claude-opus-4-8[1m]",
+        )
+        self.assertIn("claude-opus-4-8[1m]", sig)
+
+    def test_signature_ignores_resolved_model_for_glm(self):
+        # GLM proxies through a sonnet alias — captured id is meaningless there.
+        sig = self.bot._build_signature(
+            self._session(model="glm-5.1"),
+            effective_model="glm-5.1",
+            resolved_model="claude-sonnet-4-6",
+        )
+        self.assertIn("glm-5.1", sig)
+        self.assertNotIn("claude-sonnet-4-6", sig)
+
+    def test_signature_falls_back_to_map_without_resolved(self):
+        sig = self.bot._build_signature(self._session(model="opus"),
+                                        effective_model="opus")
+        self.assertIn(self.bot.MODEL_FULL_IDS["opus"], sig)
+
+
+class OneMillionContextFallback(unittest.TestCase):
+    """_looks_like_model_unavailable drives the automatic retry on base context."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def _runner(self):
+        r = self.bot.ClaudeRunner()
+        r.running = True
+        return r
+
+    def test_rejection_detected_from_error_text(self):
+        r = self._runner()
+        r.error_text = "model claude-opus-4-8[1m] not_found"
+        self.assertTrue(r._looks_like_model_unavailable())
+
+    def test_no_rejection_when_clean(self):
+        r = self._runner()
+        r.result_text = "all good"
+        self.assertFalse(r._looks_like_model_unavailable())
+
+    def test_no_rejection_when_answered_despite_stderr_noise(self):
+        r = self._runner()
+        r.result_text = "answer"
+        r.error_text = ""
+        r.stderr_text = "some warning"
+        # has a real answer and no error -> not a model-availability failure
+        self.assertFalse(r._looks_like_model_unavailable())
+
+    def test_unrelated_error_not_flagged(self):
+        r = self._runner()
+        r.error_text = "connection reset by peer"
+        self.assertFalse(r._looks_like_model_unavailable())
 
 
 class CodexHandleEvent(unittest.TestCase):
