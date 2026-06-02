@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.70.0"  # feat: maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.70.1"  # fix: the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import hmac
 import hashlib
@@ -698,6 +698,13 @@ MAX_CONTEXT_ENABLED = os.environ.get("MAX_CONTEXT", "true").lower() not in (
 # pinned id isn't available to the account, run() falls back to the alias.
 MODEL_ALIAS_ENV = {"opus": "OPUS_MODEL", "sonnet": "SONNET_MODEL", "haiku": "HAIKU_MODEL"}
 
+# Set at runtime when the account rejects the [1m] variant (e.g. 1M context
+# requires pay-as-you-go "usage credits" that aren't enabled). Once tripped, we
+# stop appending [1m] for the rest of the process so every subsequent turn skips
+# the failed-attempt tax instead of trying-and-falling-back each time. Cleared
+# by a restart (after which a single probe re-tests the capability).
+_MAX_CONTEXT_RUNTIME_OFF = False
+
 # Model fallback chain — when a model fails after retries, try the next model.
 # Configurable via MODEL_FALLBACK_CHAIN env var (comma-separated model IDs).
 DEFAULT_FALLBACK_CHAIN = ["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"]
@@ -783,16 +790,32 @@ def resolve_model_alias(model: str) -> str:
     return model
 
 
+def _disable_max_context_runtime(reason: str) -> None:
+    """Trip the process-wide [1m] kill switch after the account rejects it.
+
+    Logged once (idempotent) so the user knows why max context went quiet.
+    """
+    global _MAX_CONTEXT_RUNTIME_OFF
+    if not _MAX_CONTEXT_RUNTIME_OFF:
+        _MAX_CONTEXT_RUNTIME_OFF = True
+        logger.warning(
+            "1M context disabled for this process — %s. Enable pay-as-you-go "
+            "usage credits at claude.ai/settings/usage for 1M, or set "
+            "MAX_CONTEXT=false to silence. Running on standard context.", reason,
+        )
+
+
 def resolve_max_context_model(model: str) -> str:
     """Return the model arg with the [1m] max-context variant when applicable.
 
     Only native Anthropic aliases/ids get the suffix (z.AI has its own context
     limits and is proxied; Codex is a different CLI). Already-suffixed names
     (anything ending in ']') are returned untouched so we never double-append.
-    Gated by MAX_CONTEXT_ENABLED so it can be turned off via env.
+    Gated by MAX_CONTEXT_ENABLED (env) and the runtime kill switch (tripped when
+    the account rejects [1m], so we don't retry-and-fail on every turn).
     """
-    if (MAX_CONTEXT_ENABLED and model_provider(model) == "anthropic"
-            and not model.endswith("]")):
+    if (MAX_CONTEXT_ENABLED and not _MAX_CONTEXT_RUNTIME_OFF
+            and model_provider(model) == "anthropic" and not model.endswith("]")):
         return f"{model}[1m]"
     return model
 
@@ -6309,15 +6332,26 @@ class ClaudeRunner:
             # the bare alias + base context so the turn still completes
             # (distribution users without 4.8 or 1M access, etc.).
             if enhanced_model and self._looks_like_model_unavailable():
+                context_related = (self.context_1m_applied
+                                   and self._failure_is_context_related())
+                # 1M-window failure (e.g. usage credits not enabled): keep the
+                # pinned concrete id (claude-opus-4-8 works fine on standard
+                # context), drop only [1m], and trip the process kill switch so
+                # future turns skip [1m] instead of failing-and-retrying each
+                # time. A pinned-id failure instead falls all the way back to the
+                # bare alias and leaves 1M alone.
+                retry_model = concrete if context_related else model
                 logger.warning(
-                    "Model variant %s unavailable — retrying on base alias %s",
-                    model_arg, model,
+                    "Model variant %s unavailable — retrying on %s",
+                    model_arg, retry_model,
                 )
+                if context_related:
+                    _disable_max_context_runtime("account rejected the [1m] variant")
                 self._reset_for_retry()
                 self.context_1m_applied = False
                 for i, arg in enumerate(cmd):
                     if arg == "--model" and i + 1 < len(cmd):
-                        cmd[i + 1] = model  # bare alias: no override, no [1m]
+                        cmd[i + 1] = retry_model
                         break
                 self._spawn_and_read(cmd, workspace, clean_env)
         except FileNotFoundError:
@@ -6373,26 +6407,55 @@ class ClaudeRunner:
             self.activity_type = "thinking"
             self.last_activity = time.time()
 
+    # Unmistakable API-error phrasing. result_text (stdout) is only treated as a
+    # FAILURE signal when it carries one of these — so a normal answer that
+    # happens to contain a needle (e.g. crypto talk about the "1m" candle) is
+    # never misread as a model-availability error.
+    _RESULT_ERROR_MARKERS = (
+        "api error", "usage credits required", "switch to standard context",
+        "not_found_error", "model_not_found",
+    )
+
+    def _failure_blob(self) -> str:
+        """Lowercased text representing a FAILURE this attempt produced.
+
+        error_text and stderr always count. result_text counts only when it
+        carries an explicit API-error marker — some CLI/provider paths put the
+        error on stdout with a non-zero exit instead of an error event (this is
+        how 'Usage credits required for 1M context' arrives)."""
+        parts = [self.error_text, self.stderr_text]
+        rt = self.result_text or ""
+        if any(m in rt.lower() for m in self._RESULT_ERROR_MARKERS):
+            parts.append(rt)
+        return " ".join(p for p in parts if p).lower()
+
     def _looks_like_model_unavailable(self) -> bool:
         """Heuristic: did the just-finished attempt fail because the enhanced
         model variant (a pinned newer id and/or the [1m] max-context suffix) is
         unavailable to this account/plan?
 
         Only consulted when an enhanced variant was applied, so the needle set
-        can be broad without affecting baseline runs. A successful turn (result
-        text, no error) is never treated as a rejection.
+        can be broad without affecting baseline runs.
         """
-        if not self.error_text and not self.stderr_text:
+        blob = self._failure_blob()
+        if not blob:
             return False
-        if self.result_text and not self.error_text:
-            return False  # got a real answer — not a model-availability failure
-        blob = f"{self.error_text} {self.stderr_text}".lower()
         needles = (
             "1m", "context-1m", "context window", "200000", "200k",
-            "not_found", "not found", "does not support", "doesn't support",
-            "unsupported", "invalid model", "model_not_found", "beta",
+            "usage credits", "standard context", "not_found", "not found",
+            "does not support", "doesn't support", "unsupported",
+            "invalid model", "model_not_found", "beta",
         )
         return any(n in blob for n in needles)
+
+    def _failure_is_context_related(self) -> bool:
+        """True when the failure is specifically about the 1M context window
+        (vs a pinned model id being unavailable) — gates the [1m] kill switch so
+        we don't disable max context for an unrelated model-not-found error."""
+        blob = self._failure_blob()
+        return any(m in blob for m in (
+            "1m", "context-1m", "context window", "usage credits",
+            "standard context", "200000", "200k"))
 
     def _read_stream(self) -> None:
         assert self.process and self.process.stdout

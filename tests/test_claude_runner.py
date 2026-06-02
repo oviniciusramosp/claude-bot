@@ -4,6 +4,7 @@ We don't actually spawn `claude` — instead we drive `_handle_event` directly
 with the JSON shapes the CLI emits. This covers the parser without subprocess
 flakiness.
 """
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -422,13 +423,16 @@ class MaxEffortAndContext(unittest.TestCase):
         # / MAX_CONTEXT doesn't skew the assertions; force known values.
         self._eff = self.bot.DEFAULT_EFFORT
         self._ctx = self.bot.MAX_CONTEXT_ENABLED
+        self._rt_off = self.bot._MAX_CONTEXT_RUNTIME_OFF
         self._zai = self.bot.ZAI_API_KEY
         self.bot.DEFAULT_EFFORT = "max"
         self.bot.MAX_CONTEXT_ENABLED = True
+        self.bot._MAX_CONTEXT_RUNTIME_OFF = False
 
     def tearDown(self):
         self.bot.DEFAULT_EFFORT = self._eff
         self.bot.MAX_CONTEXT_ENABLED = self._ctx
+        self.bot._MAX_CONTEXT_RUNTIME_OFF = self._rt_off
         self.bot.ZAI_API_KEY = self._zai
 
     def _make_mock_popen_proc(self):
@@ -521,6 +525,38 @@ class MaxEffortAndContext(unittest.TestCase):
             os.environ.pop("OPUS_MODEL", None)
         cmd = mock_popen.call_args.args[0]
         self.assertEqual(self._arg_after(cmd, "--model"), "claude-opus-4-8[1m]")
+
+    def test_credit_failure_retries_on_concrete_id_and_trips_switch(self):
+        # Full two-spawn flow: opus[1m] (pinned to 4.8) hits the usage-credits
+        # error in result_text, then retries on claude-opus-4-8 (keeps the pin,
+        # drops [1m]) and trips the process kill switch.
+        self.bot.ZAI_API_KEY = ""
+        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        try:
+            runner = self.bot.ClaudeRunner()
+            proc1 = self._make_mock_popen_proc()
+            proc1.stdout = iter([json.dumps({
+                "type": "result", "is_error": True,
+                "result": ("API Error: Usage credits required for 1M context · "
+                           "use --model to switch to standard context"),
+            })])
+            proc2 = self._make_mock_popen_proc()  # retry succeeds (empty stream)
+            # Capture the --model at call time: run() mutates the cmd list in
+            # place on retry, so the recorded call_args would otherwise all show
+            # the final value.
+            seen = []
+            procs = [proc1, proc2]
+
+            def _side_effect(cmd, *a, **k):
+                seen.append(self._arg_after(cmd, "--model"))
+                return procs[len(seen) - 1]
+
+            with patch.object(self.bot.subprocess, "Popen", side_effect=_side_effect):
+                runner.run(prompt="hi", model="opus", system_prompt=None)
+            self.assertEqual(seen, ["claude-opus-4-8[1m]", "claude-opus-4-8"])
+            self.assertTrue(self.bot._MAX_CONTEXT_RUNTIME_OFF)
+        finally:
+            os.environ.pop("OPUS_MODEL", None)
 
     def test_explicit_effort_overrides_default(self):
         self.bot.ZAI_API_KEY = ""
@@ -624,6 +660,49 @@ class OneMillionContextFallback(unittest.TestCase):
         r = self._runner()
         r.error_text = "connection reset by peer"
         self.assertFalse(r._looks_like_model_unavailable())
+
+    def test_credit_error_in_result_text_detected(self):
+        # The real failure mode: the CLI puts "Usage credits required for 1M
+        # context" in result_text (stdout) with error_text empty.
+        r = self._runner()
+        r.result_text = ("API Error: Usage credits required for 1M context · "
+                         "turn on usage credits at claude.ai/settings/usage, or "
+                         "use --model to switch to standard context")
+        r.error_text = ""
+        self.assertTrue(r._looks_like_model_unavailable())
+        self.assertTrue(r._failure_is_context_related())
+
+    def test_normal_answer_with_1m_word_not_flagged(self):
+        # A normal answer mentioning "1m" (e.g. crypto candle) must NOT trip the
+        # detector — result_text only counts when it has an API-error marker.
+        r = self._runner()
+        r.result_text = "The 1m candle closed bullish; 200k support held."
+        r.error_text = ""
+        r.stderr_text = ""
+        self.assertFalse(r._looks_like_model_unavailable())
+        self.assertFalse(r._failure_is_context_related())
+
+    def test_model_not_found_is_not_context_related(self):
+        # A pinned-id failure is "unavailable" but NOT context-related, so it
+        # must not trip the [1m] kill switch.
+        r = self._runner()
+        r.error_text = "model_not_found: claude-opus-4-9"
+        self.assertTrue(r._looks_like_model_unavailable())
+        self.assertFalse(r._failure_is_context_related())
+
+    def test_kill_switch_stops_appending_1m(self):
+        orig = self.bot._MAX_CONTEXT_RUNTIME_OFF
+        ctx = self.bot.MAX_CONTEXT_ENABLED
+        self.bot.MAX_CONTEXT_ENABLED = True
+        try:
+            self.bot._MAX_CONTEXT_RUNTIME_OFF = False
+            self.assertEqual(self.bot.resolve_max_context_model("opus"), "opus[1m]")
+            self.bot._disable_max_context_runtime("test")
+            self.assertTrue(self.bot._MAX_CONTEXT_RUNTIME_OFF)
+            self.assertEqual(self.bot.resolve_max_context_model("opus"), "opus")
+        finally:
+            self.bot._MAX_CONTEXT_RUNTIME_OFF = orig
+            self.bot.MAX_CONTEXT_ENABLED = ctx
 
 
 class CodexHandleEvent(unittest.TestCase):

@@ -111,7 +111,7 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager. Contains cr
 | `ADVISOR_MODEL` | No | `opus` | Model used by `scripts/advisor.sh` when escalating |
 | `MODEL_FALLBACK_CHAIN` | No | `opus,glm-5.1,sonnet,glm-4.7,haiku` | Fallback order when a model fails. Configurable via macOS app. |
 | `DEFAULT_EFFORT` | No | `max` | Reasoning effort applied to Anthropic turns when nothing overrides it (`low\|medium\|high\|xhigh\|max`). Codex maps `max`→`high`; z.AI isn't forced. See `.claude/rules/multi-provider-models.md` |
-| `MAX_CONTEXT` | No | `true` | When on, appends the `[1m]` 1M-context variant to native Anthropic models. Auto-falls back to the base context if the account/plan rejects `[1m]`. Set `false`/`0`/`off` to disable |
+| `MAX_CONTEXT` | No | `true` | When on, appends the `[1m]` 1M-context variant to native Anthropic models. **1M context requires pay-as-you-go usage credits enabled at claude.ai/settings/usage — even on subscription auth.** Without them the CLI rejects `[1m]`; the bot retries once on standard 200K context and then trips a process kill switch so subsequent turns skip `[1m]` (one wasted attempt per restart, no per-turn tax). Set `false`/`0`/`off` to skip the attempt entirely |
 | `OPUS_MODEL` / `SONNET_MODEL` / `HAIKU_MODEL` | No | — | Pin a concrete model id for that alias when the CLI's bare alias lags a release (e.g. `OPUS_MODEL=claude-opus-4-8` while `--model opus` still resolves to 4.7). Unset → use the auto-tracking alias. Falls back to the alias if the pinned id is unavailable |
 
 Edited via: ClaudeBotManager → Settings, or directly.
