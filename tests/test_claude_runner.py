@@ -602,6 +602,18 @@ class CapturedModelAndSignature(unittest.TestCase):
         })
         self.assertEqual(runner.captured_model, "claude-opus-4-8[1m]")
 
+    def test_signature_includes_agent_icon(self):
+        with patch.object(self.bot, "load_agent", return_value={"icon": "🧠"}):
+            sig = self.bot._build_signature(self._session(agent="main", model="sonnet"),
+                                            effective_model="sonnet")
+        self.assertIn("🧠 Main · ", sig)
+
+    def test_signature_default_icon_when_agent_missing(self):
+        with patch.object(self.bot, "load_agent", return_value=None):
+            sig = self.bot._build_signature(self._session(agent="main", model="sonnet"),
+                                            effective_model="sonnet")
+        self.assertIn("🤖 Main · ", sig)
+
     def test_signature_prefers_resolved_model_for_anthropic(self):
         sig = self.bot._build_signature(
             self._session(model="opus"),
