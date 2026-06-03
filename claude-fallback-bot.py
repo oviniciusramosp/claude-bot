@@ -5,10 +5,11 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.71.0"  # feat: the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.72.0"  # feat: switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import hmac
 import hashlib
+import html
 import http.server
 import json
 import socket
@@ -9412,11 +9413,9 @@ class PipelineExecutor:
             self.bot._pending_manual_reviews[review_id] = review_entry
 
             # Build Telegram notification message
-            escaped_step = self.bot._sanitize_markdown_v2(step.name)
-            escaped_title = self.bot._sanitize_markdown_v2(self.task.title)
             lines = [
-                f"🔍 *Revisão Manual — {escaped_step}*",
-                f"Pipeline: _{escaped_title}_",
+                f"🔍 *Revisão Manual — {step.name}*",
+                f"Pipeline: _{self.task.title}_",
                 "",
                 f"📄 Arquivo: `{content_path}`",
             ]
@@ -9445,7 +9444,7 @@ class PipelineExecutor:
             # Send content preview (truncated to fit Telegram message limit)
             preview = content[:3500]
             if len(content) > 3500:
-                preview += "\n\n_\\.\\.\\. \\(truncado — abra o arquivo ou editor web para ver completo\\)_"
+                preview += "\n\n_(truncado — abra o arquivo ou editor web para ver completo)_"
             try:
                 self.bot.send_message(
                     f"```\n{preview}\n```",
@@ -9469,7 +9468,7 @@ class PipelineExecutor:
                         hours = (step.manual_timeout or 86400) // 3600
                         self.bot.edit_message(
                             review_entry["message_id"],
-                            f"⏰ *Revisão Manual — {escaped_step}*\n\n"
+                            f"⏰ *Revisão Manual — {step.name}*\n\n"
                             f"_Timeout: sem resposta em {hours}h_",
                         )
                     except Exception:
@@ -9499,7 +9498,7 @@ class PipelineExecutor:
                     try:
                         self.bot.edit_message(
                             review_entry["message_id"],
-                            f"✅ *Revisão Manual — {escaped_step}*\n\n_Aprovado_",
+                            f"✅ *Revisão Manual — {step.name}*\n\n_Aprovado_",
                         )
                     except Exception:
                         pass
@@ -9516,7 +9515,7 @@ class PipelineExecutor:
                     try:
                         self.bot.edit_message(
                             review_entry["message_id"],
-                            f"❌ *Revisão Manual — {escaped_step}*\n\n_Cancelado pelo usuário_",
+                            f"❌ *Revisão Manual — {step.name}*\n\n_Cancelado pelo usuário_",
                         )
                     except Exception:
                         pass
@@ -9529,7 +9528,7 @@ class PipelineExecutor:
                     try:
                         self.bot.edit_message(
                             review_entry["message_id"],
-                            f"✏️ *Revisão Manual — {escaped_step}*\n\n_Re\\-executando com feedback\\.\\.\\._",
+                            f"✏️ *Revisão Manual — {step.name}*\n\n_Reexecutando com feedback..._",
                         )
                     except Exception:
                         pass
@@ -9553,17 +9552,16 @@ class PipelineExecutor:
                     content_path.write_text(new_output, encoding="utf-8")
                     with self._lock:
                         self._step_outputs[dep_step_id] = new_output
-                    escaped_dep = self.bot._sanitize_markdown_v2(dep_step.name)
                     self.bot.send_message(
-                        f"📝 Step _{escaped_dep}_ re\\-executado com feedback\\. Revise novamente:",
+                        f"📝 Step _{dep_step.name}_ reexecutado com feedback. Revise novamente:",
                         chat_id=self.ctx.chat_id,
                         thread_id=self.ctx.thread_id,
                     )
                 except Exception as exc:
                     logger.error("Manual step %s: re-run of dep %s failed: %s", step.id, dep_step_id, exc)
                     self.bot.send_message(
-                        f"⚠️ Erro ao re\\-executar com feedback: `{self.bot._sanitize_markdown_v2(str(exc))}`\n\n"
-                        "Você pode editar o arquivo diretamente e aprovar\\.",
+                        f"⚠️ Erro ao reexecutar com feedback: `{exc}`\n\n"
+                        "Você pode editar o arquivo diretamente e aprovar.",
                         chat_id=self.ctx.chat_id,
                         thread_id=self.ctx.thread_id,
                     )
@@ -10568,8 +10566,8 @@ class ClaudeTelegramBot:
 
         # Notify on Telegram
         self._send_to_all(
-            f"🔄 Retomando pipeline *{_md2_escape(name)}* "
-            f"\\({completed}/{total} steps completos\\)"
+            f"🔄 Retomando pipeline *{name}* "
+            f"({completed}/{total} steps completos)"
         )
         logger.info("Resuming pipeline %s: %d/%d steps completed", name, completed, total)
 
@@ -10618,7 +10616,7 @@ class ClaudeTelegramBot:
             effort=_effort_raw if _effort_raw in VALID_EFFORTS else None,
         )
 
-        self._send_to_all(f"🔄 Retomando rotina *{_md2_escape(name)}*\\.\\.\\.")
+        self._send_to_all(f"🔄 Retomando rotina *{name}*...")
         logger.info("Resuming routine %s", name)
         self._enqueue_routine(task)
 
@@ -10695,12 +10693,12 @@ class ClaudeTelegramBot:
                 if source.startswith("pipeline:"):
                     pname = source.split(":", 1)[1]
                     self.edit_message(msg_id,
-                                      f"⚠️ Pipeline *{pname}* interrompido — verificando retomada\\.\\.\\.",
+                                      f"⚠️ Pipeline *{pname}* interrompido — verificando retomada...",
                                       chat_id=chat_id)
                 elif source.startswith("routine:"):
                     rname = source.split(":", 1)[1]
                     self.edit_message(msg_id,
-                                      f"⚠️ Rotina *{rname}* interrompida — verificando retomada\\.\\.\\.",
+                                      f"⚠️ Rotina *{rname}* interrompida — verificando retomada...",
                                       chat_id=chat_id)
                 else:
                     cached = self._load_cached_response(msg_id)
@@ -10720,10 +10718,11 @@ class ClaudeTelegramBot:
         self._active_msgs.clear()
 
     def _send_to_all(self, text: str) -> None:
-        """Send a MarkdownV2 message to all authorized chats (for startup notifications)."""
+        """Send an HTML message to all authorized chats (for startup notifications)."""
+        html_text = self._markdown_to_html(text)
         for cid in self.authorized_ids:
             try:
-                self.tg_request("sendMessage", {"chat_id": cid, "text": text, "parse_mode": "MarkdownV2"})
+                self.tg_request("sendMessage", {"chat_id": cid, "text": html_text, "parse_mode": "HTML"})
             except Exception:
                 pass
 
@@ -10766,7 +10765,7 @@ class ClaudeTelegramBot:
                 logger.warning("Stuck message detected: msg_id=%s age=%.0fmin source=%s",
                               msg_id, age_minutes, source)
                 try:
-                    self.edit_message(msg_id, "⚠️ _Processamento interrompido \\(timeout\\)_",
+                    self.edit_message(msg_id, "⚠️ _Processamento interrompido (timeout)_",
                                       chat_id=chat_id)
                 except Exception:
                     pass
@@ -10996,9 +10995,8 @@ class ClaudeTelegramBot:
             if thread_id:
                 data["message_thread_id"] = thread_id
             if caption:
-                sanitized = self._sanitize_markdown_v2(caption)
-                data["caption"] = sanitized
-                data["parse_mode"] = "MarkdownV2"
+                data["caption"] = self._markdown_to_html(caption)
+                data["parse_mode"] = "HTML"
             if reply_to_message_id:
                 # sendDocument doesn't support reply_parameters as JSON string in multipart,
                 # but we can pass reply_to_message_id directly
@@ -11043,17 +11041,18 @@ class ClaudeTelegramBot:
         # Fallback: create a transient runner
         return ClaudeRunner()
 
-    def send_message(self, text: str, parse_mode: str = "MarkdownV2",
+    def send_message(self, text: str, parse_mode: str = "HTML",
                      reply_markup: Optional[Dict] = None,
                      chat_id: Optional[str] = None,
                      thread_id: Optional[str] = None,
                      reply_to_message_id: Optional[int] = None,
                      disable_notification: bool = False) -> Optional[int]:
         # Hermes #5: strip any leaked <memory-context>...</memory-context>
-        # block BEFORE Markdown sanitization so internal context tags never
-        # reach Telegram. Idempotent — no-op when no sentinel is present.
+        # block BEFORE formatting so internal context tags never reach Telegram.
         text = _strip_memory_context(text)
-        if parse_mode == "MarkdownV2":
+        if parse_mode == "HTML":
+            text = self._markdown_to_html(text)
+        elif parse_mode == "MarkdownV2":
             text = self._sanitize_markdown_v2(text)
         elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
@@ -11088,9 +11087,12 @@ class ClaudeTelegramBot:
             else:
                 if parse_mode:
                     data.pop("parse_mode", None)
-                    # Strip MDv2 escapes so the user doesn't see literal
-                    # backslashes when parse_mode is removed.
-                    data["text"] = self._unescape_mdv2(chunk)
+                    # Strip formatting so the user sees clean text instead of
+                    # raw HTML tags or MDv2 backslashes on parse failure.
+                    if parse_mode == "HTML":
+                        data["text"] = self._strip_html_tags(chunk)
+                    else:
+                        data["text"] = self._unescape_mdv2(chunk)
                     resp = self.tg_request("sendMessage", data)
                     if resp and resp.get("ok"):
                         last_msg_id = resp["result"]["message_id"]
@@ -11101,7 +11103,7 @@ class ClaudeTelegramBot:
         self._last_first_message_id = first_msg_id
         return last_msg_id
 
-    def edit_message(self, message_id: int, text: str, parse_mode: str = "MarkdownV2",
+    def edit_message(self, message_id: int, text: str, parse_mode: str = "HTML",
                      chat_id: Optional[str] = None,
                      reply_markup: Optional[Dict] = None) -> bool:
         # Hermes #5: scrub leaked memory-context fences from the streaming
@@ -11109,7 +11111,9 @@ class ClaudeTelegramBot:
         text = _strip_memory_context(text)
         if not text.strip():
             return False
-        if parse_mode == "MarkdownV2":
+        if parse_mode == "HTML":
+            text = self._markdown_to_html(text)
+        elif parse_mode == "MarkdownV2":
             text = self._sanitize_markdown_v2(text)
         elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
@@ -11123,12 +11127,13 @@ class ClaudeTelegramBot:
         resp = self._tg_edit(data)
         if resp:
             return True
-        # Retry without parse_mode (markdown may be invalid). Strip escape
-        # backslashes first — without parse_mode Telegram shows them literally,
-        # which makes the fallback look like garbage to the user.
+        # Retry without parse_mode — strip tags/escapes so user sees clean text.
         if parse_mode:
             data.pop("parse_mode", None)
-            data["text"] = self._unescape_mdv2(text)
+            if parse_mode == "HTML":
+                data["text"] = self._strip_html_tags(text)
+            else:
+                data["text"] = self._unescape_mdv2(text)
             resp = self._tg_edit(data)
             if resp:
                 return True
@@ -11194,6 +11199,96 @@ class ClaudeTelegramBot:
         self.tg_request("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 
     # -- Markdown sanitization --
+
+    # -----------------------------------------------------------------------
+    # HTML formatting (parse_mode="HTML") — default since v3.72.0
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _markdown_to_html(text: str) -> str:
+        """Convert Claude's markdown to Telegram HTML (parse_mode='HTML').
+
+        More reliable than MarkdownV2: only &, < and > need escaping in text.
+        Fallback path (strip_html_tags) gives clean readable text instead of
+        stray backslashes from MDv2 escaping.
+
+        Telegram HTML supports: <b>, <i>, <u>, <s>, <code>, <pre>,
+        <pre><code class="language-X">, <a href="URL">, <blockquote>.
+        """
+        # Tables first — _convert_md_tables wraps them in ``` blocks
+        text = ClaudeTelegramBot._convert_md_tables(text)
+        # Fix unbalanced fenced code blocks
+        if text.count("```") % 2 != 0:
+            text += "\n```"
+        parts = text.split("```")
+        result = []
+        for i, part in enumerate(parts):
+            if i % 2 == 1:
+                lines = part.split("\n", 1)
+                lang = lines[0].strip()
+                body = (lines[1] if len(lines) > 1 else "").rstrip("\n")
+                escaped = html.escape(body)
+                if lang:
+                    result.append(f'<pre><code class="language-{lang}">{escaped}</code></pre>')
+                else:
+                    result.append(f"<pre>{escaped}</pre>")
+            else:
+                result.append(ClaudeTelegramBot._md_prose_to_html(part))
+        return "".join(result)
+
+    @staticmethod
+    def _md_prose_to_html(text: str) -> str:
+        """Convert markdown prose (outside code fences) to Telegram HTML.
+
+        Splits on inline code spans first to protect their content, then
+        applies block/inline formatting to the remaining segments.
+        """
+        segments = re.split(r"(`[^`\n]+`)", text)
+        out = []
+        for seg in segments:
+            if seg.startswith("`") and seg.endswith("`") and len(seg) > 2:
+                out.append(f"<code>{html.escape(seg[1:-1])}</code>")
+            else:
+                out.append(ClaudeTelegramBot._md_text_to_html(seg))
+        return "".join(out)
+
+    @staticmethod
+    def _md_text_to_html(text: str) -> str:
+        """Apply markdown inline formatting to plain prose, HTML-escaping content.
+
+        Conventions:
+        - *text* and **text** both → <b> (matches Telegram MDv1/v2 where * is bold)
+        - _text_ → <i>
+        - ~~text~~ → <s>
+        - [text](url) → <a href>
+        - # Heading → <b>
+        - > blockquote → <blockquote>
+        """
+        text = html.escape(text)
+        # Headings → bold
+        text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+        # Bold+italic ***
+        text = re.sub(r"\*{3}(.+?)\*{3}", r"<b><i>\1</i></b>", text)
+        # Bold ** and single * (Telegram convention: * = bold)
+        text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+        text = re.sub(r"\*([^*\n]+?)\*", r"<b>\1</b>", text)
+        # Underline __
+        text = re.sub(r"__(.+?)__", r"<u>\1</u>", text)
+        # Italic _ (word-boundary aware to skip snake_case identifiers)
+        text = re.sub(r"(?<!\w)_([^_\n]+?)_(?!\w)", r"<i>\1</i>", text)
+        # Strikethrough ~~
+        text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
+        # Links (& already escaped to &amp; by html.escape — correct for href)
+        text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", r'<a href="\2">\1</a>', text)
+        # Blockquotes (> becomes &gt; after html.escape)
+        text = re.sub(r"^&gt;\s?(.*)", r"<blockquote>\1</blockquote>", text, flags=re.MULTILINE)
+        return text
+
+    @staticmethod
+    def _strip_html_tags(text: str) -> str:
+        """Strip HTML tags for the plain-text fallback; unescapes HTML entities."""
+        text = re.sub(r"<[^>]+>", "", text)
+        return html.unescape(text)
 
     # Characters that must be escaped in MarkdownV2 outside code/pre blocks
     _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~>#\+\-=|{}.!\\])')
@@ -11898,7 +11993,7 @@ class ClaudeTelegramBot:
         if not dest_name:
             self.send_message(
                 "❌ Use: `/clone <nome>`\n"
-                "_Clona a sessão atual mantendo o mesmo session\\_id do Claude — "
+                "_Clona a sessão atual mantendo o mesmo session_id do Claude — "
                 "permite testar prompts divergentes sem perder o contexto original._"
             )
             return
@@ -11941,7 +12036,7 @@ class ClaudeTelegramBot:
             with self._transcripts_lock:
                 self._transcripts.pop(s.name, None)
                 self._handoff_pending.pop(s.name, None)
-            self.send_message(f"🔄 Sessão `{s.name}` resetada (session\\_id removido).")
+            self.send_message(f"🔄 Sessão `{s.name}` resetada (session_id removido).")
         else:
             self.send_message("❌ Nenhuma sessão ativa.")
 
@@ -13334,9 +13429,9 @@ class ClaudeTelegramBot:
         }
         lines = [f"🧪 *Dry run: {task.title}*"]
         if no_reply_ids:
-            lines.append(f"_Simulando NO\\_REPLY em: {', '.join(sorted(no_reply_ids))}_")
+            lines.append(f"_Simulando NO_REPLY em: {', '.join(sorted(no_reply_ids))}_")
         else:
-            lines.append("_Nenhum step simulando NO\\_REPLY — todos rodariam_")
+            lines.append("_Nenhum step simulando NO_REPLY — todos rodariam_")
         lines.append("")
 
         for step in task.steps:
@@ -13356,7 +13451,7 @@ class ClaudeTelegramBot:
 
         lines.append("")
         lines.append(
-            f"_{run_count} rodariam · {skip_count} skipariam · {gate_count} simulando NO\\_REPLY_"
+            f"_{run_count} rodariam · {skip_count} skipariam · {gate_count} simulando NO_REPLY_"
         )
 
         if skip_count:
@@ -13489,13 +13584,13 @@ class ClaudeTelegramBot:
         msg_text = msg.get("text", "")
         if msg_id and msg_text:
             stamp = time.strftime("%H:%M")
-            footer = f"\n\n✅ Disparada por @{username} às {stamp}"
+            footer = f"\n\n✅ Disparada por @{html.escape(username)} às {stamp}"
             try:
                 self.tg_request("editMessageText", {
                     "chat_id": chat_id,
                     "message_id": msg_id,
-                    "text": self._sanitize_markdown_v2(msg_text + footer),
-                    "parse_mode": "MarkdownV2",
+                    "text": html.escape(msg_text) + footer,
+                    "parse_mode": "HTML",
                 })
             except Exception as exc:
                 logger.debug("Failed to edit action message footer: %s", exc)
@@ -13548,9 +13643,9 @@ class ClaudeTelegramBot:
         # Swap keyboard: remove the 3 original buttons, show only the
         # "Cancelar Edição" escape hatch. Append a footer line telling the
         # user what to do next.
-        footer = (f"\n\n_✏️ Modo edição ativo \\(por @{_md2_escape(username)}\\)_\n"
-                  f"_Envie sua próxima mensagem com o feedback desejado, "
-                  f"ou cancele a edição abaixo\\._")
+        footer = (f"\n\n<i>✏️ Modo edição ativo (por @{html.escape(username)})</i>\n"
+                  f"<i>Envie sua próxima mensagem com o feedback desejado, "
+                  f"ou cancele a edição abaixo.</i>")
         new_markup = {"inline_keyboard": [[
             {"text": "❌ Cancelar Edição", "callback_data": f"act:{cancel_edit_id}"},
         ]]}
@@ -13558,8 +13653,8 @@ class ClaudeTelegramBot:
             self.tg_request("editMessageText", {
                 "chat_id": chat_id,
                 "message_id": msg_id,
-                "text": self._sanitize_markdown_v2(msg_text) + footer,
-                "parse_mode": "MarkdownV2",
+                "text": html.escape(msg_text) + footer,
+                "parse_mode": "HTML",
                 "reply_markup": new_markup,
             })
         except Exception as exc:
@@ -13602,13 +13697,13 @@ class ClaudeTelegramBot:
 
         if msg_id and msg_text:
             stamp = time.strftime("%H:%M")
-            footer = f"\n\n❌ Cancelado por @{username} às {stamp}"
+            footer = f"\n\n❌ Cancelado por @{html.escape(username)} às {stamp}"
             try:
                 self.tg_request("editMessageText", {
                     "chat_id": chat.get("id"),
                     "message_id": msg_id,
-                    "text": self._sanitize_markdown_v2(msg_text + footer),
-                    "parse_mode": "MarkdownV2",
+                    "text": html.escape(msg_text) + footer,
+                    "parse_mode": "HTML",
                 })
             except Exception as exc:
                 logger.debug("Failed to edit cancelled message: %s", exc)
@@ -13670,8 +13765,8 @@ class ClaudeTelegramBot:
                 self.tg_request("editMessageText", {
                     "chat_id": chat.get("id"),
                     "message_id": msg_id,
-                    "text": self._sanitize_markdown_v2(original_text or "(preview expirado)"),
-                    "parse_mode": "MarkdownV2",
+                    "text": html.escape(original_text or "(preview expirado)"),
+                    "parse_mode": "HTML",
                 })
             except Exception:
                 pass
@@ -13689,8 +13784,8 @@ class ClaudeTelegramBot:
             self.tg_request("editMessageText", {
                 "chat_id": chat.get("id"),
                 "message_id": msg_id,
-                "text": self._sanitize_markdown_v2(original_text),
-                "parse_mode": "MarkdownV2",
+                "text": html.escape(original_text),
+                "parse_mode": "HTML",
                 "reply_markup": new_markup,
             })
         except Exception as exc:
@@ -13822,16 +13917,16 @@ class ClaudeTelegramBot:
         # message; the full text goes through to the pipeline.
         feedback_preview = feedback if len(feedback) <= 80 else feedback[:80].rstrip() + "…"
         edit_footer = (
-            f"\n\n_✏️ Editando \\(feedback de @{_md2_escape(self._user_handle())}\\):_\n"
-            f"_{_md2_escape(feedback_preview)}_"
+            f"\n\n<i>✏️ Editando (feedback de @{html.escape(self._user_handle())}):</i>\n"
+            f"<i>{html.escape(feedback_preview)}</i>"
         )
         if msg_id:
             try:
                 self.tg_request("editMessageText", {
                     "chat_id": chat_id,
                     "message_id": msg_id,
-                    "text": self._sanitize_markdown_v2(original_text) + edit_footer,
-                    "parse_mode": "MarkdownV2",
+                    "text": html.escape(original_text) + edit_footer,
+                    "parse_mode": "HTML",
                 })
             except Exception as exc:
                 logger.debug("Failed to edit preview msg on feedback capture: %s", exc)
@@ -13853,8 +13948,8 @@ class ClaudeTelegramBot:
         if not ok:
             try:
                 self.send_message(
-                    f"❌ Falha ao iniciar a edição: `{_md2_escape(message)}`\n"
-                    f"Use uma das opções da nova preview \\(quando o pipeline rodar de novo\\)."
+                    f"❌ Falha ao iniciar a edição: `{message}`\n"
+                    f"Use uma das opções da nova preview (quando o pipeline rodar de novo)."
                 )
             except Exception:
                 pass
@@ -14152,7 +14247,7 @@ class ClaudeTelegramBot:
                 for i, step in enumerate(steps, 1):
                     step_name = step.get("name") or step.get("id", f"step-{i}")
                     step_model = step.get("model", model)
-                    lines.append(f"  {i}\\. {step_name} `({step_model})`")
+                    lines.append(f"  {i}. {step_name} `({step_model})`")
             else:
                 lines.append("_Etapas não encontradas_")
         else:
@@ -14731,8 +14826,8 @@ class ClaudeTelegramBot:
             return None
         payload = {
             "chat_id": target_chat,
-            "text": self._sanitize_markdown_v2(text),
-            "parse_mode": "MarkdownV2",
+            "text": self._markdown_to_html(text),
+            "parse_mode": "HTML",
         }
         if target_thread is not None:
             payload["message_thread_id"] = target_thread
@@ -14820,8 +14915,8 @@ class ClaudeTelegramBot:
             return
         payload: Dict[str, Any] = {
             "chat_id": target_chat,
-            "text": self._sanitize_markdown_v2(text),
-            "parse_mode": "MarkdownV2",
+            "text": self._markdown_to_html(text),
+            "parse_mode": "HTML",
             "reply_markup": markup,
         }
         resp = self.tg_request("sendMessage", payload)
@@ -16525,7 +16620,7 @@ class ClaudeTelegramBot:
                 _rev_entry["feedback"] = text
                 _rev_entry["result"] = "edit"
                 _rev_entry["event"].set()
-                self.send_message("📝 Feedback recebido\\. Re\\-executando etapa anterior\\.\\.\\.")
+                self.send_message("📝 Feedback recebido. Reexecutando etapa anterior...")
                 return
 
         # Commands
@@ -16696,8 +16791,8 @@ class ClaudeTelegramBot:
                         self.tg_request("editMessageText", {
                             "chat_id": self._chat_id,
                             "message_id": msg_id,
-                            "text": self._sanitize_markdown_v2(msg_text),
-                            "parse_mode": "MarkdownV2",
+                            "text": html.escape(msg_text),
+                            "parse_mode": "HTML",
                             "reply_markup": new_markup,
                         })
                 else:
@@ -17046,11 +17141,11 @@ class ClaudeTelegramBot:
                 entry["awaiting_feedback"] = True
                 self.answer_callback(cb_id, "Envie seu feedback")
                 try:
-                    escaped_step = self._sanitize_markdown_v2(entry.get("step_name", "Revisão"))
+                    step_name = entry.get("step_name", "Revisão")
                     self.edit_message(
                         entry["message_id"],
-                        f"✏️ *Revisão Manual — {escaped_step}*\n\n"
-                        f"_Envie sua mensagem com o feedback/edições desejadas\\._",
+                        f"✏️ *Revisão Manual — {step_name}*\n\n"
+                        "_Envie sua mensagem com o feedback/edições desejadas._",
                     )
                 except Exception:
                     pass
@@ -17065,7 +17160,7 @@ class ClaudeTelegramBot:
         def _run() -> None:
             try:
                 if target == "claude-code":
-                    self.send_message("⏳ Atualizando Claude Code via Homebrew\\.\\.\\.")
+                    self.send_message("⏳ Atualizando Claude Code via Homebrew...")
                     result = subprocess.run(
                         ["/opt/homebrew/bin/brew", "upgrade", "--cask", "claude-code"],
                         capture_output=True, text=True, timeout=300,
@@ -17078,12 +17173,12 @@ class ClaudeTelegramBot:
                             capture_output=True, text=True, timeout=10,
                         )
                         new_ver = ver_result.stdout.strip() if ver_result.returncode == 0 else "?"
-                        self.send_message(f"✅ Claude Code atualizado\\! Versão: `{self._sanitize_markdown_v2(new_ver)}`")
+                        self.send_message(f"✅ Claude Code atualizado! Versão: `{new_ver}`")
                     else:
-                        safe = self._sanitize_markdown_v2(output[-500:] if len(output) > 500 else output)
-                        self.send_message(f"❌ Falha ao atualizar Claude Code:\n```\n{safe}\n```")
+                        snippet = output[-500:] if len(output) > 500 else output
+                        self.send_message(f"❌ Falha ao atualizar Claude Code:\n```\n{snippet}\n```")
                 elif target == "repo":
-                    self.send_message("⏳ Atualizando claude\\-bot repo\\.\\.\\.")
+                    self.send_message("⏳ Atualizando claude-bot repo...")
                     result = subprocess.run(
                         ["git", "pull", "origin", "main"],
                         capture_output=True, text=True, timeout=60,
@@ -17091,18 +17186,18 @@ class ClaudeTelegramBot:
                     )
                     output = (result.stdout or "") + (result.stderr or "")
                     if result.returncode == 0:
-                        safe = self._sanitize_markdown_v2(output.strip()[-500:])
-                        self.send_message(f"✅ Repo atualizado\\!\n```\n{safe}\n```\n\n⚠️ Reinicie o bot para aplicar as mudanças\\.")
+                        snippet = output.strip()[-500:]
+                        self.send_message(f"✅ Repo atualizado!\n```\n{snippet}\n```\n\n⚠️ Reinicie o bot para aplicar as mudanças.")
                     else:
-                        safe = self._sanitize_markdown_v2(output[-500:] if len(output) > 500 else output)
-                        self.send_message(f"❌ Falha ao atualizar repo:\n```\n{safe}\n```")
+                        snippet = output[-500:] if len(output) > 500 else output
+                        self.send_message(f"❌ Falha ao atualizar repo:\n```\n{snippet}\n```")
                 else:
-                    self.send_message(f"❌ Target de update desconhecido: `{self._sanitize_markdown_v2(target)}`")
+                    self.send_message(f"❌ Target de update desconhecido: `{target}`")
             except subprocess.TimeoutExpired:
-                self.send_message("❌ Timeout ao executar a atualização\\.")
+                self.send_message("❌ Timeout ao executar a atualização.")
             except Exception as exc:
                 logger.error("Update install failed for %s: %s", target, exc)
-                self.send_message(f"❌ Erro ao atualizar: `{self._sanitize_markdown_v2(str(exc))}`")
+                self.send_message(f"❌ Erro ao atualizar: `{exc}`")
 
         threading.Thread(target=_run, daemon=True, name=f"update-{target}").start()
 
