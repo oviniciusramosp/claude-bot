@@ -245,5 +245,147 @@ class SanitizeMarkdownV1(unittest.TestCase):
         self.assertEqual(self.sanitize(text), text)
 
 
+def _html_is_telegram_valid(html_txt: str) -> bool:
+    """Mirror Telegram's HTML constraints: tags balanced, properly nested, and
+    no identical tag nested inside itself (all 400 the real API)."""
+    import re
+    stack = []
+    for m in re.finditer(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9-]*)[^>]*>", html_txt):
+        name = m.group(2).lower()
+        if m.group(1) == "/":
+            if not stack or stack[-1] != name:
+                return False
+            stack.pop()
+        else:
+            if name in stack:
+                return False  # nested identical tag
+            stack.append(name)
+    return not stack
+
+
+class MarkdownToHtml(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+        cls.html = staticmethod(cls.bot.ClaudeTelegramBot._markdown_to_html)
+
+    def test_h2_becomes_bold(self):
+        self.assertEqual(self.html("## Resumo"), "<b>Resumo</b>")
+
+    def test_heading_does_not_leak_hashes(self):
+        for src in ("## Título", "### Sub", "#### Quatro", "  ## Indentado"):
+            self.assertNotIn("#", self.html(src), src)
+
+    def test_heading_with_bold_no_nested_tags(self):
+        # The classic 400-trigger: ## **X** used to make <b><b>X</b></b>.
+        out = self.html("### **Pontos Chave**")
+        self.assertEqual(out, "<b>Pontos Chave</b>")
+        self.assertTrue(_html_is_telegram_valid(out))
+
+    def test_atx_closed_heading(self):
+        self.assertEqual(self.html("## Título ##"), "<b>Título</b>")
+
+    def test_double_star_bold(self):
+        self.assertEqual(self.html("**negrito**"), "<b>negrito</b>")
+
+    def test_mixed_star_levels_stay_valid(self):
+        out = self.html("**bold com *enfase* dentro**")
+        self.assertTrue(_html_is_telegram_valid(out))
+
+    def test_inline_code_and_special_chars_escaped(self):
+        out = self.html("use `a < b && c > d`")
+        self.assertIn("<code>", out)
+        self.assertIn("&lt;", out)
+        self.assertIn("&amp;", out)
+
+    def test_raw_angle_brackets_are_escaped_not_tags(self):
+        # Model emitting literal HTML must be shown as text, never interpreted.
+        out = self.html("<script>alert(1)</script>")
+        self.assertNotIn("<script>", out)
+        self.assertIn("&lt;script&gt;", out)
+
+    def test_code_fence_to_pre(self):
+        out = self.html("```py\nprint(1)\n```")
+        self.assertIn('<pre><code class="language-py">', out)
+        self.assertTrue(_html_is_telegram_valid(out))
+
+    def test_links(self):
+        out = self.html("[site](https://x.com)")
+        self.assertIn('<a href="https://x.com">site</a>', out)
+
+    def test_realistic_message_is_valid(self):
+        src = ("## Análise\n\n**Resumo:** o `bot` está ok.\n\n"
+               "- Ponto A\n- Ponto B\n\n### Conclusão\n\nFim com *ênfase*.")
+        out = self.html(src)
+        self.assertTrue(_html_is_telegram_valid(out))
+        self.assertNotIn("##", out)
+        self.assertNotIn("**", out)
+
+
+class SanitizeTelegramHtml(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+        cls.san = staticmethod(cls.bot.ClaudeTelegramBot._sanitize_telegram_html)
+
+    def test_collapses_nested_same_tag(self):
+        self.assertEqual(self.san("<b><b>x</b></b>"), "<b>x</b>")
+
+    def test_closes_unclosed_tag(self):
+        out = self.san("<b>unterminated")
+        self.assertEqual(out, "<b>unterminated</b>")
+        self.assertTrue(_html_is_telegram_valid(out))
+
+    def test_drops_stray_close(self):
+        self.assertEqual(self.san("plain</b> text"), "plain text")
+
+    def test_drops_unsupported_tag(self):
+        self.assertEqual(self.san("<div>x</div>"), "x")
+
+    def test_keeps_link_attributes(self):
+        text = '<a href="https://x.com">y</a>'
+        self.assertEqual(self.san(text), text)
+
+    def test_idempotent_on_valid(self):
+        text = "<b>a</b> and <i>b</i>"
+        self.assertEqual(self.san(text), text)
+
+    def test_nested_different_tags_preserved(self):
+        text = "<b>bold <i>italic</i></b>"
+        self.assertEqual(self.san(text), text)
+
+
+class RebalanceHtmlChunks(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+        cls.reb = staticmethod(cls.bot.ClaudeTelegramBot._rebalance_html_chunks)
+
+    def test_reopens_tag_across_split(self):
+        # Simulate a split that cut between <b> and </b>.
+        chunks = ["start <b>bold text", "more bold</b> end"]
+        out = self.reb(chunks)
+        self.assertTrue(all(_html_is_telegram_valid(c) for c in out))
+        self.assertTrue(out[0].endswith("</b>"))
+        self.assertTrue(out[1].startswith("<b>"))
+
+    def test_valid_chunks_unchanged_count(self):
+        chunks = ["<b>one</b>", "<i>two</i>"]
+        out = self.reb(chunks)
+        self.assertEqual(len(out), 2)
+        self.assertTrue(all(_html_is_telegram_valid(c) for c in out))
+
+    def test_long_bold_split_stays_valid(self):
+        bot = self.bot
+        # One bold span far larger than MAX_MESSAGE_LENGTH so the split lands
+        # inside it, cutting between <b> and </b>.
+        reps = (bot.MAX_MESSAGE_LENGTH // 5) + 500
+        big = bot.ClaudeTelegramBot._markdown_to_html("**" + ("word " * reps) + "**")
+        chunks = bot.ClaudeTelegramBot._split_message(big)
+        out = self.reb(chunks)
+        self.assertGreater(len(out), 1)
+        self.assertTrue(all(_html_is_telegram_valid(c) for c in out))
+
+
 if __name__ == "__main__":
     unittest.main()

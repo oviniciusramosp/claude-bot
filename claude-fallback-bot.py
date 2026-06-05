@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.72.0"  # feat: switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.72.1"  # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import hmac
 import hashlib
@@ -11057,6 +11057,9 @@ class ClaudeTelegramBot:
         elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
         chunks = self._split_message(text)
+        if parse_mode == "HTML":
+            # The split is tag-unaware; rebalance so no chunk ends mid-<b>/<i>/…
+            chunks = self._rebalance_html_chunks(chunks)
         last_msg_id = None
         first_msg_id: Optional[int] = None
         if chat_id is None:
@@ -11118,6 +11121,11 @@ class ClaudeTelegramBot:
         elif parse_mode == "Markdown":
             text = self._sanitize_markdown(text)
         text = text[:MAX_MESSAGE_LENGTH]
+        if parse_mode == "HTML":
+            # Truncation may have cut inside or after an open tag — drop any
+            # partial trailing tag, then re-close whatever was left open.
+            text = re.sub(r"<[^>]*$", "", text)
+            text = self._sanitize_telegram_html(text)
         chat_id = chat_id or self._chat_id
         data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "text": text}
         if parse_mode:
@@ -11234,7 +11242,11 @@ class ClaudeTelegramBot:
                     result.append(f"<pre>{escaped}</pre>")
             else:
                 result.append(ClaudeTelegramBot._md_prose_to_html(part))
-        return "".join(result)
+        # Final safety net: guarantee the output is valid Telegram HTML
+        # (collapse nested same-tags, close unclosed, drop stray/unsupported).
+        # Without this, malformed HTML 400s and the whole message falls back to
+        # unformatted plain text.
+        return ClaudeTelegramBot._sanitize_telegram_html("".join(result))
 
     @staticmethod
     def _md_prose_to_html(text: str) -> str:
@@ -11265,8 +11277,17 @@ class ClaudeTelegramBot:
         - > blockquote → <blockquote>
         """
         text = html.escape(text)
-        # Headings → bold
-        text = re.sub(r"^#{1,6}\s+(.+)$", r"<b>\1</b>", text, flags=re.MULTILINE)
+        # Headings → bold. Allow leading whitespace (so an indented "  ## X"
+        # doesn't leak the ##) and strip inline * emphasis from the heading text
+        # — the whole line becomes bold, so leaving the markers in would produce
+        # invalid nested <b><b>…</b></b> (which Telegram rejects). The trailing
+        # ##/spaces of an ATX-closed heading are trimmed too.
+        def _heading_to_bold(m: "re.Match") -> str:
+            inner = m.group(1).strip().rstrip("#").strip()
+            inner = inner.replace("*", "")
+            return f"<b>{inner}</b>" if inner else ""
+        text = re.sub(r"^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$", _heading_to_bold,
+                      text, flags=re.MULTILINE)
         # Bold+italic ***
         text = re.sub(r"\*{3}(.+?)\*{3}", r"<b><i>\1</i></b>", text)
         # Bold ** and single * (Telegram convention: * = bold)
@@ -11289,6 +11310,94 @@ class ClaudeTelegramBot:
         """Strip HTML tags for the plain-text fallback; unescapes HTML entities."""
         text = re.sub(r"<[^>]+>", "", text)
         return html.unescape(text)
+
+    # Tags Telegram's HTML parser accepts. Anything else is dropped so a stray
+    # tag from the model (e.g. <div>, <h2>) can't 400 the whole message.
+    _TG_HTML_TAGS = {
+        "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
+        "code", "pre", "a", "blockquote", "tg-spoiler", "span",
+    }
+    _TG_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>")
+
+    @staticmethod
+    def _sanitize_telegram_html(text: str) -> str:
+        """Guarantee valid Telegram HTML from our converter's output.
+
+        Telegram's parser 400s on: nested identical tags (``<b><b>x</b></b>``,
+        which `## **X**` used to produce), unclosed tags, stray closing tags, and
+        unsupported tags. This single pass fixes all four so a malformed snippet
+        never forces the whole message back to unformatted plain text:
+
+        - unsupported tags are dropped,
+        - a tag opened while already open is collapsed (open/close skipped),
+        - tags left open at the end are closed (in reverse order),
+        - closing tags with no matching open are dropped.
+        """
+        out: List[str] = []
+        stack: List[tuple] = []   # (name, literal_open) still open, in order
+        depth: Dict[str, int] = {}
+        pos = 0
+        for m in ClaudeTelegramBot._TG_TAG_RE.finditer(text):
+            out.append(text[pos:m.start()])   # text before the tag (already escaped)
+            pos = m.end()
+            closing = m.group(1) == "/"
+            name = m.group(2).lower()
+            if name not in ClaudeTelegramBot._TG_HTML_TAGS:
+                continue                      # drop unsupported tag entirely
+            if not closing:
+                if depth.get(name, 0) > 0:
+                    depth[name] += 1          # redundant nested open — skip emit
+                    continue
+                depth[name] = 1
+                stack.append((name, m.group(0)))
+                out.append(m.group(0))
+            else:
+                d = depth.get(name, 0)
+                if d == 0:
+                    continue                  # stray close — drop
+                if d > 1:
+                    depth[name] = d - 1       # closing a collapsed open — skip emit
+                    continue
+                depth[name] = 0
+                for i in range(len(stack) - 1, -1, -1):
+                    if stack[i][0] == name:
+                        stack.pop(i)
+                        break
+                out.append(m.group(0))
+        out.append(text[pos:])
+        for name, _literal in reversed(stack):
+            out.append(f"</{name}>")
+        return "".join(out)
+
+    @staticmethod
+    def _rebalance_html_chunks(chunks: List[str]) -> List[str]:
+        """Make each chunk independently valid after a tag-unaware split.
+
+        ``_split_message`` can cut between ``<b>`` and ``</b>`` on a long reply,
+        leaving one chunk with an unclosed tag (Telegram: "Can't find end of Bold
+        entity"). This closes any tag left open at a chunk's end and re-opens it
+        at the start of the next chunk, preserving formatting across the split.
+        """
+        out: List[str] = []
+        carry: List[str] = []    # literal opening tags to reopen on the next chunk
+        for chunk in chunks:
+            body = "".join(carry) + chunk
+            stack: List[tuple] = []
+            for m in ClaudeTelegramBot._TG_TAG_RE.finditer(body):
+                name = m.group(2).lower()
+                if name not in ClaudeTelegramBot._TG_HTML_TAGS:
+                    continue
+                if m.group(1) == "/":
+                    for i in range(len(stack) - 1, -1, -1):
+                        if stack[i][0] == name:
+                            stack.pop(i)
+                            break
+                else:
+                    stack.append((name, m.group(0)))
+            suffix = "".join(f"</{n}>" for n, _ in reversed(stack))
+            out.append(body + suffix)
+            carry = [lit for _n, lit in stack]
+        return out or [""]
 
     # Characters that must be escaped in MarkdownV2 outside code/pre blocks
     _MDV2_ESCAPE_RE = re.compile(r'([_*\[\]()~>#\+\-=|{}.!\\])')
