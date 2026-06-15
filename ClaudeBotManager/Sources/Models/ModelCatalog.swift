@@ -17,6 +17,7 @@ enum ModelCatalog {
         ModelOption(id: "glm-4.5-air",  label: "GLM 4.5 Air", provider: "zai",       description: "z.AI fast and lightweight"),
         ModelOption(id: "gpt-5",        label: "GPT-5",       provider: "openai",    description: "OpenAI general — ChatGPT Plus/Pro"),
         ModelOption(id: "gpt-5-codex",  label: "GPT-5 Codex", provider: "openai",    description: "OpenAI coding-tuned — requires API key (not ChatGPT OAuth)"),
+        ModelOption(id: "gpt-5.5",      label: "GPT-5.5",     provider: "openai",    description: "OpenAI latest — ChatGPT Plus/Pro default"),
     ]
 
     static func label(for id: String) -> String {
