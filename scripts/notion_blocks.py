@@ -15,6 +15,7 @@ Markup handled:
     [paragraph] text     → paragraph block (also default for unmarked lines)
     [divider]            → divider block
     [quote] text         → quote block
+    [video] url          → video block (YouTube or other external video URL)
     **text**             → bold annotation
     _text_               → italic annotation
     [verde]text[/verde]  → green color annotation
@@ -108,6 +109,15 @@ def content_to_blocks(content):
 
         if line == "[divider]":
             blocks.append({"object": "block", "type": "divider", "divider": {}})
+            continue
+
+        if line.startswith("[video]"):
+            url = line[len("[video]"):].strip()
+            blocks.append({
+                "object": "block",
+                "type": "video",
+                "video": {"type": "external", "external": {"url": url}},
+            })
             continue
 
         block_type = "paragraph"
