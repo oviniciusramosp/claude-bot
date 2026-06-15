@@ -27,6 +27,19 @@ class HandleEvent(unittest.TestCase):
         self.runner._handle_event({"type": "system", "session_id": "abc-123"})
         self.assertEqual(self.runner.captured_session_id, "abc-123")
 
+    def test_init_event_captures_fast_mode_state(self):
+        self.runner._handle_event({
+            "type": "system", "subtype": "init",
+            "model": "claude-opus-4-8", "fast_mode_state": "on",
+        })
+        self.assertEqual(self.runner.captured_fast_mode, "on")
+
+    def test_init_event_without_fast_mode_leaves_none(self):
+        self.runner._handle_event({
+            "type": "system", "subtype": "init", "model": "claude-sonnet-4-6",
+        })
+        self.assertIsNone(self.runner.captured_fast_mode)
+
     def test_assistant_text_block_accumulates(self):
         self.runner._handle_event({
             "type": "assistant",
@@ -268,6 +281,55 @@ class AgentIdInjection(unittest.TestCase):
         self.assertNotIn("AGENT_THREAD_ID", env)
 
 
+class FastModeFlag(unittest.TestCase):
+    """ClaudeRunner.run() must add `--settings '{"fastMode": true}'` only when
+    fast_mode is on AND the resolved model is a native Anthropic Opus."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def _mock_popen(self, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.stdout = iter([])
+        mock_proc.stderr = MagicMock(read=MagicMock(return_value=""))
+        mock_proc.wait.return_value = 0
+        mock_proc.poll.return_value = 0
+        mock_proc.stdin = MagicMock()
+        mock_popen.return_value = mock_proc
+
+    def _get_cmd(self, mock_popen):
+        return mock_popen.call_args.args[0] if mock_popen.call_args.args \
+            else mock_popen.call_args.kwargs.get("args")
+
+    def _has_fast_settings(self, cmd):
+        for i, arg in enumerate(cmd):
+            if arg == "--settings" and i + 1 < len(cmd) and "fastMode" in cmd[i + 1]:
+                return True
+        return False
+
+    @patch("subprocess.Popen")
+    def test_fast_mode_on_opus_adds_settings(self, mock_popen):
+        self._mock_popen(mock_popen)
+        runner = self.bot.ClaudeRunner()
+        runner.run(prompt="hi", model="opus", fast_mode=True)
+        self.assertTrue(self._has_fast_settings(self._get_cmd(mock_popen)))
+
+    @patch("subprocess.Popen")
+    def test_fast_mode_off_opus_no_settings(self, mock_popen):
+        self._mock_popen(mock_popen)
+        runner = self.bot.ClaudeRunner()
+        runner.run(prompt="hi", model="opus", fast_mode=False)
+        self.assertFalse(self._has_fast_settings(self._get_cmd(mock_popen)))
+
+    @patch("subprocess.Popen")
+    def test_fast_mode_ignored_for_sonnet(self, mock_popen):
+        self._mock_popen(mock_popen)
+        runner = self.bot.ClaudeRunner()
+        runner.run(prompt="hi", model="sonnet", fast_mode=True)
+        self.assertFalse(self._has_fast_settings(self._get_cmd(mock_popen)))
+
+
 class GetSnapshot(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -465,6 +527,11 @@ class MaxEffortAndContext(unittest.TestCase):
         self.assertEqual(self.bot.resolve_max_context_model("opus"), "opus[1m]")
         self.assertEqual(self.bot.resolve_max_context_model("claude-opus-4-8"),
                          "claude-opus-4-8[1m]")
+
+    def test_resolve_max_context_model_skips_haiku(self):
+        # haiku has no [1m] variant; CLI v2.1.153+ hangs instead of rejecting it
+        self.assertEqual(self.bot.resolve_max_context_model("haiku"), "haiku")
+        self.assertEqual(self.bot.resolve_max_context_model("claude-haiku-4-5"), "claude-haiku-4-5")
 
     def test_resolve_max_context_model_skips_glm_and_gpt(self):
         self.assertEqual(self.bot.resolve_max_context_model("glm-4.7"), "glm-4.7")

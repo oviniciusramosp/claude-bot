@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.73.0"  # feat: expose gpt-5.5 in the macOS model catalog (ModelCatalog.swift) and lock it into the MODEL_PROVIDERS contract test — runtime support (MODEL_PROVIDERS, CodexRunner default, OAuth allowed prefixes) already shipped; this catches the app picker + test up to it. # fix: exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting the unknown suffix, causing turns on haiku to time out. resolve_max_context_model() now skips any model whose name contains "haiku". # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.74.0"  # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import hmac
 import hashlib
@@ -758,7 +758,8 @@ def _agent_icon(agent_id: Optional[str], default: str = "🤖") -> str:
 
 
 def _build_signature(session, effective_model: Optional[str] = None,
-                     resolved_model: Optional[str] = None) -> str:
+                     resolved_model: Optional[str] = None,
+                     fast_mode_state: Optional[str] = None) -> str:
     """Build italic response signature: '\\n\\n_🤖 Agent Name · model-id_'.
 
     The leading emoji is the agent's own icon (from its hub frontmatter), so a
@@ -772,6 +773,9 @@ def _build_signature(session, effective_model: Optional[str] = None,
     so the signature auto-tracks model upgrades instead of a hardcoded map. It
     is ignored for z.AI (the proxy makes the CLI report a sonnet alias, not the
     real GLM name) — those fall back to MODEL_FULL_IDS.
+
+    ``fast_mode_state`` is the value the CLI reported in the init event. When it
+    is ``"on"`` a ``⚡`` is appended so the user can confirm fast mode engaged.
     """
     agent_label = _agent_display_name(session.agent or MAIN_AGENT_ID)
     icon = _agent_icon(session.agent)
@@ -780,7 +784,8 @@ def _build_signature(session, effective_model: Optional[str] = None,
         model_id = resolved_model
     else:
         model_id = MODEL_FULL_IDS.get(raw_model, raw_model)
-    return f"\n\n_{icon} {agent_label} · {model_id}_"
+    fast_tag = " ⚡" if fast_mode_state == "on" else ""
+    return f"\n\n_{icon} {agent_label} · {model_id}{fast_tag}_"
 
 
 def model_provider(model: str) -> str:
@@ -1343,6 +1348,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/glm` — Usar GLM 4.7 (z.AI, requer `ZAI_API_KEY`)
 • `/gpt` — Usar GPT-5 (OpenAI, requer `codex login` com ChatGPT Plus/Pro)
 • `/model` — Escolher modelo (teclado)
+• `/fast [on|off|status]` — Fast mode do Opus (saída mais rápida, consome créditos de uso)
 • `/restart-agent` — Restaurar modelo preferido após fallback por rate limit
 
 🔧 *Controle*
@@ -5423,6 +5429,13 @@ class Session:
     # the proactive vault context injection. Default True; users can disable
     # with /active-memory off when they want zero auto-injection.
     active_memory: bool = True
+    # Fast mode — per-session toggle for Claude Code's `/fast` (Opus with faster
+    # output). Default False: fast mode draws on pay-as-you-go usage credits
+    # ($50/MTok output on Opus 4.8) even on subscription auth, so it must be an
+    # explicit opt-in. Only takes effect when the session is on an Opus model;
+    # inert on Sonnet/Haiku/GLM/GPT. Toggle with /fast on|off. Enforced in
+    # ClaudeRunner.run() (passes `--settings '{"fastMode": true}'`).
+    fast_mode: bool = False
     # Idle hygiene — tracks last interactive turn completion (epoch seconds).
     # Used by the idle-session watchdog to proactively compact/clear stale context.
     # Defaults to creation time so old sessions.json without this field are
@@ -6220,6 +6233,9 @@ class ClaudeRunner:
         # True when this run appended the [1m] max-context variant — lets run()
         # retry once on the base context if the API rejects 1M for this account.
         self.context_1m_applied: bool = False
+        # Fast-mode state the CLI reported in the init event ("on"/"off"/None).
+        # Lets the signature confirm fast mode actually engaged this run.
+        self.captured_fast_mode: Optional[str] = None
         self.error_text: str = ""
         self.stderr_text: str = ""
         self.exit_code: Optional[int] = None
@@ -6238,6 +6254,7 @@ class ClaudeRunner:
         lightweight: bool = False,  # unused, kept for API compat
         agent_id: Optional[str] = None,
         restricted: bool = False,
+        fast_mode: bool = False,
     ) -> None:
         global CLAUDE_PATH
         if not os.path.isfile(CLAUDE_PATH):
@@ -6256,12 +6273,27 @@ class ClaudeRunner:
         self.context_1m_applied = model_arg != concrete  # [1m] suffix was added
         enhanced_model = model_arg != model              # override and/or [1m]
 
+        # Fast mode (Claude Code's `/fast`) only exists for native Anthropic Opus
+        # models (4.6/4.7/4.8). Gate strictly so the costly `--settings fastMode`
+        # is never sent for Sonnet/Haiku/GLM/GPT — and never in restricted
+        # (secondary-chat) runs, where it would (a) double up the --settings flag
+        # and (b) let a friend's chat burn the owner's usage credits.
+        fast_enabled = bool(
+            fast_mode
+            and provider == "anthropic"
+            and "opus" in (concrete or "").lower()
+        )
+
         cmd = [CLAUDE_PATH, "--print"]
         if restricted and agent_id:
             settings_path = _ensure_agent_settings(agent_id)
             cmd += ["--permission-mode", "dontAsk", "--settings", str(settings_path)]
         else:
             cmd += ["--dangerously-skip-permissions"]
+            if fast_enabled:
+                # subprocess passes args without a shell, so the inline JSON
+                # reaches the CLI intact (no quoting needed).
+                cmd += ["--settings", '{"fastMode": true}']
         cmd += [
             "--model", model_arg,
             "--output-format", "stream-json",
@@ -6277,6 +6309,8 @@ class ClaudeRunner:
             cmd += ["--append-system-prompt", system_prompt]
         cmd += ["-p", prompt]
 
+        if fast_enabled:
+            logger.info("Fast mode ON for model %s", model_arg)
         logger.info("Running: %s", " ".join(cmd[:6]) + " ...")
         self.running = True
         self.start_time = time.time()
@@ -6289,6 +6323,7 @@ class ClaudeRunner:
         self.total_cost_usd = 0.0
         self.captured_session_id = None
         self.captured_model = None
+        self.captured_fast_mode = None
         self.error_text = ""
         self.stderr_text = ""
         self.exit_code = None
@@ -6519,6 +6554,12 @@ class ClaudeRunner:
             if mdl:
                 with self._lock:
                     self.captured_model = mdl
+            # The init event also reports whether fast mode is active this run
+            # ("on"/"off"). Capture it so the signature can confirm it engaged.
+            fms = obj.get("fast_mode_state")
+            if fms:
+                with self._lock:
+                    self.captured_fast_mode = fms
         elif etype == "error":
             # Capture API-level errors from Claude CLI stream (e.g. overloaded, rate limit)
             err = obj.get("error", {})
@@ -6756,6 +6797,7 @@ class CodexRunner:
         lightweight: bool = False,  # unused, kept for API compat
         agent_id: Optional[str] = None,
         restricted: bool = False,
+        fast_mode: bool = False,  # unused (Codex/GPT has no fast mode), kept for API compat
     ) -> None:
         if restricted:
             logger.warning(
@@ -11725,6 +11767,9 @@ class ClaudeTelegramBot:
             idle_secs = time.time() - s.last_activity
             idle_display = f"{idle_secs / 3600:.1f}h" if idle_secs >= 3600 else f"{idle_secs / 60:.0f}m"
             lines.append(f"• Idle: {idle_display} (compact >{IDLE_COMPACT_HOURS}h, clear >{IDLE_CLEAR_HOURS}h)")
+            if getattr(s, "fast_mode", False):
+                _is_opus = model_provider(s.model) == "anthropic" and "opus" in (s.model or "").lower()
+                lines.append(f"• Fast mode: ⚡ On{'' if _is_opus else ' (inativo — só vale p/ Opus)'}")
         else:
             lines.append("• Nenhuma sessão ativa")
         lines.append(f"• Inactivity timeout: {self.timeout_seconds}s")
@@ -11957,6 +12002,51 @@ class ClaudeTelegramBot:
             f"_Padrão global: {global_default}. "
             f"Injeta contexto relevante do vault antes de cada resposta._"
         )
+
+    def cmd_fast(self, arg: str = "") -> None:
+        """Toggle Claude Code's Fast mode (Opus, faster output) for this session.
+
+        Usage:
+          /fast            → show status
+          /fast status     → show status
+          /fast on         → enable for current session
+          /fast off        → disable for current session
+
+        Fast mode only affects native Anthropic *Opus* models — it is inert on
+        Sonnet/Haiku/GLM/GPT. It draws on pay-as-you-go usage credits even on
+        subscription auth, so it ships off by default.
+        """
+        session = self._get_session()
+        if not session:
+            self.send_message("❌ Nenhuma sessão ativa.")
+            return
+        model = session.model or ""
+        is_opus = model_provider(model) == "anthropic" and "opus" in model.lower()
+        arg_norm = (arg or "").strip().lower()
+        if arg_norm in ("on", "1", "sim"):
+            session.fast_mode = True
+            self.sessions.save()
+            state = "✅ ativado"
+        elif arg_norm in ("off", "0", "nao", "não"):
+            session.fast_mode = False
+            self.sessions.save()
+            state = "❌ desativado"
+        elif arg_norm in ("", "status"):
+            state = "✅ ativado" if session.fast_mode else "❌ desativado"
+        else:
+            self.send_message("❌ Uso: `/fast [on|off|status]`")
+            return
+        msg = (
+            f"⚡ *Fast mode*: {state} para sessão `{session.name}`\n"
+            f"_Opus com saída mais rápida. Consome créditos de uso "
+            f"(claude.ai/settings/usage) mesmo na assinatura._"
+        )
+        if session.fast_mode and not is_opus:
+            msg += (
+                f"\n\n⚠️ Modelo atual é `{model}` — fast mode só vale para Opus. "
+                f"Use `/opus` para que tenha efeito."
+            )
+        self.send_message(msg)
 
     def cmd_voice(self, arg: str = "") -> None:
         """Toggle TTS voice responses on/off."""
@@ -15893,6 +15983,7 @@ class ClaudeTelegramBot:
                 "system_prompt": effective_sp,
                 "agent_id": session.agent or MAIN_AGENT_ID,
                 "restricted": restricted,
+                "fast_mode": getattr(session, "fast_mode", False),
             },
             daemon=True,
         )
@@ -16370,7 +16461,8 @@ class ClaudeTelegramBot:
 
         if SHOW_SIGNATURE and not routine_mode and not suppress_text and (runner.result_text or runner.accumulated_text):
             final_text += _build_signature(session, effective_model=effective_model,
-                                            resolved_model=getattr(runner, "captured_model", None))
+                                            resolved_model=getattr(runner, "captured_model", None),
+                                            fast_mode_state=getattr(runner, "captured_fast_mode", None))
 
         # Build copy-code button if response has a single dominant code block
         copy_markup = None
@@ -16798,6 +16890,7 @@ class ClaudeTelegramBot:
                 "/audio": lambda: self.cmd_audio(),
                 "/voice": lambda: self.cmd_voice(arg),
                 "/active-memory": lambda: self.cmd_active_memory(arg),
+                "/fast": lambda: self.cmd_fast(arg),
                 "/signature": lambda: self.cmd_signature(arg),
             }
 

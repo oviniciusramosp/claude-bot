@@ -131,6 +131,29 @@ class CommandDispatch(unittest.TestCase):
         self.bot._handle_text("/opus")
         self.assertEqual(self.bot._get_session().model, "opus")
 
+    def test_fast_command_enables_for_session(self):
+        self.bot._handle_text("/opus")
+        self.bot._handle_text("/fast on")
+        self.assertTrue(self.bot._get_session().fast_mode)
+        self.assertIn("ativado", self._last_send()["text"])
+
+    def test_fast_command_disables_for_session(self):
+        self.bot._handle_text("/fast on")
+        self.bot._handle_text("/fast off")
+        self.assertFalse(self.bot._get_session().fast_mode)
+
+    def test_fast_status_default_off(self):
+        self.bot._get_session()
+        self.bot._handle_text("/fast")
+        self.assertIn("desativado", self._last_send()["text"])
+
+    def test_fast_on_non_opus_warns(self):
+        self.bot._handle_text("/sonnet")
+        self.bot._handle_text("/fast on")
+        # Toggle persists, but the reply warns it only takes effect on Opus.
+        self.assertTrue(self.bot._get_session().fast_mode)
+        self.assertIn("Opus", self._last_send()["text"])
+
     def test_new_command_creates_session(self):
         before = len(self.bot.sessions.sessions)
         self.bot._handle_text("/new myseason")
