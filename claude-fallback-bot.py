@@ -674,7 +674,7 @@ MODEL_FULL_IDS: dict = {
     "gpt-5-codex": "gpt-5-codex",
     "gpt-5.5":     "gpt-5.5",
 }
-DEFAULT_MODEL = "sonnet"
+DEFAULT_MODEL = "opus"
 
 # --- Maximum effort + maximum context (v3.70) -------------------------------
 # The bot runs Anthropic models at maximum reasoning effort and the 1M-token
@@ -708,10 +708,10 @@ _MAX_CONTEXT_RUNTIME_OFF = False
 
 # Model fallback chain — when a model fails after retries, try the next model.
 # Configurable via MODEL_FALLBACK_CHAIN env var (comma-separated model IDs).
-DEFAULT_FALLBACK_CHAIN = ["opus", "glm-5.1", "sonnet", "glm-4.7", "haiku"]
+DEFAULT_FALLBACK_CHAIN = ["opus", "sonnet", "glm-4.7", "haiku"]
 MODEL_FALLBACK_CHAIN: List[str] = [
     m.strip() for m in
-    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,glm-5.1,sonnet,glm-4.7,haiku").split(",")
+    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,sonnet,glm-4.7,haiku").split(",")
     if m.strip()
 ]
 
