@@ -63,6 +63,11 @@ vault/main/.workspace/
 vault/main/Journal/.activity/
 vault/main/Routines/.history/
 
+# Personal "in case I die" legacy plan — survivor-facing pointers to sensitive
+# info (account locations, password-manager access, wishes). NEVER committed.
+# The blank scaffold ships from templates/legacy/; the filled instance is local.
+vault/main/Legacy/
+
 # Claude Code local settings (user-specific paths)
 .claude/settings.local.json
 # Claude Code implementation plans (user-local, may contain hardcoded paths)
