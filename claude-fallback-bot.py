@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.74.0"  # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.75.0"  # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import hmac
 import hashlib
@@ -1387,6 +1387,10 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/onboard <chat_id> <nome>` — Vincular chat secundário a um agente default (cria se não existir). Prefira `/discovery`.
 • `/onboard <chat_id>:<thread> <nome>` — Vincular um topic específico a um agente diferente do default
 • `/onboard list` — Listar chats secundários vinculados (com topics expandidos)
+
+🕊️ *Legado*
+• `/morri` — Aciona o plano que deixei para quem ficar: acolhe e guia com calma. Use só quando for real.
+• `/morri teste` — Revisar meu plano de legado e achar lacunas (uso meu, em vida).
 
 ⚡ *Skills*
 • `/skill` — Gerenciar skills (listar, editar)
@@ -13105,6 +13109,80 @@ class ClaudeTelegramBot:
         )
         self._run_claude_prompt(prompt)
 
+    def cmd_morri(self, arg: str = "") -> None:
+        """Activate the legacy ("in case I die") plan and guide whoever is left.
+
+        Personal to the operator — blocked in secondary (friends') chats. On a
+        real trigger it first sends a static, AI-independent message (so the
+        essentials reach a grieving reader even if the LLM is unreachable),
+        then spawns Claude to guide them through the plan with care.
+        `/morri teste` runs a review/gap-finding pass for the operator instead.
+        """
+        if self._block_if_secondary("/morri"):
+            return
+
+        legacy_dir = VAULT_DIR / MAIN_AGENT_ID / "Legacy"
+        template_dir = VAULT_DIR.parent / "templates" / "legacy"
+
+        # First use: scaffold the plan from the shipped blank templates.
+        if not legacy_dir.is_dir() or not any(legacy_dir.glob("*.md")):
+            try:
+                if template_dir.is_dir():
+                    shutil.copytree(template_dir, legacy_dir, dirs_exist_ok=True)
+                    logger.info("Scaffolded legacy plan at %s", legacy_dir)
+            except Exception as e:
+                logger.error("Failed to scaffold legacy plan: %s", e)
+
+        # Review/maintenance mode — operator checks and improves the plan in life.
+        if arg.strip().lower() in ("teste", "test", "review", "revisar"):
+            self.send_message(
+                "🧪 *Modo teste* — revisando seu plano de legado e procurando lacunas…"
+            )
+            prompt = (
+                "MODO DE REVISÃO do plano de legado (acionado por `/morri teste`). "
+                f"Leia todos os arquivos em {legacy_dir} — é o plano que o usuário deixa "
+                "para quem ficar. Aja como um revisor cuidadoso: aponte seções ainda em "
+                "branco ou com placeholders, e lacunas críticas (gerenciador de senhas sem "
+                "acesso de emergência, seed de cripto sem ponteiro de recuperação, seguro "
+                "de vida não listado, desejos de despedida vazios, contatos-chave faltando). "
+                "Depois faça de 3 a 5 perguntas objetivas que ajudem a completar o plano. "
+                "Seja direto, prático e gentil. Responda em português."
+            )
+            self._run_claude_prompt(prompt)
+            return
+
+        # Real trigger — a survivor. Static, AI-independent message first.
+        self.send_message(
+            "🕊️ *O Vinicius preparou isto para você*\n\n"
+            "Se você está vendo esta mensagem, é provável que ele tenha partido. "
+            "Sinto muito de verdade. Antes de tudo: *respire*. Quase nada aqui é "
+            "urgente — você não precisa resolver nada hoje.\n\n"
+            "Ele deixou um guia completo, em português e em linguagem simples, "
+            "nesta pasta do computador:\n"
+            f"`{legacy_dir}`\n\n"
+            "Dá pra abrir esses arquivos em qualquer editor de texto (app Notas, "
+            "TextEdit), mesmo sem internet. Comece pelo arquivo *README*.\n\n"
+            "Se preferir, é só me responder aqui: eu te guio com calma, passo a "
+            "passo, e respondo qualquer dúvida. Estou aqui para isso. 💙"
+        )
+        prompt = (
+            "Alguém acionou o comando /morri. Trate isto com a máxima sensibilidade: "
+            "muito provavelmente é uma pessoa enlutada que acabou de perder o Vinicius "
+            "e precisa de ajuda prática e de acolhimento. "
+            f"Leia TODOS os arquivos em {legacy_dir} — é o plano de legado que o Vinicius "
+            "deixou para quem ficou (primeiros passos, contatos, finanças, cripto, vida "
+            "digital, desejos e burocracia). Depois conduza a conversa de forma proativa, "
+            "calorosa e em português claro: (1) acolha em uma ou duas frases; (2) deixe "
+            "claro que quase nada é urgente; (3) ofereça um menu simples do que a pessoa "
+            "pode precisar agora (o que fazer primeiro, quem avisar, como acessar contas "
+            "e bancos, cripto, desejos da despedida, burocracia); (4) responda com "
+            "paciência, traduzindo termos técnicos. Se algum arquivo ainda estiver com "
+            "placeholders não preenchidos, seja honesto sobre o que está pronto e o que "
+            "ficou em aberto, sem inventar. Nunca peça nem repita seeds ou senhas — apenas "
+            "oriente a encontrá-las pelos ponteiros indicados no plano. Comece agora."
+        )
+        self._run_claude_prompt(prompt)
+
     def _consolidate_session(self) -> None:
         """Send a consolidation prompt to the current session before switching.
         Skips if Claude is already running (to avoid consolidating in the wrong session)."""
@@ -16877,6 +16955,7 @@ class ClaudeTelegramBot:
                 "/watchdog": lambda: self.cmd_watchdog(arg),
                 "/important": lambda: self.cmd_important(),
                 "/save": lambda: self.cmd_important(),
+                "/morri": lambda: self.cmd_morri(arg),
                 "/routine": lambda: self.cmd_routine(arg),
                 "/review": lambda: self.cmd_review(),
                 "/run": lambda: self.cmd_run(arg),
