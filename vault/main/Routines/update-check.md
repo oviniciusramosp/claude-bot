@@ -8,7 +8,7 @@ tags: [routine, maintenance, updates]
 schedule:
   days: ["*"]
   times: [10:00]
-model: glm-5.1
+model: sonnet
 enabled: true
 context: minimal
 ---
