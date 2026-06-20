@@ -10,6 +10,7 @@ Topic-specific rules live in `.claude/rules/` and auto-load when Claude reads ma
 - `migration-v31.md` — vault v3.1 migration script (when touching `scripts/migrate_vault_per_agent.py`)
 - `versioning.md` — semver rules, bump triggers, conventional commits (when touching `claude-fallback-bot.py`, `claude-bot-menubar.py`, or `Info.plist`)
 - `bot-code-conventions.md` — zero-silent-errors rule, adding commands, default constants (when touching `claude-fallback-bot.py` or `claude-bot-menubar.py`)
+- `auth-hardening.md` — bot-owned Anthropic credential, `/auth` command, OAuth PKCE flow, proactive 401 alert (when touching auth code in `claude-fallback-bot.py`)
 
 The repo also contains a standalone Claude Code plugin at `plugins/methodology/` that packages three methodology skills (systematic-debugging, test-driven-development, verify-before-completion) for distribution to any Claude Code user, independent of the bot runtime. See `plugins/methodology/README.md` for installation.
 
@@ -143,6 +144,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/compact` | Auto-compact context |
 | `/cost` | Token usage and cost for current session |
 | `/doctor` | Check Claude Code installation health |
+| `/auth` | Anthropic auth status + live probe; `/auth login` (phone OAuth), `/auth code <c>`, `/auth set <token>`, `/auth logout`. Primary chat only. See `.claude/rules/auth-hardening.md` |
 | `/lint` | Audit the vault |
 | `/find <expr>` | Query the vault by frontmatter |
 | `/indexes` | Regenerate vault index marker blocks |

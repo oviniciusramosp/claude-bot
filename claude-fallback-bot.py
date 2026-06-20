@@ -5,8 +5,9 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.75.0"  # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.76.0"  # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
+import base64
 import hmac
 import hashlib
 import html
@@ -87,6 +88,11 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                         "OPUS_MODEL", "SONNET_MODEL", "HAIKU_MODEL"):
                 # Max-effort / max-context tuning + per-family model pins (v3.70).
                 os.environ.setdefault(_k, _v)
+            elif _k == "CLAUDE_CODE_OAUTH_TOKEN":
+                # Auth hardening (v3.76): optional manual long-lived token. The
+                # bot-managed store (~/.claude-bot/claude-auth.json) takes
+                # precedence; this is the simplest path for distribution users.
+                os.environ.setdefault("CLAUDE_CODE_OAUTH_TOKEN", _v)
 # Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
 MODEL_FALLBACK_CHAIN = [
     m.strip() for m in
@@ -734,6 +740,234 @@ def _save_env_key(key: str, value: str) -> None:
     _env_file.write_text("\n".join(lines) + "\n")
 
 
+# ---------------------------------------------------------------------------
+# Anthropic OAuth — bot-owned credential store (auth hardening, v3.76)
+# ---------------------------------------------------------------------------
+# Root cause we eliminate: the bot used to rely on the Claude CLI's shared
+# macOS keychain login (`Claude Code-credentials`). The desktop app rotates that
+# OAuth refresh token on its own refreshes, which silently REVOKES the CLI's
+# copy — every Anthropic turn then 401s and the bot has no way to recover
+# remotely. Fix: the bot keeps its OWN credential and injects it via
+# CLAUDE_CODE_OAUTH_TOKEN, which the CLI honors *over* the keychain. Two shapes:
+#   • setup_token — a long-lived token from `claude setup-token` (static, ~1y).
+#   • oauth       — access+refresh tokens minted by the in-Telegram `/auth login`
+#                   PKCE flow; the bot refreshes them itself before expiry.
+# When no bot credential exists, injection is a no-op and the CLI falls back to
+# the keychain (unchanged behavior — fully backward compatible).
+
+# Public OAuth client id baked into Claude Code (not a secret; ships in the CLI
+# binary). Endpoints were extracted from the 2.1.x CLI binary.
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLAUDE_OAUTH_AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize"
+CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLAUDE_OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+CLAUDE_OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
+_CLAUDE_AUTH_FILE = Path.home() / ".claude-bot" / "claude-auth.json"
+# Refresh the oauth access token this many seconds before it actually expires.
+_OAUTH_REFRESH_SKEW = 300
+_oauth_ua_cache: Optional[str] = None
+
+
+def _oauth_user_agent() -> str:
+    """A CLI-like User-Agent. A bare urllib UA is blocked by Cloudflare (error
+    1010) on the OAuth host, so every token request must look like the CLI."""
+    global _oauth_ua_cache
+    if _oauth_ua_cache is None:
+        ver = "2.1.153"
+        try:
+            out = subprocess.run([CLAUDE_PATH, "--version"], capture_output=True,
+                                 text=True, timeout=10)
+            m = re.search(r"(\d+\.\d+\.\d+)", out.stdout or "")
+            if m:
+                ver = m.group(1)
+        except Exception:
+            logger.debug("claude --version lookup failed for UA", exc_info=True)
+        _oauth_ua_cache = f"claude-cli/{ver} (external, cli)"
+    return _oauth_ua_cache
+
+
+def _load_bot_auth() -> Optional[Dict[str, Any]]:
+    """Return the bot-owned Anthropic credential dict, or None if unset."""
+    try:
+        if _CLAUDE_AUTH_FILE.is_file():
+            return json.loads(_CLAUDE_AUTH_FILE.read_text())
+    except (OSError, ValueError) as exc:
+        logger.error("Failed to read bot auth file %s: %s", _CLAUDE_AUTH_FILE, exc)
+    return None
+
+
+def _save_bot_auth(data: Dict[str, Any]) -> None:
+    """Persist the bot-owned credential atomically with 0600 perms."""
+    _CLAUDE_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _CLAUDE_AUTH_FILE.with_name(_CLAUDE_AUTH_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        logger.debug("chmod 0600 on temp auth file failed", exc_info=True)
+    tmp.replace(_CLAUDE_AUTH_FILE)
+    try:
+        os.chmod(_CLAUDE_AUTH_FILE, 0o600)
+    except OSError:
+        logger.debug("chmod 0600 on auth file failed", exc_info=True)
+
+
+def _clear_bot_auth() -> None:
+    try:
+        _CLAUDE_AUTH_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        logger.error("Failed to clear bot auth file: %s", exc)
+
+
+def _oauth_token_request(payload: Dict[str, str]) -> Dict[str, Any]:
+    """POST to the Claude OAuth token endpoint. Raises on HTTP/parse error."""
+    body = json.dumps(payload).encode()
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": _oauth_user_agent(),
+        "anthropic-beta": "oauth-2025-04-20",
+    }
+    req = urllib.request.Request(CLAUDE_OAUTH_TOKEN_URL, data=body,
+                                 headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.load(resp)
+
+
+def _pkce_pair() -> Tuple[str, str]:
+    """Return (verifier, challenge) for an OAuth PKCE S256 exchange."""
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode()
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
+
+
+def _build_authorize_url(challenge: str, state: str) -> str:
+    params = {
+        "code": "true",
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": CLAUDE_OAUTH_REDIRECT_URI,
+        "scope": CLAUDE_OAUTH_SCOPES,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    }
+    return CLAUDE_OAUTH_AUTHORIZE_URL + "?" + urllib.parse.urlencode(params)
+
+
+def _oauth_exchange_code(code: str, verifier: str, state: str) -> Dict[str, Any]:
+    """Exchange an authorization code for tokens and persist as method=oauth.
+
+    The success page returns the code as ``<code>#<state>``; either form is
+    accepted. Raises urllib/ValueError on failure (caller surfaces it)."""
+    raw = code.strip()
+    if "#" in raw:
+        raw = raw.split("#", 1)[0].strip()
+    resp = _oauth_token_request({
+        "grant_type": "authorization_code",
+        "code": raw,
+        "redirect_uri": CLAUDE_OAUTH_REDIRECT_URI,
+        "client_id": CLAUDE_OAUTH_CLIENT_ID,
+        "code_verifier": verifier,
+        "state": state,
+    })
+    access = resp.get("access_token")
+    if not access:
+        raise ValueError("token endpoint returned no access_token")
+    data = {
+        "method": "oauth",
+        "access_token": access,
+        "refresh_token": resp.get("refresh_token", ""),
+        "expires_at": time.time() + float(resp.get("expires_in", 3600)),
+        "updated_at": time.time(),
+    }
+    _save_bot_auth(data)
+    return data
+
+
+def _oauth_refresh(creds: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Refresh an expiring oauth access token in place. Returns updated creds on
+    success, or None if the refresh token is dead (caller must re-auth)."""
+    rt = creds.get("refresh_token")
+    if not rt:
+        return None
+    try:
+        resp = _oauth_token_request({
+            "grant_type": "refresh_token",
+            "refresh_token": rt,
+            "client_id": CLAUDE_OAUTH_CLIENT_ID,
+        })
+    except urllib.error.HTTPError as exc:
+        logger.error("OAuth refresh failed (HTTP %s) — re-auth required via /auth login", exc.code)
+        return None
+    except Exception as exc:
+        logger.error("OAuth refresh error: %s", exc)
+        return None
+    access = resp.get("access_token")
+    if not access:
+        return None
+    creds.update({
+        "access_token": access,
+        "refresh_token": resp.get("refresh_token", rt),
+        "expires_at": time.time() + float(resp.get("expires_in", 3600)),
+        "updated_at": time.time(),
+    })
+    _save_bot_auth(creds)
+    logger.info("OAuth access token refreshed (valid ~%.1fh)",
+                float(resp.get("expires_in", 3600)) / 3600)
+    return creds
+
+
+def resolve_oauth_bearer() -> Optional[str]:
+    """Resolve the bearer to inject as CLAUDE_CODE_OAUTH_TOKEN for native
+    Anthropic runs, or None to let the CLI use its keychain login.
+
+    • setup_token — returned as-is (long-lived; server handles expiry).
+    • oauth       — auto-refreshed when within _OAUTH_REFRESH_SKEW of expiry.
+    Fail-open: any error returns None so the keychain path still works."""
+    try:
+        creds = _load_bot_auth()
+        if creds:
+            method = creds.get("method")
+            if method == "setup_token":
+                return creds.get("token") or _env_oauth_token()
+            if method == "oauth":
+                if creds.get("expires_at", 0) <= time.time() + _OAUTH_REFRESH_SKEW:
+                    refreshed = _oauth_refresh(creds)
+                    if refreshed is not None:
+                        creds = refreshed
+                    # If refresh failed, still return the (likely-expired) token —
+                    # the resulting 401 trips the proactive alert + /auth recovery.
+                return creds.get("access_token") or _env_oauth_token()
+    except Exception as exc:
+        logger.error("resolve_oauth_bearer failed (using keychain): %s", exc)
+    # No bot-managed credential — honor a manual CLAUDE_CODE_OAUTH_TOKEN from
+    # env/.env (simplest distribution path), else None → keychain login.
+    return _env_oauth_token()
+
+
+def _env_oauth_token() -> Optional[str]:
+    return os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip() or None
+
+
+def bot_auth_summary() -> Dict[str, Any]:
+    """Non-secret snapshot of the active Anthropic auth method for /auth + tests."""
+    creds = _load_bot_auth()
+    if not creds:
+        return {"source": "keychain", "method": None}
+    method = creds.get("method")
+    out: Dict[str, Any] = {"source": "bot_token", "method": method,
+                           "updated_at": creds.get("updated_at")}
+    if method == "oauth":
+        exp = creds.get("expires_at", 0)
+        out["expires_in_s"] = max(0, int(exp - time.time()))
+        out["has_refresh"] = bool(creds.get("refresh_token"))
+    return out
+
+
 def _agent_display_name(agent_id: str) -> str:
     """Convert agent slug to title-cased display name: 'crypto-bro' → 'Crypto Bro'."""
     return " ".join(w.capitalize() for w in agent_id.replace("-", " ").split())
@@ -1337,6 +1571,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/compact` — Compactar contexto
 • `/cost` — Custo e uso de tokens da sessão
 • `/doctor` — Verificar saúde da instalação
+• `/auth` — Status da autenticação Anthropic + re-autenticar pelo celular (`/auth login`, `/auth set <token>`)
 • `/lint` — Auditar o vault (frontmatter, links, schedules)
 • `/find <expr>` — Buscar no vault por frontmatter (ex: `type=routine model=opus`)
 • `/indexes` — Regenerar marker blocks dos índices (`agent-skills.md`, `agent-routines.md`, ...) + sync color groups
@@ -5633,8 +5868,9 @@ def _translate_error(raw: str) -> str:
     if "authentication" in sl or "401" in sl or "invalid api key" in sl or "x-api-key" in sl:
         return (
             "❌ *Erro de autenticação (401)*\n"
-            "A API key do Claude parece inválida ou expirada. "
-            "Verifique sua chave em console.anthropic.com."
+            "As credenciais do Claude expiraram ou foram revogadas. "
+            "Re-autentique pelo celular: `/auth login` (link + código) "
+            "ou `/auth set <token>`. Diagnóstico: `/auth`."
         )
     if "permission" in sl or "403" in sl:
         return (
@@ -6359,6 +6595,18 @@ class ClaudeRunner:
                         clean_env["AGENT_CHAT_ID"] = str(_cid)
                     if _tid:
                         clean_env["AGENT_THREAD_ID"] = str(_tid)
+
+            # Auth hardening (v3.76): inject the bot-owned Anthropic credential
+            # so the subprocess authenticates with it instead of the shared
+            # macOS keychain login — which desktop-app OAuth token rotation can
+            # silently revoke (the 401 failure mode). No-op when unset, so the
+            # CLI falls back to the keychain (unchanged behavior). Native
+            # Anthropic only; z.AI is proxied with its own auth just below.
+            clean_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            if provider == "anthropic":
+                _bearer = resolve_oauth_bearer()
+                if _bearer:
+                    clean_env["CLAUDE_CODE_OAUTH_TOKEN"] = _bearer
 
             # Provider routing: GLM models go through z.AI's Anthropic-compatible gateway.
             # Claude CLI validates model names client-side, so GLM names ("glm-5.1" etc.)
@@ -9792,6 +10040,12 @@ class ClaudeTelegramBot:
         self._update_offset = self._load_offset()
         self._stop_event = threading.Event()
 
+        # Auth hardening (v3.76): in-flight `/auth login` PKCE state per chat
+        # (chat_id → {verifier, state, expires}) and a throttle timestamp so the
+        # proactive 401 alert fires at most once per window.
+        self._pending_oauth: Dict[str, Dict[str, Any]] = {}
+        self._last_auth_alert: float = 0.0
+
         # Thread contexts: keyed by (chat_id, thread_id)
         self._contexts: Dict[tuple, ThreadContext] = {}
         self._contexts_lock = threading.RLock()
@@ -12774,6 +13028,201 @@ class ClaudeTelegramBot:
 
     def cmd_doctor(self) -> None:
         self._run_claude_prompt("/doctor")
+
+    # -- Auth hardening (v3.76): remote diagnosis + recovery -----------------
+
+    def _keychain_expiry_hours(self) -> Optional[float]:
+        """Hours until the macOS keychain OAuth login expires (negative if
+        already expired), or None if unreadable. Diagnostic only."""
+        try:
+            out = subprocess.run(
+                ["security", "find-generic-password", "-s",
+                 "Claude Code-credentials", "-w"],
+                capture_output=True, text=True, timeout=10)
+            if out.returncode != 0 or not out.stdout.strip():
+                return None
+            exp = json.loads(out.stdout).get("claudeAiOauth", {}).get("expiresAt")
+            if exp:
+                return (exp / 1000 - time.time()) / 3600
+        except Exception:
+            logger.debug("keychain expiry probe failed", exc_info=True)
+        return None
+
+    def _auth_probe(self, model: str = "haiku") -> Tuple[bool, str]:
+        """Live 1-token Anthropic inference through the REAL injection path, so
+        the probe reflects exactly what a normal turn would use. Returns
+        (ok, detail)."""
+        try:
+            clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+            clean_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            bearer = resolve_oauth_bearer()
+            if bearer:
+                clean_env["CLAUDE_CODE_OAUTH_TOKEN"] = bearer
+            cmd = [CLAUDE_PATH, "--print", "--dangerously-skip-permissions",
+                   "--model", model, "-p", "Reply with exactly: OK"]
+            out = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60,
+                cwd=str(Path(__file__).resolve().parent), env=clean_env)
+            if out.returncode == 0 and "OK" in (out.stdout or ""):
+                return True, "OK"
+            blob = ((out.stdout or "") + " " + (out.stderr or "")).strip()
+            kind = classify_error(blob)
+            return False, f"{kind.value}: {blob[:160]}"
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        except Exception as exc:
+            return False, str(exc)[:160]
+
+    def _auth_status_text(self, probe: bool = True) -> str:
+        summ = bot_auth_summary()
+        lines = ["🔐 *Auth do Claude (Anthropic)*"]
+        if summ.get("source") == "bot_token":
+            if summ.get("method") == "setup_token":
+                lines.append("• Fonte: *token próprio do bot* (setup-token, longa duração) ✅")
+                lines.append("• Imune à rotação do app desktop.")
+            elif summ.get("method") == "oauth":
+                h = summ.get("expires_in_s", 0) / 3600
+                lines.append("• Fonte: *token próprio do bot* (OAuth com auto-refresh) ✅")
+                lines.append(f"• Access token expira em ~{h:.1f}h (renova sozinho)")
+                if not summ.get("has_refresh"):
+                    lines.append("• ⚠️ Sem refresh token — rode `/auth login` para renovar.")
+        else:
+            lines.append("• Fonte: *keychain do macOS* (login compartilhado) ⚠️")
+            lines.append("  _Vulnerável à rotação do app desktop. Rode `/auth login` para blindar._")
+            kh = self._keychain_expiry_hours()
+            if kh is not None:
+                lines.append(
+                    f"• Keychain expira em ~{kh:.1f}h" if kh > 0
+                    else f"• Keychain *expirado* há ~{abs(kh):.1f}h ⚠️")
+        if probe:
+            ok, detail = self._auth_probe()
+            lines.append(f"• Teste ao vivo (haiku): {'✅ respondendo' if ok else '❌ ' + detail}")
+        return "\n".join(lines)
+
+    def _alert_auth_failure(self, raw_error: str) -> None:
+        """Throttled proactive alert to primary chats when an Anthropic turn
+        401s — turns a silent fall-through into an actionable, remotely-fixable
+        notification."""
+        now = time.time()
+        if now - self._last_auth_alert < 600:  # at most once / 10 min
+            return
+        self._last_auth_alert = now
+        summ = bot_auth_summary()
+        src = summ.get("method") or summ.get("source") or "keychain"
+        msg = (
+            "🚨 *Falha de autenticação Anthropic (401)*\n"
+            f"O Claude rejeitou as credenciais (`{src}`). Os modelos Anthropic "
+            "ficam fora até re-autenticar.\n\n"
+            "*Corrigir pelo celular:*\n"
+            "1. `/auth login` — abra o link, autorize, copie o código\n"
+            "2. `/auth code <código>` (ou cole o código direto)\n\n"
+            "_Alternativa: `/auth set <token>`. Diagnóstico: `/auth`._"
+        )
+        for cid in sorted(self.primary_chat_ids):
+            try:
+                self.send_message(msg, chat_id=cid)
+            except Exception:
+                logger.error("Failed to send auth alert to %s", cid, exc_info=True)
+
+    def cmd_auth(self, arg: str = "") -> None:
+        """Diagnose and remotely recover Anthropic auth. Primary chat only."""
+        if self._block_if_secondary("/auth"):
+            return
+        parts = arg.split(None, 1)
+        sub = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if sub in ("", "status"):
+            self.send_message("🔎 _Verificando auth (probe ao vivo)..._")
+            self.send_message(self._auth_status_text(probe=True))
+        elif sub == "login":
+            self.cmd_auth_login()
+        elif sub == "code":
+            if not rest:
+                self.send_message("❌ Use: `/auth code <código>` (após `/auth login`).")
+            else:
+                self.cmd_auth_code(rest)
+        elif sub == "set":
+            if not rest:
+                self.send_message("❌ Use: `/auth set <token>` — gere com `claude setup-token`.")
+            else:
+                self.cmd_auth_set(rest)
+        elif sub in ("logout", "clear", "reset"):
+            _clear_bot_auth()
+            self.send_message(
+                "🔓 Token próprio do bot removido. Voltando ao login do keychain.\n"
+                "_Use `/auth` para ver o status._")
+        else:
+            self.send_message(
+                "🔐 *Comandos de auth*\n"
+                "• `/auth` — status + teste ao vivo\n"
+                "• `/auth login` — re-autenticar pelo celular (link + código)\n"
+                "• `/auth set <token>` — instalar token longo (`claude setup-token`)\n"
+                "• `/auth logout` — remover token do bot (volta ao keychain)")
+
+    def cmd_auth_login(self) -> None:
+        verifier, challenge = _pkce_pair()
+        state = secrets.token_urlsafe(24)
+        url = _build_authorize_url(challenge, state)
+        self._pending_oauth[str(self._chat_id)] = {
+            "verifier": verifier, "state": state, "expires": time.time() + 900}
+        self.send_message(
+            "🔐 *Re-autenticação remota*\n\n"
+            "1. Abra o link abaixo no navegador (logado na sua conta Claude)\n"
+            "2. Autorize — a página vai mostrar um *código*\n"
+            "3. Me mande o código (ou `/auth code <código>`)\n\n"
+            "_O link expira em 15 min. Apague a mensagem do código depois, por segurança._")
+        # Send the URL as plain text so Telegram auto-links it without HTML
+        # escaping mangling the query string.
+        self.send_message(url, parse_mode="")
+
+    def cmd_auth_code(self, code: str) -> None:
+        chat_key = str(self._chat_id)
+        pending = self._pending_oauth.get(chat_key)
+        if not pending or pending.get("expires", 0) < time.time():
+            self._pending_oauth.pop(chat_key, None)
+            self.send_message("❌ Nenhum login em andamento (ou expirou). Rode `/auth login` primeiro.")
+            return
+        self.send_message("🔄 _Trocando código por token..._")
+        try:
+            _oauth_exchange_code(code, pending["verifier"], pending["state"])
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode()[:200]
+            except Exception:
+                pass
+            self.send_message(
+                f"❌ Falha na troca do código (HTTP {exc.code}). Rode `/auth login` de novo.\n`{body}`")
+            return
+        except Exception as exc:
+            self.send_message(f"❌ Erro na troca do código: `{exc}`. Rode `/auth login` de novo.")
+            return
+        self._pending_oauth.pop(chat_key, None)
+        ok, detail = self._auth_probe()
+        if ok:
+            self.send_message(
+                "✅ *Re-autenticado!* Token próprio do bot instalado (com auto-refresh).\n"
+                "Anthropic respondendo normalmente. 🎉")
+        else:
+            self.send_message(f"⚠️ Token salvo, mas o teste ao vivo falhou: `{detail}`.\nVeja `/auth`.")
+
+    def cmd_auth_set(self, token: str) -> None:
+        token = token.strip()
+        if not (token.startswith("sk-ant-") and len(token) > 20):
+            self.send_message(
+                "❌ Token inválido. Gere com `claude setup-token` (começa com `sk-ant-oat...`).")
+            return
+        _save_bot_auth({"method": "setup_token", "token": token, "updated_at": time.time()})
+        self.send_message("🔄 _Token instalado, validando..._")
+        ok, detail = self._auth_probe()
+        if ok:
+            self.send_message(
+                "✅ *Token de longa duração instalado e validado.*\n"
+                "Anthropic respondendo. Imune à rotação do app desktop. 🎉")
+        else:
+            self.send_message(
+                f"⚠️ Token salvo mas o teste falhou: `{detail}`.\n"
+                "Confira se o token está completo. `/auth` para status.")
 
     def cmd_lint(self) -> None:
         """Run the vault linter and report results to Telegram."""
@@ -16111,6 +16560,13 @@ class ClaudeTelegramBot:
                 kind = classify_error(raw_error)
                 action, backoff, max_attempts = get_recovery_plan(kind)
 
+                # Auth hardening (v3.76): an Anthropic 401 used to fall through
+                # silently to a paid/broken fallback. Proactively alert the
+                # primary chat with the remote-recovery steps (throttled).
+                if kind == ErrorKind.AUTH and model_provider(
+                        _fallback_model or session.model) == "anthropic":
+                    self._alert_auth_failure(raw_error)
+
                 # Session expired: clear stale session_id before retrying
                 if "no conversation found" in raw_error.lower() and session.session_id:
                     logger.warning("Session %s expired — clearing for fresh retry", session.session_id)
@@ -16886,6 +17342,18 @@ class ClaudeTelegramBot:
         if not text:
             return
 
+        # Auth hardening (v3.76): when an `/auth login` is pending for this
+        # chat, accept a bare pasted authorization code (no `/auth code`
+        # prefix). Guarded so a normal message during the 15-min window isn't
+        # hijacked: must be a single code-like token and a login must be live.
+        if not text.startswith("/"):
+            _chat_key = str(self._ctx.chat_id) if self._ctx else None
+            _pending = self._pending_oauth.get(_chat_key) if _chat_key else None
+            if (_pending and _pending.get("expires", 0) >= time.time()
+                    and re.fullmatch(r"[A-Za-z0-9_\-]{20,}(#[A-Za-z0-9_\-]+)?", text)):
+                self.cmd_auth_code(text)
+                return
+
         # Pipeline v2 edit-mode interceptor — when an "✏️ Editar" button was
         # tapped on a publish-step preview, the next free-form message in
         # this chat/topic is captured as feedback for the re-edit pipeline.
@@ -16940,6 +17408,7 @@ class ClaudeTelegramBot:
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
                 "/doctor": lambda: self.cmd_doctor(),
+                "/auth": lambda: self.cmd_auth(arg),
                 "/lint": lambda: self.cmd_lint(),
                 "/find": lambda: self.cmd_find(arg),
                 "/indexes": lambda: self.cmd_indexes(),
