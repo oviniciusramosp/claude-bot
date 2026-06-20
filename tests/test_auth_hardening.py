@@ -171,6 +171,39 @@ class AuthHelpers(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.bot._oauth_exchange_code("C", "V", "S")
 
+    # -- review fixes (v3.76.1) --
+
+    def test_exp_seconds_coerces_safely(self):
+        self.assertEqual(self.bot._exp_seconds(1800), 1800.0)
+        self.assertEqual(self.bot._exp_seconds("1800"), 1800.0)
+        self.assertEqual(self.bot._exp_seconds(None), 3600.0)      # JSON null
+        self.assertEqual(self.bot._exp_seconds("nan-ish"), 3600.0)  # non-numeric
+
+    def test_refresh_with_malformed_expires_in_still_persists(self):
+        # A successful refresh whose response has a null expires_in must NOT be
+        # dropped (the bug: float(None) used to throw → silent keychain regress).
+        self.bot._save_bot_auth({
+            "method": "oauth", "access_token": "OLD", "refresh_token": "RT",
+            "expires_at": time.time() - 10})
+        with patch.object(self.bot, "_oauth_token_request",
+                          return_value={"access_token": "NEW", "refresh_token": "RT2",
+                                        "expires_in": None}):
+            self.assertEqual(self.bot.resolve_oauth_bearer(), "NEW")
+        self.assertEqual(self.bot._load_bot_auth()["access_token"], "NEW")
+
+    def test_no_double_refresh_after_token_is_fresh(self):
+        # After one refresh the token is fresh; a second resolve must not refresh
+        # again (the lock + re-read guard against concurrent double-rotation).
+        self.bot._save_bot_auth({
+            "method": "oauth", "access_token": "OLD", "refresh_token": "RT",
+            "expires_at": time.time() - 10})
+        with patch.object(self.bot, "_oauth_token_request",
+                          return_value={"access_token": "NEW", "refresh_token": "RT2",
+                                        "expires_in": 3600}) as m:
+            self.bot.resolve_oauth_bearer()
+            self.bot.resolve_oauth_bearer()
+            self.assertEqual(m.call_count, 1)
+
 
 class AuthCommandDispatch(unittest.TestCase):
     def setUp(self):
@@ -240,6 +273,20 @@ class AuthCommandDispatch(unittest.TestCase):
             # No /auth prefix — a code-like token is intercepted.
             self.bot._handle_text("abcdefghijklmnopqrstuvwxyz0123456789")
         self.assertEqual(self.mod._load_bot_auth()["access_token"], "BARE")
+
+    def test_edit_mode_takes_precedence_over_bare_code(self):
+        # v3.76.1: a pending /auth login must NOT shadow an in-progress pipeline
+        # edit. With edit-mode active, a code-like message goes to edit feedback.
+        self.bot._handle_text("/auth login")
+        consumed = {}
+        with patch.object(self.mod, "_load_edit_mode", lambda c, t: {"step": "x"}), \
+             patch.object(self.bot, "_consume_edit_feedback",
+                          lambda state, text, mid=None: consumed.update(text=text)), \
+             patch.object(self.mod, "_oauth_exchange_code") as ex:
+            self.bot._handle_text("abcdefghijklmnopqrstuvwxyz0123456789")
+        self.assertEqual(consumed.get("text"), "abcdefghijklmnopqrstuvwxyz0123456789")
+        ex.assert_not_called()
+        self.assertIn("123456789", self.bot._pending_oauth)  # login still pending
 
     def test_normal_message_not_hijacked_as_code(self):
         self.bot._handle_text("/auth login")

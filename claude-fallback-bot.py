@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.76.0"  # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.76.1"  # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import base64
 import hmac
@@ -765,7 +765,20 @@ CLAUDE_OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
 _CLAUDE_AUTH_FILE = Path.home() / ".claude-bot" / "claude-auth.json"
 # Refresh the oauth access token this many seconds before it actually expires.
 _OAUTH_REFRESH_SKEW = 300
+# Serializes the oauth refresh so concurrent topics/threads don't each rotate
+# the refresh token (rotation invalidates the others). Waiters re-read creds.
+_AUTH_REFRESH_LOCK = threading.Lock()
 _oauth_ua_cache: Optional[str] = None
+
+
+def _exp_seconds(value: Any) -> float:
+    """Coerce an OAuth ``expires_in`` to seconds, defaulting safely on a
+    malformed (null / non-numeric) value so a successful refresh is never
+    dropped by a TypeError in the expiry math."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 3600.0
 
 
 def _oauth_user_agent() -> str:
@@ -797,15 +810,19 @@ def _load_bot_auth() -> Optional[Dict[str, Any]]:
 
 
 def _save_bot_auth(data: Dict[str, Any]) -> None:
-    """Persist the bot-owned credential atomically with 0600 perms."""
+    """Persist the bot-owned credential atomically with 0600 perms.
+
+    The temp file is created 0600 from the first byte (via os.open) so the
+    secret is never briefly world-readable under the process umask."""
     _CLAUDE_AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = _CLAUDE_AUTH_FILE.with_name(_CLAUDE_AUTH_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
+    payload = json.dumps(data, indent=2).encode()
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
-        os.chmod(tmp, 0o600)
-    except OSError:
-        logger.debug("chmod 0600 on temp auth file failed", exc_info=True)
-    tmp.replace(_CLAUDE_AUTH_FILE)
+        os.write(fd, payload)
+    finally:
+        os.close(fd)
+    os.replace(str(tmp), str(_CLAUDE_AUTH_FILE))
     try:
         os.chmod(_CLAUDE_AUTH_FILE, 0o600)
     except OSError:
@@ -881,7 +898,7 @@ def _oauth_exchange_code(code: str, verifier: str, state: str) -> Dict[str, Any]
         "method": "oauth",
         "access_token": access,
         "refresh_token": resp.get("refresh_token", ""),
-        "expires_at": time.time() + float(resp.get("expires_in", 3600)),
+        "expires_at": time.time() + _exp_seconds(resp.get("expires_in")),
         "updated_at": time.time(),
     }
     _save_bot_auth(data)
@@ -912,12 +929,12 @@ def _oauth_refresh(creds: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     creds.update({
         "access_token": access,
         "refresh_token": resp.get("refresh_token", rt),
-        "expires_at": time.time() + float(resp.get("expires_in", 3600)),
+        "expires_at": time.time() + _exp_seconds(resp.get("expires_in")),
         "updated_at": time.time(),
     })
     _save_bot_auth(creds)
     logger.info("OAuth access token refreshed (valid ~%.1fh)",
-                float(resp.get("expires_in", 3600)) / 3600)
+                _exp_seconds(resp.get("expires_in")) / 3600)
     return creds
 
 
@@ -936,11 +953,18 @@ def resolve_oauth_bearer() -> Optional[str]:
                 return creds.get("token") or _env_oauth_token()
             if method == "oauth":
                 if creds.get("expires_at", 0) <= time.time() + _OAUTH_REFRESH_SKEW:
-                    refreshed = _oauth_refresh(creds)
-                    if refreshed is not None:
-                        creds = refreshed
-                    # If refresh failed, still return the (likely-expired) token —
-                    # the resulting 401 trips the proactive alert + /auth recovery.
+                    with _AUTH_REFRESH_LOCK:
+                        # Re-read inside the lock: a concurrent topic may have
+                        # already refreshed (rotating the refresh token), so the
+                        # on-disk creds are now fresh — don't refresh again with
+                        # a now-stale refresh token.
+                        creds = _load_bot_auth() or creds
+                        if creds.get("expires_at", 0) <= time.time() + _OAUTH_REFRESH_SKEW:
+                            refreshed = _oauth_refresh(creds)
+                            if refreshed is not None:
+                                creds = refreshed
+                            # If refresh failed, still return the (likely-expired)
+                            # token — the resulting 401 trips the proactive alert.
                 return creds.get("access_token") or _env_oauth_token()
     except Exception as exc:
         logger.error("resolve_oauth_bearer failed (using keychain): %s", exc)
@@ -7143,6 +7167,10 @@ class CodexRunner:
 
         try:
             clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+            # Auth hardening (v3.76): never hand the Anthropic bot credential to
+            # the OpenAI codex binary (it's only relevant to native Anthropic
+            # runs, and could leak via a manual CLAUDE_CODE_OAUTH_TOKEN in .env).
+            clean_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
             clean_env["TELEGRAM_NOTIFY"] = str(
                 Path(__file__).resolve().parent / "scripts" / "telegram_notify.py"
             )
@@ -17342,18 +17370,6 @@ class ClaudeTelegramBot:
         if not text:
             return
 
-        # Auth hardening (v3.76): when an `/auth login` is pending for this
-        # chat, accept a bare pasted authorization code (no `/auth code`
-        # prefix). Guarded so a normal message during the 15-min window isn't
-        # hijacked: must be a single code-like token and a login must be live.
-        if not text.startswith("/"):
-            _chat_key = str(self._ctx.chat_id) if self._ctx else None
-            _pending = self._pending_oauth.get(_chat_key) if _chat_key else None
-            if (_pending and _pending.get("expires", 0) >= time.time()
-                    and re.fullmatch(r"[A-Za-z0-9_\-]{20,}(#[A-Za-z0-9_\-]+)?", text)):
-                self.cmd_auth_code(text)
-                return
-
         # Pipeline v2 edit-mode interceptor — when an "✏️ Editar" button was
         # tapped on a publish-step preview, the next free-form message in
         # this chat/topic is captured as feedback for the re-edit pipeline.
@@ -17381,6 +17397,20 @@ class ClaudeTelegramBot:
                 _rev_entry["result"] = "edit"
                 _rev_entry["event"].set()
                 self.send_message("📝 Feedback recebido. Reexecutando etapa anterior...")
+                return
+
+        # Auth hardening (v3.76): when an `/auth login` is pending for this
+        # chat, accept a bare pasted authorization code (no `/auth code`
+        # prefix). Runs AFTER the edit-mode/manual-review interceptors so an
+        # in-progress pipeline edit takes precedence. Guarded so a normal
+        # message during the 15-min window isn't hijacked: must be a single
+        # code-like token and a login must be live.
+        if not text.startswith("/"):
+            _chat_key = str(self._ctx.chat_id) if self._ctx else None
+            _pending = self._pending_oauth.get(_chat_key) if _chat_key else None
+            if (_pending and _pending.get("expires", 0) >= time.time()
+                    and re.fullmatch(r"[A-Za-z0-9_\-]{20,}(#[A-Za-z0-9_\-]+)?", text)):
+                self.cmd_auth_code(text)
                 return
 
         # Commands
