@@ -140,6 +140,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/switch <name>` | Switch session |
 | `/delete <name>` | Delete session |
 | `/clone <name>` | Clone the current session into a new branch |
+| `/resume` | Continue a Claude Code session started elsewhere (Claude desktop app / terminal) or a recent bot session. Inline picker of the 20 most recent (by last activity), merged from the Claude.app session index + `sessions.json`; picking one creates a new session resuming that `session_id` under its original cwd. Primary chat only. |
 | `/run [name]` | Manually trigger a routine/pipeline |
 | `/compact` | Auto-compact context |
 | `/cost` | Token usage and cost for current session |

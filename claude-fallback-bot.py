@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.76.1"  # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.77.0"  # feat (v3.77.0): /resume — continue a Claude Code session started elsewhere (the Claude desktop app / Claude.app, or a terminal) directly from Telegram. The desktop app, when pointed at a real local folder, runs the SAME Claude Code engine — its sessions land in ~/.claude/projects/<cwd>/<id>.jsonl and are indexed (title/cwd/model/cliSessionId/lastActivityAt) under ~/Library/Application Support/Claude/claude-code-sessions. /resume reads that index (alive + non-archived only — Claude Code prunes transcripts after ~30 days), merges it with the bot's own Telegram sessions (sessions.json), dedupes by session_id, sorts by last activity, and shows an inline picker (top 20). Picking one creates a NEW bot session that resumes the chosen session_id under its original cwd (an external project runs under Main; a vault dir keeps its agent). Primary chat only (resumes run with full permissions and may point cwd outside the vault). New module helpers: _encode_project_dir, _resume_model_alias, _clean_title, _resume_relative_time, _short_cwd, _scan_claude_app_sessions. # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import base64
 import hmac
@@ -177,6 +177,18 @@ SCHEDULER_HEARTBEAT_FILE = DATA_DIR / ".scheduler-heartbeat"
 SCHEDULER_HEARTBEAT_STALE_SECS = 180  # mirror of STALE_SECS in bot-watchdog.sh
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
+
+# /resume — continue a Claude Code session started elsewhere (the Claude
+# desktop app or a terminal). Claude Code stores every local session as a
+# JSONL transcript under CLAUDE_PROJECTS_DIR/<encoded-cwd>/<session-id>.jsonl;
+# the Claude desktop app keeps a sidecar index (title/cwd/model/cliSessionId)
+# under CLAUDE_APP_SESSIONS_DIR. See `cmd_resume` / `_scan_claude_app_sessions`.
+CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CLAUDE_APP_SESSIONS_DIR = (
+    Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
+)
+RESUME_PICKER_LIMIT = 20      # how many recent sessions the picker shows
+RESUME_TOKEN_TTL = 1800       # 30min — picker tokens expire (in-memory)
 
 # ---------------------------------------------------------------------------
 # Pipeline v2 feature flag (v3.55+)
@@ -1596,6 +1608,7 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 • `/switch <nome>` — Trocar sessão
 • `/delete <nome>` — Apagar sessão
 • `/clone <nome>` — Clonar sessão atual (mesma thread do Claude, branch paralela)
+• `/resume` — Retomar conversa iniciada no Claude.app/terminal (ou sessão recente do bot)
 • `/clear` — Resetar sessão atual
 • `/compact` — Compactar contexto
 • `/cost` — Custo e uso de tokens da sessão
@@ -5632,6 +5645,73 @@ def _strip_memory_context(text: Optional[str]) -> str:
     return _MEMORY_CONTEXT_RE.sub("", text or "")
 
 
+# Token-shaped patterns redacted regardless of value. Anchored on the shapes the
+# bot's providers actually emit (sk-ant setup/api tokens, Bearer headers, raw
+# Authorization headers) so leaked upstream error bodies never expose a secret.
+_REDACT_PATTERNS = (
+    re.compile(r"sk-ant-[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"Bearer\s+[A-Za-z0-9._\-]+"),
+    re.compile(r"Authorization:\s*\S+", re.IGNORECASE),
+)
+# A live secret value must be at least this long before we substring-replace it,
+# so an empty/short env var can never spray [REDACTED] across innocent prose.
+_REDACT_MIN_VALUE_LEN = 12
+
+
+def _redact_secrets(text: str) -> str:
+    """Mask tokens/secrets before text is sent to Telegram or written to logs.
+
+    Masks two classes:
+    - Token PATTERNS (sk-ant-…, Bearer …, Authorization: …) regardless of value.
+    - Known LIVE secret VALUES read at runtime (TELEGRAM_BOT_TOKEN, ZAI_API_KEY,
+      GITHUB_TOKEN, CLAUDE_CODE_OAUTH_TOKEN env vars + the access/refresh tokens
+      in ~/.claude-bot/claude-auth.json), substituted with ``[REDACTED]``.
+
+    Fail-open: every lookup is guarded; on any internal error the best-effort
+    redacted string is returned and nothing is raised. Values shorter than
+    ``_REDACT_MIN_VALUE_LEN`` are skipped so an empty/short secret can't cause
+    [REDACTED] to be sprayed across unrelated text.
+    """
+    if not text:
+        return text
+    result = text
+    # 1) Pattern-based masking (value-independent).
+    for pattern in _REDACT_PATTERNS:
+        try:
+            result = pattern.sub("[REDACTED]", result)
+        except Exception:
+            pass
+    # 2) Collect live secret VALUES, then replace each literal occurrence.
+    values = []
+    try:
+        for var in ("TELEGRAM_BOT_TOKEN", "ZAI_API_KEY", "GITHUB_TOKEN",
+                    "CLAUDE_CODE_OAUTH_TOKEN"):
+            values.append(os.environ.get(var))
+    except Exception:
+        pass
+    try:
+        auth = _load_bot_auth()
+        if isinstance(auth, dict):
+            for key in ("access_token", "refresh_token", "token"):
+                values.append(auth.get(key))
+    except Exception:
+        pass
+    # De-dupe and sort longest-first so a value that is a substring of another
+    # (e.g. a token contained in a header line) doesn't leave a tail behind.
+    seen = set()
+    for value in sorted((v for v in values if v), key=len, reverse=True):
+        if not isinstance(value, str) or len(value) < _REDACT_MIN_VALUE_LEN:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        try:
+            result = result.replace(value, "[REDACTED]")
+        except Exception:
+            pass
+    return result
+
+
 def record_manual_lesson(text: str, agent_id: Optional[str] = None) -> Optional[Path]:
     """Append a user-supplied lesson to Agents/<agent>/Lessons/manual-YYYY-MM-DD-HHMM.md.
 
@@ -5707,6 +5787,127 @@ def _make_session_name(agent: Optional[str], sessions: dict) -> str:
             if suffix.isdigit():
                 max_n = max(max_n, int(suffix))
     return f"{prefix}{max_n + 1}"
+
+
+# ---------------------------------------------------------------------------
+# Resumable-session discovery (/resume)
+# ---------------------------------------------------------------------------
+# Claude Code persists every local terminal/IDE session as a JSONL transcript at
+#   ~/.claude/projects/<encoded-cwd>/<session-id>.jsonl
+# and the Claude desktop app (Claude.app), when pointed at a REAL local folder,
+# runs the SAME engine — so its sessions land in that same store, indexed by a
+# sidecar JSON at CLAUDE_APP_SESSIONS_DIR/<ws>/<grp>/local_<id>.json carrying a
+# human-readable `title`, the real `cliSessionId`, `cwd`, `model`, and
+# `lastActivityAt`. `/resume` surfaces those (plus the bot's own Telegram
+# sessions) so a thread started on the desktop/terminal continues here.
+
+
+def _encode_project_dir(cwd: str) -> str:
+    """Reproduce Claude Code's cwd→project-dir encoding: every non-alphanumeric
+    char becomes ``-`` (e.g. ``/Users/x/claude-bot`` → ``-Users-x-claude-bot``)."""
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd or "")
+
+
+def _resume_model_alias(model_id: Optional[str]) -> Optional[str]:
+    """Map a captured model id (e.g. ``claude-opus-4-8[1m]``) to a bot alias the
+    resumed session can adopt. Returns None when unmappable so the caller falls
+    back to the agent's default model."""
+    if not model_id:
+        return None
+    mid = model_id.split("[", 1)[0].strip().lower()  # drop any [1m] suffix
+    if mid.startswith("claude-opus") or mid == "opus":
+        return "opus"
+    if mid.startswith("claude-sonnet") or mid == "sonnet":
+        return "sonnet"
+    if mid.startswith("claude-haiku") or mid == "haiku":
+        return "haiku"
+    if mid.startswith("glm") or mid.startswith("gpt"):
+        return mid  # already a bot-recognized provider model name
+    return None
+
+
+def _clean_title(title: Optional[str]) -> str:
+    """Collapse a session title to one safe inline line for buttons/messages —
+    drop newlines and Markdown-active chars so it can't break formatting."""
+    t = (title or "").replace("\n", " ").strip()
+    t = re.sub(r"[`*_~|\[\]]", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t or "(sem título)"
+
+
+def _resume_relative_time(epoch: float) -> str:
+    """Human, pt-BR relative-time label for a past epoch-seconds timestamp."""
+    if not epoch:
+        return "?"
+    delta = max(0, time.time() - epoch)
+    mins = int(delta // 60)
+    if mins < 1:
+        return "agora"
+    if mins < 60:
+        return f"há {mins}min"
+    hours = mins // 60
+    if hours < 24:
+        return f"há {hours}h"
+    days = hours // 24
+    if days == 1:
+        return "ontem"
+    if days < 30:
+        return f"há {days}d"
+    months = days // 30
+    return "há 1 mês" if months == 1 else f"há {months} meses"
+
+
+def _short_cwd(cwd: str) -> str:
+    """Compact a working dir for display: ``$HOME`` → ``~`` and keep the last
+    two path components (``.../vault/main``)."""
+    if not cwd:
+        return "?"
+    p = cwd.replace(str(Path.home()), "~")
+    parts = [seg for seg in p.split("/") if seg]
+    if len(parts) <= 2:
+        return p
+    return ".../" + "/".join(parts[-2:])
+
+
+def _scan_claude_app_sessions(limit: int = 60) -> List[dict]:
+    """Read the Claude desktop app's session index and return resumable entries.
+
+    Each entry: ``{session_id, cwd, title, model, last_activity (epoch sec),
+    origin: 'claude.app'}``. Only sessions that are NOT archived and whose
+    transcript still exists under CLAUDE_PROJECTS_DIR (Claude Code prunes old
+    transcripts after ~30 days) are returned, newest-activity first.
+    Fail-open: any error yields ``[]`` (the bot still lists its own sessions)."""
+    out: List[dict] = []
+    try:
+        index_files = list(CLAUDE_APP_SESSIONS_DIR.glob("*/*/local_*.json"))
+    except Exception as exc:
+        logger.error("resume: cannot list Claude.app session index: %s", exc)
+        return out
+    for f in index_files:
+        try:
+            o = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue  # a corrupt/partial index file is skipped, not fatal
+        if not isinstance(o, dict) or o.get("isArchived"):
+            continue
+        sid = o.get("cliSessionId")
+        cwd = o.get("cwd")
+        if not sid or not cwd:
+            continue
+        transcript = CLAUDE_PROJECTS_DIR / _encode_project_dir(cwd) / f"{sid}.jsonl"
+        if not transcript.exists():
+            continue  # transcript pruned → not resumable, hide it
+        ts = o.get("lastActivityAt") or o.get("createdAt") or 0
+        out.append({
+            "session_id": sid,
+            "cwd": cwd,
+            "title": _clean_title(o.get("title")),
+            "model": o.get("model"),
+            "last_activity": (ts / 1000.0) if ts else 0.0,  # ms → s
+            "origin": "claude.app",
+        })
+    out.sort(key=lambda e: e["last_activity"], reverse=True)
+    return out[:limit]
 
 
 @dataclass
@@ -5976,7 +6177,7 @@ def _translate_error(raw: str) -> str:
         )
 
     # Nenhum padrão reconhecido — mostra o erro bruto truncado
-    snippet = raw[:400].strip()
+    snippet = _redact_secrets(raw[:400].strip())
     return f"❌ *Erro do Claude CLI*\n```\n{snippet}\n```"
 
 
@@ -6847,7 +7048,7 @@ class ClaudeRunner:
             if stderr and stderr.strip():
                 stderr_clean = stderr.strip()
                 self.stderr_text = stderr_clean
-                logger.warning("Claude stderr: %s", stderr_clean[:500])
+                logger.warning("Claude stderr: %s", _redact_secrets(stderr_clean[:500]))
                 if not self.accumulated_text and not self.result_text and not self.error_text:
                     self.error_text = _translate_error(stderr_clean)
 
@@ -7306,7 +7507,7 @@ class CodexRunner:
             if stderr and stderr.strip():
                 stderr_clean = stderr.strip()
                 self.stderr_text = stderr_clean
-                logger.warning("Codex stderr: %s", stderr_clean[:500])
+                logger.warning("Codex stderr: %s", _redact_secrets(stderr_clean[:500]))
                 if not self.accumulated_text and not self.result_text and not self.error_text:
                     self.error_text = _translate_openai_error(stderr_clean)
 
@@ -10214,6 +10415,11 @@ class ClaudeTelegramBot:
 
         self._voice_picks: Dict[str, dict] = {}  # voice/text picker during transcription
         self._reasoning_toggles: Dict[int, bool] = {}  # stream_msg_id → show reasoning
+        # /resume picker state: token → {ts, items}. The inline-keyboard
+        # callback carries only `resume:<token>:<idx>` (≤64 bytes), so the
+        # candidate list (session_id + cwd, too big for callback_data) lives
+        # here. In-memory + TTL (RESUME_TOKEN_TTL); a bot restart drops it.
+        self._resume_candidates: Dict[str, dict] = {}
         # Tracks mtime of today's journal at session start, per session name.
         # Used to detect journal updates mid-session and nudge Claude without breaking prefix cache.
         self._journal_mtimes: Dict[str, float] = {}
@@ -12558,6 +12764,171 @@ class ClaudeTelegramBot:
             f"_Agora ativa nesta branch. Original intacta em `{current.name}`._"
         )
 
+    # -- /resume: continue a session started elsewhere (Claude.app / terminal) --
+
+    def cmd_resume(self) -> None:
+        """Picker to continue a Claude Code session started outside Telegram —
+        the Claude desktop app (Claude.app) or a terminal — plus the bot's own
+        recent Telegram sessions. Picking one creates a NEW session that resumes
+        that conversation (same session_id + original cwd).
+
+        Primary chat only: a resume runs with full permissions and may point the
+        working directory outside the vault (e.g. another project the desktop
+        app was editing), so it must not be reachable from a locked secondary
+        chat.
+        """
+        if self._block_if_secondary("/resume"):
+            return
+        self._expire_resume_tokens()
+        candidates = self._build_resume_candidates(limit=RESUME_PICKER_LIMIT)
+        if not candidates:
+            self.send_message(
+                "🔍 Nenhuma sessão recente para retomar.\n"
+                "_Conversas do Claude.app/terminal aparecem aqui enquanto a "
+                "transcript existir — o Claude Code remove as antigas após ~30 dias._"
+            )
+            return
+        token = secrets.token_hex(4)
+        self._resume_candidates[token] = {"ts": time.time(), "items": candidates}
+        rows = [
+            [{"text": self._resume_button_label(c), "callback_data": f"resume:{token}:{idx}"}]
+            for idx, c in enumerate(candidates)
+        ]
+        self.send_message(
+            f"↩️ *Retomar conversa* — {len(candidates)} sessões recentes\n"
+            "_Escolha uma; eu crio uma sessão nova continuando de onde parou._",
+            reply_markup={"inline_keyboard": rows},
+        )
+
+    def _build_resume_candidates(self, limit: int = RESUME_PICKER_LIMIT) -> List[dict]:
+        """Merge the bot's own Telegram sessions with the Claude desktop app's
+        sessions into one recency-sorted list (by last activity / last message),
+        deduped by session_id. The currently-active session is excluded."""
+        items: List[dict] = []
+        seen: set = set()
+
+        # Bot's own sessions (agent / #General / DM contexts), from sessions.json.
+        active = self.sessions.active_session
+        for s in self.sessions.sessions.values():
+            if not s.session_id or s.name == active:
+                continue
+            seen.add(s.session_id)
+            items.append({
+                "session_id": s.session_id,
+                "cwd": s.workspace,
+                "title": _clean_title(s.name),
+                "model": s.model,
+                "last_activity": s.last_activity or s.created_at or 0.0,
+                "origin": "bot",
+            })
+
+        # Claude desktop app sessions, deduped against the bot's own.
+        for c in _scan_claude_app_sessions(limit=60):
+            if c["session_id"] in seen:
+                continue
+            seen.add(c["session_id"])
+            items.append(c)
+
+        items.sort(key=lambda e: e.get("last_activity") or 0.0, reverse=True)
+        return items[:limit]
+
+    _RESUME_ICONS = {"claude.app": "🖥️", "bot": "🤖", "terminal": "💻"}
+    _RESUME_ORIGIN_LABELS = {
+        "claude.app": "Claude.app", "bot": "bot (Telegram)", "terminal": "terminal",
+    }
+
+    def _resume_button_label(self, c: dict) -> str:
+        icon = self._RESUME_ICONS.get(c.get("origin"), "💬")
+        title = _clean_title(c.get("title"))
+        if len(title) > 32:
+            title = title[:31].rstrip() + "…"
+        where = _short_cwd(c.get("cwd") or "")
+        when = _resume_relative_time(c.get("last_activity") or 0.0)
+        return f"{icon} {title} · {where} · {when}"
+
+    def _agent_for_cwd(self, cwd: str) -> str:
+        """If ``cwd`` sits inside a vault agent's directory, return that agent
+        id; otherwise fall back to Main. Lets a resumed vault session keep its
+        agent context, while external projects run under Main."""
+        try:
+            cwd_p = Path(cwd).resolve()
+        except Exception:
+            return MAIN_AGENT_ID
+        for aid in iter_agent_ids():
+            try:
+                base = agent_base(aid).resolve()
+            except Exception:
+                continue
+            if cwd_p == base or base in cwd_p.parents:
+                return aid
+        return MAIN_AGENT_ID
+
+    def _expire_resume_tokens(self) -> None:
+        """Drop picker tokens older than RESUME_TOKEN_TTL (best-effort TTL)."""
+        now = time.time()
+        stale = [k for k, v in self._resume_candidates.items()
+                 if now - v.get("ts", 0) > RESUME_TOKEN_TTL]
+        for k in stale:
+            del self._resume_candidates[k]
+
+    def _handle_resume_callback(self, callback: Dict, payload: str) -> None:
+        cb_id = callback.get("id", "")
+        try:
+            token, idx_s = payload.split(":", 1)
+            idx = int(idx_s)
+        except (ValueError, AttributeError):
+            self.answer_callback(cb_id, "Callback inválido")
+            return
+        entry = self._resume_candidates.get(token)
+        if not entry or idx < 0 or idx >= len(entry["items"]):
+            self.answer_callback(cb_id, "Sessão expirada — rode /resume de novo")
+            return
+        c = entry["items"][idx]
+        self.answer_callback(cb_id, "Retomando…")
+        self._adopt_resumed_session(c, callback)
+
+    def _adopt_resumed_session(self, c: dict, callback: Optional[Dict] = None) -> None:
+        """Create and activate a NEW bot session that resumes the chosen
+        session_id under its original cwd. The next Telegram message continues
+        that conversation with full context."""
+        session_id = c.get("session_id")
+        cwd = c.get("cwd") or CLAUDE_WORKSPACE
+        if not session_id:
+            self.send_message("❌ Sessão sem ID — não dá para retomar.")
+            return
+        if not os.path.isdir(cwd):
+            self.send_message(
+                f"❌ A pasta da sessão não existe mais: `{cwd}`\n"
+                "_Não dá para retomar uma conversa cujo diretório sumiu._"
+            )
+            return
+        # Consolidate the outgoing session before we switch away (non-blocking).
+        if not self.runner.running:
+            self._consolidate_session_background(self._get_session())
+
+        agent_id = self._agent_for_cwd(cwd)
+        name = _make_session_name(agent_id, self.sessions.sessions)
+        s = self.sessions.create(name, agent=agent_id)  # sets active + saves
+        s.workspace = cwd
+        s.session_id = session_id
+        s.model = _resume_model_alias(c.get("model")) or _agent_default_model(agent_id)
+        s.last_activity = time.time()
+        self.sessions.save()
+
+        if callback is not None:
+            self._remove_keyboard(callback)
+        origin = c.get("origin")
+        icon = self._RESUME_ICONS.get(origin, "💬")
+        origin_label = self._RESUME_ORIGIN_LABELS.get(origin, "sessão")
+        self.send_message(
+            f"↩️ *Sessão retomada* de {origin_label} {icon}\n"
+            f"• Conversa: {_clean_title(c.get('title'))}\n"
+            f"• Pasta: `{cwd}`\n"
+            f"• Modelo: `{s.model}`\n"
+            f"• Nova sessão: `{s.name}`\n\n"
+            "_Manda uma mensagem e eu continuo de onde a conversa parou._"
+        )
+
     def cmd_clear(self) -> None:
         # Consolidate before clearing — session_id will be lost
         self._consolidate_session()
@@ -13145,7 +13516,7 @@ class ClaudeTelegramBot:
                 return True, "OK"
             blob = ((out.stdout or "") + " " + (out.stderr or "")).strip()
             kind = classify_error(blob)
-            return False, f"{kind.value}: {blob[:160]}"
+            return False, f"{kind.value}: {_redact_secrets(blob[:160])}"
         except subprocess.TimeoutExpired:
             return False, "timeout"
         except Exception as exc:
@@ -13266,7 +13637,7 @@ class ClaudeTelegramBot:
         except urllib.error.HTTPError as exc:
             body = ""
             try:
-                body = exc.read().decode()[:200]
+                body = _redact_secrets(exc.read().decode()[:200])
             except Exception:
                 pass
             self.send_message(
@@ -17484,6 +17855,7 @@ class ClaudeTelegramBot:
                 "/switch": lambda: self.cmd_switch(arg) if arg else self.send_message("❌ Use: `/switch <nome>`"),
                 "/delete": lambda: self.cmd_delete(arg) if arg else self.send_message("❌ Use: `/delete <nome>`"),
                 "/clone": lambda: self.cmd_clone(arg),
+                "/resume": lambda: self.cmd_resume(),
                 "/lesson": lambda: self.cmd_lesson(arg),
                 "/compact": lambda: self.cmd_compact(),
                 "/cost": lambda: self.cmd_cost(),
@@ -17608,6 +17980,11 @@ class ClaudeTelegramBot:
         # Cancel a currently-running pipeline (button on the live progress message)
         if data.startswith("cancel_run:"):
             self._handle_cancel_running_pipeline_callback(callback, data[len("cancel_run:"):])
+            return
+
+        # /resume picker: adopt the chosen external/bot session into a new one
+        if data.startswith("resume:"):
+            self._handle_resume_callback(callback, data[len("resume:"):])
             return
 
         # Voice pick: update selection without removing keyboard
