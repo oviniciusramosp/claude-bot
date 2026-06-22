@@ -1033,5 +1033,153 @@ class InvalidRoutineNotificationRouting(unittest.TestCase):
         self.assertNotIn("thread_id", kw)
 
 
+class SchedulerHeartbeat(unittest.TestCase):
+    """Liveness heartbeat + the hardened loop-tick exception policy.
+
+    The loop body is factored into _tick() so the exception policy is testable
+    without spinning up the daemon thread: ordinary Exception is swallowed and
+    the loop continues; SystemExit/KeyboardInterrupt break cleanly.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+        self.state = self.bot.RoutineStateManager()
+        self.scheduler = self.bot.RoutineScheduler(
+            self.state,
+            enqueue_fn=lambda task: None,
+            enqueue_pipeline_fn=lambda task: None,
+            notify_fn=lambda msg, **kw: None,
+        )
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def test_touch_heartbeat_writes_parseable_timestamp(self):
+        before = real_time.time()
+        self.scheduler._touch_heartbeat()
+        raw = self.bot.SCHEDULER_HEARTBEAT_FILE.read_text(encoding="utf-8").strip()
+        ts = float(raw)  # must parse as epoch float
+        after = real_time.time()
+        self.assertGreaterEqual(ts, before - 1)
+        self.assertLessEqual(ts, after + 1)
+
+    def test_touch_heartbeat_does_not_raise_on_unwritable_path(self):
+        # Point the heartbeat at a path whose parent is an existing *file* —
+        # mkdir/write both fail, but _touch_heartbeat must swallow it.
+        bogus_parent = self.home / "not-a-dir"
+        bogus_parent.write_text("i am a file", encoding="utf-8")
+        self.bot.SCHEDULER_HEARTBEAT_FILE = bogus_parent / "sub" / ".heartbeat"
+        try:
+            self.scheduler._touch_heartbeat()  # must not raise
+        except Exception as exc:  # pragma: no cover - defensive
+            self.fail(f"_touch_heartbeat raised on unwritable path: {exc!r}")
+        self.assertFalse((bogus_parent / "sub" / ".heartbeat").exists())
+
+    def test_tick_writes_heartbeat_each_call(self):
+        self.bot.SCHEDULER_HEARTBEAT_FILE.unlink(missing_ok=True)
+        cont = self.scheduler._tick()
+        self.assertTrue(cont)
+        self.assertTrue(self.bot.SCHEDULER_HEARTBEAT_FILE.exists())
+
+    def test_tick_swallows_ordinary_exception_and_continues(self):
+        calls = {"n": 0}
+
+        def boom():
+            calls["n"] += 1
+            raise RuntimeError("transient blip")
+
+        self.scheduler._check_routines = boom
+        cont = self.scheduler._tick()
+        self.assertTrue(cont, "ordinary exception must keep the loop running")
+        self.assertEqual(calls["n"], 1)
+        # Heartbeat is written even when the tick body blows up.
+        self.assertTrue(self.bot.SCHEDULER_HEARTBEAT_FILE.exists())
+
+    def test_tick_breaks_on_system_exit(self):
+        def die():
+            raise SystemExit(0)
+
+        self.scheduler._check_routines = die
+        cont = self.scheduler._tick()
+        self.assertFalse(cont, "SystemExit must break the loop cleanly")
+
+    def test_tick_breaks_on_keyboard_interrupt(self):
+        def interrupt():
+            raise KeyboardInterrupt()
+
+        self.scheduler._check_routines = interrupt
+        cont = self.scheduler._tick()
+        self.assertFalse(cont, "KeyboardInterrupt must break the loop cleanly")
+
+    def test_loop_exits_when_tick_returns_false(self):
+        # The loop must honor a False from _tick (fatal-signal path) and exit
+        # without waiting. Patch _tick to break immediately; the stop_event is
+        # never set, so the loop can only terminate via the break.
+        self.scheduler._tick = lambda: False
+        # If the loop ignored the break it would block on wait(60) forever;
+        # since _tick returns False on the first iteration it returns at once.
+        self.scheduler._loop()
+
+    def test_loop_stops_on_stop_event(self):
+        # Ordinary shutdown path: stop_event set → _tick never called.
+        self.scheduler._stop_event.set()
+        called = {"n": 0}
+        self.scheduler._tick = lambda: (called.__setitem__("n", called["n"] + 1) or True)
+        self.scheduler._loop()
+        self.assertEqual(called["n"], 0)
+
+
+class StatusHeartbeatLine(unittest.TestCase):
+    """cmd_status' scheduler-liveness line: fresh / stale / missing."""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        root = Path(self._td.name)
+        self.home = root / "home"
+        self.vault = root / "vault"
+        self.home.mkdir()
+        self.bot = load_bot_module(tmp_home=self.home, vault_dir=self.vault)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _line(self) -> str:
+        # _scheduler_heartbeat_line is a pure method on the bot orchestrator;
+        # build a bare instance without running __init__ side effects.
+        bot_obj = self.bot.ClaudeTelegramBot.__new__(self.bot.ClaudeTelegramBot)
+        return self.bot.ClaudeTelegramBot._scheduler_heartbeat_line(bot_obj)
+
+    def test_missing_file_shows_neutral_dash(self):
+        self.bot.SCHEDULER_HEARTBEAT_FILE.unlink(missing_ok=True)
+        line = self._line()
+        self.assertIn("🫀 Scheduler", line)
+        self.assertIn("—", line)
+        self.assertNotIn("⚠️", line)
+
+    def test_fresh_heartbeat_no_warning(self):
+        self.bot.SCHEDULER_HEARTBEAT_FILE.write_text(
+            str(real_time.time()), encoding="utf-8")
+        line = self._line()
+        self.assertIn("último tick", line)
+        self.assertNotIn("⚠️", line)
+
+    def test_stale_heartbeat_prefixes_warning(self):
+        stale = real_time.time() - (self.bot.SCHEDULER_HEARTBEAT_STALE_SECS + 60)
+        self.bot.SCHEDULER_HEARTBEAT_FILE.write_text(str(stale), encoding="utf-8")
+        line = self._line()
+        self.assertIn("⚠️", line)
+        self.assertIn("último tick", line)
+
+    def test_garbage_value_treated_as_missing(self):
+        self.bot.SCHEDULER_HEARTBEAT_FILE.write_text("not-a-number", encoding="utf-8")
+        line = self._line()
+        self.assertIn("—", line)
+
+
 if __name__ == "__main__":
     unittest.main()

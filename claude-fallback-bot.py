@@ -170,6 +170,11 @@ EDIT_MODE_DIR = DATA_DIR / "edit-modes"  # per-chat edit-mode state (awaiting fe
 EDIT_MODE_TTL = 1800  # 30min — edit mode expires if user doesn't respond
 WATCHDOG_NOTIFIED_FLAG = DATA_DIR / ".watchdog-notified"
 WATCHDOG_DISABLE_FLAG  = DATA_DIR / ".watchdog-disabled"
+# Liveness heartbeat written once per scheduler tick. The watchdog and /status
+# read its mtime/value to detect a silently-dead scheduler thread (the process
+# can stay alive while the daemon thread dies). See bot-watchdog.sh.
+SCHEDULER_HEARTBEAT_FILE = DATA_DIR / ".scheduler-heartbeat"
+SCHEDULER_HEARTBEAT_STALE_SECS = 180  # mirror of STALE_SECS in bot-watchdog.sh
 TEMP_IMAGES_DIR = Path("/tmp/claude-bot-images")
 TEMP_FILES_DIR = Path("/tmp/claude-bot-files")
 
@@ -4014,12 +4019,42 @@ class RoutineScheduler:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def _touch_heartbeat(self) -> None:
+        """Best-effort liveness signal: write the current epoch to the
+        heartbeat file. Never raises — a dead heartbeat must never take down
+        the scheduler thread (the whole point is to OUTLIVE failures)."""
+        try:
+            SCHEDULER_HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            SCHEDULER_HEARTBEAT_FILE.write_text(str(time.time()), encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Scheduler heartbeat write failed: %s", exc)
+
+    def _tick(self) -> bool:
+        """Run one scheduler iteration. Returns True to keep looping, False to
+        break cleanly. Exception policy lives here so it's unit-testable
+        without spinning up the daemon thread:
+
+        - ordinary Exception → log and CONTINUE (unchanged resilient behavior)
+        - SystemExit / KeyboardInterrupt → log a warning and BREAK cleanly
+          (so a fatal signal exits gracefully instead of killing the thread
+          mid-tick, leaving routines silently dead)
+        - any other BaseException → re-raise (don't swallow truly fatal state)
+        """
+        self._touch_heartbeat()
+        try:
+            self._check_routines()
+        except (SystemExit, KeyboardInterrupt) as exc:
+            logger.warning("Routine scheduler received %s — stopping loop.",
+                           type(exc).__name__)
+            return False
+        except Exception as exc:
+            logger.error("Routine scheduler error: %s", exc, exc_info=True)
+        return True
+
     def _loop(self) -> None:
         while not self._stop_event.is_set():
-            try:
-                self._check_routines()
-            except Exception as exc:
-                logger.error("Routine scheduler error: %s", exc, exc_info=True)
+            if not self._tick():
+                break
             self._stop_event.wait(60)
 
     def _notify_invalid_routine(self, routine_name: str, errors: list,
@@ -12069,7 +12104,22 @@ class ClaudeTelegramBot:
         ctx = self._ctx
         voice_status = "🔊 On" if (ctx and ctx.tts_enabled) else "🔇 Off"
         lines.append(f"• Resposta por voz: {voice_status}")
+        lines.append(self._scheduler_heartbeat_line())
         self.send_message("\n".join(lines))
+
+    def _scheduler_heartbeat_line(self) -> str:
+        """One-line scheduler liveness for /status. Reads the heartbeat file
+        written each tick by RoutineScheduler. Missing file → neutral '—'
+        (e.g. fresh start before the first tick); stale (> threshold) → ⚠️.
+        Never raises."""
+        try:
+            raw = SCHEDULER_HEARTBEAT_FILE.read_text(encoding="utf-8").strip()
+            last = float(raw)
+        except Exception:
+            return "🫀 Scheduler: —"
+        age = max(0.0, time.time() - last)
+        warn = "⚠️ " if age > SCHEDULER_HEARTBEAT_STALE_SECS else ""
+        return f"🫀 Scheduler: {warn}último tick há {_format_duration(age)}"
 
     def cmd_model_switch(self, model: str) -> None:
         if model not in MODEL_PROVIDERS and not model.startswith("glm") and not model.startswith("gpt-"):
