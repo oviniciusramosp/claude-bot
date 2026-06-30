@@ -6,7 +6,7 @@ created: 2026-04-11
 updated: 2026-04-11
 tags: [agent, hub]
 name: Main
-model: sonnet
+model: opus
 icon: "🤖"
 color: grey
 default: true
