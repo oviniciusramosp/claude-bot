@@ -574,6 +574,34 @@ class MaxEffortAndContext(unittest.TestCase):
         finally:
             os.environ.pop("OPUS_MODEL", None)
 
+    def test_resolve_model_alias_concrete_id_map(self):
+        # fable / sonnet-5 aren't bare CLI aliases — they must translate to the
+        # concrete API id so the Claude CLI accepts --model.
+        self.assertEqual(self.bot.resolve_model_alias("fable"), "claude-fable-5")
+        self.assertEqual(self.bot.resolve_model_alias("sonnet-5"), "claude-sonnet-5")
+
+    def test_new_models_are_anthropic_provider(self):
+        self.assertEqual(self.bot.model_provider("fable"), "anthropic")
+        self.assertEqual(self.bot.model_provider("sonnet-5"), "anthropic")
+
+    def test_new_models_get_1m_context(self):
+        # Both new models resolve to a concrete id that gets the [1m] suffix
+        # (both have 1M context; neither is haiku).
+        self.assertEqual(
+            self.bot.resolve_max_context_model("claude-fable-5"),
+            "claude-fable-5[1m]",
+        )
+        self.assertEqual(
+            self.bot.resolve_max_context_model("claude-sonnet-5"),
+            "claude-sonnet-5[1m]",
+        )
+
+    def test_resume_alias_maps_new_models(self):
+        # Sonnet 5 must not collapse into the generic sonnet alias.
+        self.assertEqual(self.bot._resume_model_alias("claude-fable-5[1m]"), "fable")
+        self.assertEqual(self.bot._resume_model_alias("claude-sonnet-5"), "sonnet-5")
+        self.assertEqual(self.bot._resume_model_alias("claude-sonnet-4-6"), "sonnet")
+
     # --- run() integration (mocked Popen) ---
     def test_anthropic_run_adds_1m_and_max_effort(self):
         self.bot.ZAI_API_KEY = ""

@@ -172,6 +172,8 @@ class ModelProvidersRegistry(unittest.TestCase):
             "sonnet": "anthropic",
             "opus": "anthropic",
             "haiku": "anthropic",
+            "fable": "anthropic",
+            "sonnet-5": "anthropic",
             "glm-5.1": "zai",
             "glm-4.7": "zai",
             "glm-4.5-air": "zai",
