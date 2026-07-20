@@ -25,7 +25,6 @@ The vault is organized as **one tree per agent**, with this README as the single
 - [[agent-contador]]
 - [[agent-contador-pj]]
 - [[agent-crypto-bro]]
-- [[agent-digests]]
 - [[agent-levain]]
 - [[agent-main]]
 - [[agent-mexc-bot]]
