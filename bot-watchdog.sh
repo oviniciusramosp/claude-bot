@@ -10,10 +10,15 @@ ENV_FILE="$SCRIPT_DIR/.env"
 FLAG_FILE="$HOME/.claude-bot/.watchdog-notified"
 DISABLE_FILE="$HOME/.claude-bot/.watchdog-disabled"
 HEARTBEAT_FILE="$HOME/.claude-bot/.scheduler-heartbeat"
+STALE_STATE_FILE="$HOME/.claude-bot/.watchdog-stale-since"
 PLIST_DST="$HOME/Library/LaunchAgents/com.claudebot.bot.plist"
 SERVICE_ID="gui/$(id -u)/com.claudebot.bot"
 BOT_PROCESS="claude-fallback-bot.py"
 STALE_SECS=180  # mirror of SCHEDULER_HEARTBEAT_STALE_SECS in claude-fallback-bot.py
+# Grace window after a system boot: right after a reboot the heartbeat file's
+# mtime predates the boot (so it looks stale) and the bot may still be starting.
+# Skip the stuck-scheduler path until the machine has been up this long.
+BOOT_GRACE_SECS=300
 
 # Disabled — exit silently (e.g. during planned maintenance or manual restart)
 [[ -f "$DISABLE_FILE" ]] && exit 0
@@ -57,6 +62,17 @@ file_age_secs() {
     echo $(( now - mtime ))
 }
 
+# Whole-seconds since the last system boot (macOS: parse kern.boottime, which
+# prints "{ sec = <epoch>, usec = ... } ...").  Empty on failure.  Uses the
+# absolute sysctl path because launchd runs this script with a minimal PATH.
+system_uptime_secs() {
+    local boot now
+    boot=$(/usr/sbin/sysctl -n kern.boottime 2>/dev/null | sed -n 's/{ sec = \([0-9]*\).*/\1/p')
+    [[ -z "$boot" ]] && return 1
+    now=$(date +%s)
+    echo $(( now - boot ))
+}
+
 if pgrep -f "$BOT_PROCESS" > /dev/null 2>&1; then
     # PRIMARY gate: process exists. Clear notification flag on recovery.
     if [[ -f "$FLAG_FILE" ]]; then
@@ -68,10 +84,34 @@ if pgrep -f "$BOT_PROCESS" > /dev/null 2>&1; then
     # and restart it through the same path. If the heartbeat file does NOT
     # exist (older bot build mid-upgrade, or before the first tick), behave
     # EXACTLY as before — pgrep-only — so we never false-restart.
+    #
+    # Two guards keep this from firing on a stale-but-not-stuck scheduler:
+    #   1. Boot grace — a fresh reboot leaves the old heartbeat file behind with
+    #      a pre-boot mtime; it LOOKS stale but the scheduler simply hasn't
+    #      started ticking yet. Skip until the machine has been up BOOT_GRACE_SECS.
+    #   2. Debounce — a transient freeze (system sleep/wake, a load spike, or the
+    #      pre-shutdown window of a system reboot) freezes the scheduler thread
+    #      just long enough to look stale on ONE check, then recovers. Require the
+    #      heartbeat to be stale on TWO consecutive runs before restarting, so a
+    #      one-off freeze self-heals instead of triggering a spurious restart.
     if [[ -f "$HEARTBEAT_FILE" ]]; then
         AGE=$(file_age_secs "$HEARTBEAT_FILE")
+        UP=$(system_uptime_secs)
         if [[ -n "$AGE" && "$AGE" -gt "$STALE_SECS" ]]; then
-            restart_bot "⚠️ *Scheduler travado!* Sem heartbeat há ${AGE}s (processo vivo). Reiniciando o Claude Bot..."
+            if [[ -n "$UP" && "$UP" -lt "$BOOT_GRACE_SECS" ]]; then
+                # Recent boot — staleness is expected; don't restart, reset debounce.
+                rm -f "$STALE_STATE_FILE"
+            elif [[ -f "$STALE_STATE_FILE" ]]; then
+                # Stale on a previous run too → genuinely stuck. Restart.
+                restart_bot "⚠️ *Scheduler travado!* Sem heartbeat há ${AGE}s (processo vivo, confirmado em 2 ciclos). Reiniciando o Claude Bot..."
+                rm -f "$STALE_STATE_FILE"
+            else
+                # First stale observation — record it and wait one cycle.
+                date +%s > "$STALE_STATE_FILE"
+            fi
+        else
+            # Heartbeat fresh → clear any pending debounce state.
+            rm -f "$STALE_STATE_FILE"
         fi
     fi
 else
