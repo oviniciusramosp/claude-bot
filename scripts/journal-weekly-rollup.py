@@ -108,6 +108,28 @@ def _collect_journal_text(
     return "\n\n".join(chunks).strip()
 
 
+def _resolve_oauth_token() -> Optional[str]:
+    """Return the bot-managed Anthropic OAuth token, if available.
+
+    Mirrors the resolution logic in ``ClaudeRunner`` so script subprocesses
+    benefit from the same bot-owned credential and don't depend on the
+    shared macOS keychain (which the desktop app can rotate under us).
+    """
+    import json as _json
+
+    auth_file = Path.home() / ".claude-bot" / "claude-auth.json"
+    try:
+        data = _json.loads(auth_file.read_text())
+        method = data.get("method")
+        if method == "setup_token":
+            return data.get("token")
+        if method == "oauth":
+            return data.get("access_token")
+    except Exception:
+        pass
+    return os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+
+
 def _run_claude_summary(agent: str, week_label: str, raw_text: str, workspace: Path) -> Tuple[str, str]:
     """Spawn a ``claude --print`` subprocess to produce the weekly summary.
 
@@ -159,17 +181,22 @@ def _run_claude_summary(agent: str, week_label: str, raw_text: str, workspace: P
         "--output-format", "text",
         "-p", prompt,
     ]
+    env = os.environ.copy()
+    token = _resolve_oauth_token()
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     result = subprocess.run(
         cmd,
         cwd=str(workspace),
         capture_output=True,
         text=True,
         timeout=180,
+        env=env,
     )
     if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[:400]
         raise RuntimeError(
-            f"claude subprocess failed rc={result.returncode}: "
-            f"stderr={result.stderr.strip()[:400]}"
+            f"claude subprocess failed rc={result.returncode}: {detail}"
         )
     raw = (result.stdout or "").strip()
     if "===DESC===" in raw:
