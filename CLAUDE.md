@@ -106,18 +106,16 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager. Contains cr
 | `TELEGRAM_CHAT_ID` | Yes | — | Authorized Telegram chat ID |
 | `CLAUDE_PATH` | No | `/opt/homebrew/bin/claude` | Path to Claude CLI binary |
 | `CLAUDE_WORKSPACE` | No | `vault/main/` | Working directory for Main sessions |
-| `ZAI_API_KEY` | No | — | z.AI API key — required for any `glm-*` model. See `.claude/rules/multi-provider-models.md` |
-| `ZAI_BASE_URL` | No | `https://api.z.ai/api/anthropic` | z.AI's Anthropic-compatible gateway |
 | `CODEX_PATH` | No | `/opt/homebrew/bin/codex` | Path to OpenAI Codex CLI — required for any `gpt-*` model. Install: `brew install --cask codex`, then `codex login` with ChatGPT Plus/Pro |
 | `ADVISOR_MODEL` | No | `opus` | Model used by `scripts/advisor.sh` when escalating |
-| `MODEL_FALLBACK_CHAIN` | No | `opus,glm-5.1,sonnet,glm-4.7,haiku` | Fallback order when a model fails. Configurable via macOS app. |
-| `DEFAULT_EFFORT` | No | `max` | Reasoning effort applied to Anthropic turns when nothing overrides it (`low\|medium\|high\|xhigh\|max`). Codex maps `max`→`high`; z.AI isn't forced. See `.claude/rules/multi-provider-models.md` |
+| `MODEL_FALLBACK_CHAIN` | No | `opus,sonnet-5,haiku` | Fallback order when a model fails. Configurable via macOS app. |
+| `DEFAULT_EFFORT` | No | `max` | Reasoning effort applied to Anthropic turns when nothing overrides it (`low\|medium\|high\|xhigh\|max`). Codex maps `max`→`high`. See `.claude/rules/multi-provider-models.md` |
 | `MAX_CONTEXT` | No | `true` | When on, appends the `[1m]` 1M-context variant to native Anthropic models. **1M context requires pay-as-you-go usage credits enabled at claude.ai/settings/usage — even on subscription auth.** Without them the CLI rejects `[1m]`; the bot retries once on standard 200K context and then trips a process kill switch so subsequent turns skip `[1m]` (one wasted attempt per restart, no per-turn tax). Set `false`/`0`/`off` to skip the attempt entirely |
-| `OPUS_MODEL` / `SONNET_MODEL` / `HAIKU_MODEL` | No | — | Pin a concrete model id for that alias when the CLI's bare alias lags a release (e.g. `OPUS_MODEL=claude-opus-4-8` while `--model opus` still resolves to 4.7). Unset → use the auto-tracking alias. Falls back to the alias if the pinned id is unavailable |
+| `OPUS_MODEL` / `SONNET_MODEL` / `HAIKU_MODEL` | No | — | Pin a concrete model id for that alias when the CLI's bare alias lags a release (this was needed for `OPUS_MODEL=claude-opus-4-8` while `--model opus` still resolved to 4.7 — not currently needed, since `opus` now resolves directly to `claude-opus-5`). Unset → use the auto-tracking alias. Falls back to the alias if the pinned id is unavailable |
 
 Edited via: ClaudeBotManager → Settings, or directly.
 
-**Model versions auto-track upgrades.** The response signature shows the *real* model id the CLI reports at runtime (e.g. `claude-opus-4-8[1m]`) — captured from the init event, not a hardcoded map — so a model upgrade surfaces with zero code edits. Two upgrade paths: (1) the bare aliases (`opus`/`sonnet`/`haiku`) advance automatically when the installed CLI's alias mapping moves — keep the CLI current (the daily `update-check` routine flags brew/cask updates); (2) when a new model ships *before* the CLI alias catches up (as with Opus 4.8 — `--model opus` still resolves to 4.7 even on CLI 2.1.150, while `--model claude-opus-4-8` works), pin it via `OPUS_MODEL` until the alias advances. `MODEL_FULL_IDS` is only a display fallback for early failures / non-Anthropic providers.
+**Model versions auto-track upgrades.** The response signature shows the *real* model id the CLI reports at runtime (e.g. `claude-opus-5[1m]`) — captured from the init event, not a hardcoded map — so a model upgrade surfaces with zero code edits. Two upgrade paths: (1) the bare aliases (`opus`/`sonnet`/`haiku`) advance automatically when the installed CLI's alias mapping moves — keep the CLI current (the daily `update-check` routine flags brew/cask updates); (2) when a new model ships *before* the CLI alias catches up (as happened with Opus 4.8 — `--model opus` resolved to 4.7 for a while, while `--model claude-opus-4-8` already worked), pin it via `OPUS_MODEL` until the alias advances, then remove the pin (as of Opus 5, `opus` resolves directly — no pin is currently set). `MODEL_FULL_IDS` is only a display fallback for early failures / non-Anthropic providers.
 
 ### `vault/.env` — API keys for vault tasks
 
@@ -131,10 +129,9 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 |---------|-------------|
 | `/start`, `/help` | Show help |
 | `/status` | Session & process info |
-| `/sonnet`, `/opus`, `/haiku` | Quick model switch (Anthropic) |
-| `/glm` | Quick switch to `glm-4.7` (z.AI) — requires `ZAI_API_KEY` |
-| `/gpt` | Quick switch to `gpt-5-codex` (OpenAI) — requires `codex login` with ChatGPT Plus/Pro |
-| `/model` | Model picker (inline keyboard; GLM row requires `ZAI_API_KEY`, GPT row requires the `codex` binary) |
+| `/sonnet5`, `/opus`, `/haiku` | Quick model switch (Anthropic) |
+| `/gpt` | Quick switch to `gpt-5` (OpenAI) — requires `codex login` with ChatGPT Plus/Pro |
+| `/model` | Model picker (inline keyboard; GPT row requires the `codex` binary) |
 | `/new [name]` | Create new session |
 | `/sessions` | List all sessions |
 | `/switch <name>` | Switch session |

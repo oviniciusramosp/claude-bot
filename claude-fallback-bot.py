@@ -5,7 +5,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.78.2"  # fix (v3.78.2): idle auto-compact notification ("🔄 Auto-compact (sessão … inativa Xh)") is no longer sent to Telegram. It was already disable_notification=True (silent — no sound/vibration) since v3.27.0, but the message still appeared in the chat and bumped the unread count; per user request the passive idle auto-compact now runs fully silently and sends nothing. The event is still recorded in bot.log (the "Idle compact:" logger.info in _check_idle_sessions plus _auto_compact's "Auto-compact starting/completed" logs). The 🧹 idle-CLEAR notification (session reset after longer inactivity) is unchanged — only the compact ping was removed. # fix (v3.78.1): document & audio downloads failed with "❌ Não consegui baixar o arquivo" whenever /tmp/claude-bot-files or /tmp/claude-bot-audio had been swept by macOS's periodic /tmp cleaner — those dirs were mkdir'd once at process startup and never recreated, so save_path.write_bytes() hit ENOENT days later. _download_telegram_file now does save_dir.mkdir(parents=True, exist_ok=True) right before writing, making downloads resilient to /tmp cleanup (images were unaffected only because their dir stays populated). # feat (v3.78.0): Fable 5 + Sonnet 5 — two new native-Anthropic models selectable via /fable and /sonnet5 (plus the /model keyboard). Both are registered as bot keys (`fable` → claude-fable-5, `sonnet-5` → claude-sonnet-5) in MODEL_PROVIDERS/MODEL_FULL_IDS; because neither is a bare alias the Claude CLI resolves on its own, a new MODEL_CONCRETE_ID map makes resolve_model_alias() hand the CLI the concrete id, and ClaudeRunner.run()'s model-unavailable retry drops to that concrete id (not the unknown bare key) for these. Both get the [1m] max-context suffix (1M window). _resume_model_alias() recognizes claude-fable-5 → fable and claude-sonnet-5 → sonnet-5 (matched before the generic claude-sonnet rule so Sonnet 5 doesn't collapse into Sonnet 4.6). Swift ModelCatalog kept in sync (contract test) and its stale test set brought current (gpt-* + new models, Opus label 4.7→4.8). # feat (v3.77.0): /resume — continue a Claude Code session started elsewhere (the Claude desktop app / Claude.app, or a terminal) directly from Telegram. The desktop app, when pointed at a real local folder, runs the SAME Claude Code engine — its sessions land in ~/.claude/projects/<cwd>/<id>.jsonl and are indexed (title/cwd/model/cliSessionId/lastActivityAt) under ~/Library/Application Support/Claude/claude-code-sessions. /resume reads that index (alive + non-archived only — Claude Code prunes transcripts after ~30 days), merges it with the bot's own Telegram sessions (sessions.json), dedupes by session_id, sorts by last activity, and shows an inline picker (top 20). Picking one creates a NEW bot session that resumes the chosen session_id under its original cwd (an external project runs under Main; a vault dir keeps its agent). Primary chat only (resumes run with full permissions and may point cwd outside the vault). New module helpers: _encode_project_dir, _resume_model_alias, _clean_title, _resume_relative_time, _short_cwd, _scan_claude_app_sessions. # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.78.3"  # fix (v3.78.3): Opus model migration — the CLI's bare `opus` alias now resolves directly to claude-opus-5 (verified via a live probe reading the init event's `model` field), so the OPUS_MODEL=claude-opus-4-8 pin added in v3.70 (back when the alias still lagged behind 4.8) is now stale and was forcing every Opus turn onto the older 4.8 model instead of the CLI's current default. Removed the pin from .env per the documented unset-when-caught-up policy. Updated MODEL_FULL_IDS' opus display-fallback id, the `/opus` help text, ClaudeBotManager's ModelCatalog label, and doc/comment examples referencing claude-opus-4-8 to claude-opus-5. The Fast Mode pricing note ($50/MTok output) is unchanged — Opus 5 fast-mode pricing matches Opus 4.8's, confirmed against current Anthropic pricing. # fix (v3.78.2): idle auto-compact notification ("🔄 Auto-compact (sessão … inativa Xh)") is no longer sent to Telegram. It was already disable_notification=True (silent — no sound/vibration) since v3.27.0, but the message still appeared in the chat and bumped the unread count; per user request the passive idle auto-compact now runs fully silently and sends nothing. The event is still recorded in bot.log (the "Idle compact:" logger.info in _check_idle_sessions plus _auto_compact's "Auto-compact starting/completed" logs). The 🧹 idle-CLEAR notification (session reset after longer inactivity) is unchanged — only the compact ping was removed. # fix (v3.78.1): document & audio downloads failed with "❌ Não consegui baixar o arquivo" whenever /tmp/claude-bot-files or /tmp/claude-bot-audio had been swept by macOS's periodic /tmp cleaner — those dirs were mkdir'd once at process startup and never recreated, so save_path.write_bytes() hit ENOENT days later. _download_telegram_file now does save_dir.mkdir(parents=True, exist_ok=True) right before writing, making downloads resilient to /tmp cleanup (images were unaffected only because their dir stays populated). # feat (v3.78.0): Fable 5 + Sonnet 5 — two new native-Anthropic models selectable via /fable and /sonnet5 (plus the /model keyboard). Both are registered as bot keys (`fable` → claude-fable-5, `sonnet-5` → claude-sonnet-5) in MODEL_PROVIDERS/MODEL_FULL_IDS; because neither is a bare alias the Claude CLI resolves on its own, a new MODEL_CONCRETE_ID map makes resolve_model_alias() hand the CLI the concrete id, and ClaudeRunner.run()'s model-unavailable retry drops to that concrete id (not the unknown bare key) for these. Both get the [1m] max-context suffix (1M window). _resume_model_alias() recognizes claude-fable-5 → fable and claude-sonnet-5 → sonnet-5 (matched before the generic claude-sonnet rule so Sonnet 5 doesn't collapse into Sonnet 4.6). Swift ModelCatalog kept in sync (contract test) and its stale test set brought current (gpt-* + new models, Opus label 4.7→4.8). # feat (v3.77.0): /resume — continue a Claude Code session started elsewhere (the Claude desktop app / Claude.app, or a terminal) directly from Telegram. The desktop app, when pointed at a real local folder, runs the SAME Claude Code engine — its sessions land in ~/.claude/projects/<cwd>/<id>.jsonl and are indexed (title/cwd/model/cliSessionId/lastActivityAt) under ~/Library/Application Support/Claude/claude-code-sessions. /resume reads that index (alive + non-archived only — Claude Code prunes transcripts after ~30 days), merges it with the bot's own Telegram sessions (sessions.json), dedupes by session_id, sorts by last activity, and shows an inline picker (top 20). Picking one creates a NEW bot session that resumes the chosen session_id under its original cwd (an external project runs under Main; a vault dir keeps its agent). Primary chat only (resumes run with full permissions and may point cwd outside the vault). New module helpers: _encode_project_dir, _resume_model_alias, _clean_title, _resume_relative_time, _short_cwd, _scan_claude_app_sessions. # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import base64
 import hmac
@@ -72,10 +72,6 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("HEAR_LOCALE", _v)
             elif _k == "TTS_ENGINE":
                 os.environ.setdefault("TTS_ENGINE", _v)
-            elif _k == "ZAI_API_KEY":
-                os.environ.setdefault("ZAI_API_KEY", _v)
-            elif _k == "ZAI_BASE_URL":
-                os.environ.setdefault("ZAI_BASE_URL", _v)
             elif _k == "MODEL_FALLBACK_CHAIN":
                 os.environ.setdefault("MODEL_FALLBACK_CHAIN", _v)
             elif _k == "SHOW_SIGNATURE":
@@ -96,7 +92,7 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
 # Re-read MODEL_FALLBACK_CHAIN after .env is loaded (allows .env override)
 MODEL_FALLBACK_CHAIN = [
     m.strip() for m in
-    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,glm-5.1,sonnet,glm-4.7,haiku").split(",")
+    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,sonnet-5,haiku").split(",")
     if m.strip()
 ]
 def _detect_claude_path() -> str:
@@ -637,10 +633,6 @@ HEAR_LOCALE = os.environ.get("HEAR_LOCALE", "pt-BR")
 
 # z.AI (GLM) credentials — second LLM provider via Anthropic-compatible gateway.
 # When the requested model is a GLM variant, ClaudeRunner injects these into
-# the claude CLI subprocess env so the same binary talks to z.AI instead of
-# Anthropic. Empty ZAI_API_KEY => GLM models refuse to start (fail-loud).
-ZAI_API_KEY = os.environ.get("ZAI_API_KEY", "")
-ZAI_BASE_URL = os.environ.get("ZAI_BASE_URL", "https://api.z.ai/api/anthropic")
 ADVISOR_MODEL = os.environ.get("ADVISOR_MODEL", "opus")  # model consulted by advisor.sh
 
 # TTS (Text-to-Speech) voice response
@@ -664,8 +656,7 @@ TTS_LOCALE_NAMES = {
 }
 
 # Model → provider mapping. Provider determines which runtime the bot dispatches to.
-# "anthropic" = claude CLI → native Anthropic API. "zai" = claude CLI → z.AI gateway
-# (Anthropic-compatible, via local proxy). "openai" = codex CLI → ChatGPT Plus/Pro
+# "anthropic" = claude CLI → native Anthropic API. "openai" = codex CLI → ChatGPT Plus/Pro
 # subscription (OAuth, no Anthropic wire format — handled by a separate CodexRunner).
 MODEL_PROVIDERS = {
     "sonnet": "anthropic",
@@ -673,9 +664,6 @@ MODEL_PROVIDERS = {
     "haiku": "anthropic",
     "fable": "anthropic",
     "sonnet-5": "anthropic",
-    "glm-5.1": "zai",
-    "glm-4.7": "zai",
-    "glm-4.5-air": "zai",
     "gpt-5": "openai",
     "gpt-5-codex": "openai",
     "gpt-5.5": "openai",
@@ -684,19 +672,16 @@ MODEL_PROVIDERS = {
 # Short alias → full API model ID — *display fallback only*. The signature now
 # prefers the real model id the CLI resolves at runtime (captured from the init
 # event, see ClaudeRunner.captured_model + _build_signature), so a model upgrade
-# (e.g. opus 4.7 → 4.8) is reflected automatically the moment the CLI's `opus`
+# (e.g. opus 4.8 → 5) is reflected automatically the moment the CLI's `opus`
 # alias advances — no code edit needed. This map is only used when the live id
 # is unavailable (early failure, or non-Anthropic providers). Keep it current
 # anyway so those edge cases don't show a stale version.
 MODEL_FULL_IDS: dict = {
     "sonnet":      "claude-sonnet-4-6",
-    "opus":        "claude-opus-4-8",
+    "opus":        "claude-opus-5",
     "haiku":       "claude-haiku-4-5",
     "fable":       "claude-fable-5",
     "sonnet-5":    "claude-sonnet-5",
-    "glm-5.1":     "glm-5.1",
-    "glm-4.7":     "glm-4.7",
-    "glm-4.5-air": "glm-4.5-air",
     "gpt-5":       "gpt-5",
     "gpt-5-codex": "gpt-5-codex",
     "gpt-5.5":     "gpt-5.5",
@@ -719,11 +704,12 @@ MAX_CONTEXT_ENABLED = os.environ.get("MAX_CONTEXT", "true").lower() not in (
     "false", "0", "off", "no")
 
 # Per-family concrete-model override. The CLI's bare aliases (opus/sonnet/haiku)
-# can lag a model release — e.g. `--model opus` still resolves to claude-opus-4-7
-# even after 4.8 shipped and `--model claude-opus-4-8` works. Setting e.g.
-# OPUS_MODEL=claude-opus-4-8 pins the newer concrete id until the alias catches
-# up; unset → use the bare alias (safe default that auto-tracks the CLI). If the
-# pinned id isn't available to the account, run() falls back to the alias.
+# can lag a model release — e.g. `--model opus` resolved to claude-opus-4-7 for a
+# while after 4.8 shipped, requiring OPUS_MODEL=claude-opus-4-8 to get the newer
+# id. As of Opus 5 the alias has caught up (`--model opus` → claude-opus-5), so
+# no pin is currently set; unset → use the bare alias (safe default that
+# auto-tracks the CLI). If a future release lags again, pin it the same way — if
+# the pinned id isn't available to the account, run() falls back to the alias.
 MODEL_ALIAS_ENV = {"opus": "OPUS_MODEL", "sonnet": "SONNET_MODEL", "haiku": "HAIKU_MODEL"}
 
 # Built-in bot-key → concrete API id for Anthropic models whose short bot key is
@@ -747,10 +733,10 @@ _MAX_CONTEXT_RUNTIME_OFF = False
 
 # Model fallback chain — when a model fails after retries, try the next model.
 # Configurable via MODEL_FALLBACK_CHAIN env var (comma-separated model IDs).
-DEFAULT_FALLBACK_CHAIN = ["opus", "sonnet", "glm-4.7", "haiku"]
+DEFAULT_FALLBACK_CHAIN = ["opus", "sonnet-5", "haiku"]
 MODEL_FALLBACK_CHAIN: List[str] = [
     m.strip() for m in
-    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,sonnet,glm-4.7,haiku").split(",")
+    os.environ.get("MODEL_FALLBACK_CHAIN", "opus,sonnet-5,haiku").split(",")
     if m.strip()
 ]
 
@@ -1060,7 +1046,7 @@ def _build_signature(session, effective_model: Optional[str] = None,
     routed the request to a different model than the one stored on the session.
 
     ``resolved_model`` is the *real* model id the CLI reported at runtime
-    (e.g. ``claude-opus-4-8[1m]``). It is preferred for native Anthropic models
+    (e.g. ``claude-opus-5[1m]``). It is preferred for native Anthropic models
     so the signature auto-tracks model upgrades instead of a hardcoded map. It
     is ignored for z.AI (the proxy makes the CLI report a sonnet alias, not the
     real GLM name) — those fall back to MODEL_FULL_IDS.
@@ -1080,14 +1066,12 @@ def _build_signature(session, effective_model: Optional[str] = None,
 
 
 def model_provider(model: str) -> str:
-    """Map a model id to its provider runtime: 'anthropic' | 'zai' | 'openai'.
+    """Map a model id to its provider runtime: 'anthropic' | 'openai'.
 
     Prefix fallbacks let new variants work without code changes:
-    glm* → zai, gpt-* → openai, everything else → anthropic."""
+    gpt-* → openai, everything else → anthropic."""
     if model in MODEL_PROVIDERS:
         return MODEL_PROVIDERS[model]
-    if model.startswith("glm"):
-        return "zai"
     if model.startswith("gpt-"):
         return "openai"
     return "anthropic"
@@ -1096,7 +1080,7 @@ def model_provider(model: str) -> str:
 def resolve_model_alias(model: str) -> str:
     """Map a bare Anthropic alias to a pinned concrete id via env override.
 
-    `opus` → $OPUS_MODEL (e.g. claude-opus-4-8) when set, else `opus`. Lets the
+    `opus` → $OPUS_MODEL (e.g. claude-opus-5) when set, else `opus`. Lets the
     bot use a newer model than the CLI's lagging alias resolves to, while the
     default (unset) keeps the auto-tracking alias. Non-alias / non-Anthropic
     names pass through untouched.
@@ -1193,111 +1177,6 @@ def _persist_captured_id(session, runner, model: Optional[str] = None) -> bool:
     else:
         session.session_id = captured
     return True
-
-
-def _start_zai_proxy(glm_model: str, zai_base_url: str, zai_api_key: str):
-    """
-    Start a local Anthropic-compatible HTTP proxy that rewrites the model field
-    in requests, letting Claude CLI accept any GLM model name even though the CLI
-    validates model names client-side against its own known-model list.
-
-    Flow:
-      Claude CLI  →  http://127.0.0.1:{port}  →  z.AI /api/anthropic
-    Claude CLI sees a valid alias ("claude-sonnet-4-6"); the proxy quietly swaps
-    the model to the requested GLM name before forwarding.
-
-    Returns (server, port). Caller must call server.shutdown() after the run.
-    """
-    class _Handler(http.server.BaseHTTPRequestHandler):
-        _glm_model = glm_model
-        _base_url = zai_base_url.rstrip("/")
-        _api_key = zai_api_key
-
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
-            try:
-                data = json.loads(body)
-                data["model"] = self.__class__._glm_model
-                body = json.dumps(data).encode()
-            except Exception:
-                pass
-
-            target = self.__class__._base_url + self.path
-            hdrs = {
-                "Content-Type": "application/json",
-                "Content-Length": str(len(body)),
-                "x-api-key": self.__class__._api_key,
-                "anthropic-version": self.headers.get("anthropic-version", "2023-06-01"),
-            }
-            for h in ("anthropic-beta",):
-                if self.headers.get(h):
-                    hdrs[h] = self.headers[h]
-
-            # Forward to z.AI with a single absorber retry on 429 (code 1302).
-            # Transient per-second bursts clear quickly; a short in-proxy backoff
-            # handles them without involving the bot's outer retry+fallback chain.
-            # Sustained quota errors still propagate, and the bot-level RATE_LIMIT
-            # recovery handles those.
-            for _attempt in range(2):
-                req = urllib.request.Request(target, data=body, headers=hdrs, method="POST")
-                try:
-                    with urllib.request.urlopen(req, timeout=120) as resp:
-                        self.send_response(resp.status)
-                        for k, v in resp.headers.items():
-                            if k.lower() not in ("transfer-encoding", "connection", "content-length"):
-                                self.send_header(k, v)
-                        self.end_headers()
-                        while True:
-                            chunk = resp.read(4096)
-                            if not chunk:
-                                break
-                            try:
-                                self.wfile.write(chunk)
-                                self.wfile.flush()
-                            except (BrokenPipeError, ConnectionResetError):
-                                pass
-                        return
-                except urllib.error.HTTPError as exc:
-                    # Absorb ONE 429: respect Retry-After header (capped 15s), default 8s.
-                    if exc.code == 429 and _attempt == 0:
-                        try:
-                            retry_after = exc.headers.get("Retry-After") if exc.headers else None
-                            delay = float(retry_after) if retry_after else 8.0
-                        except (TypeError, ValueError):
-                            delay = 8.0
-                        delay = max(1.0, min(delay, 15.0))
-                        logger.info("zai-proxy: 429 absorbed, sleeping %.1fs then retrying", delay)
-                        time.sleep(delay)
-                        continue
-                    err_body = exc.read()
-                    self.send_response(exc.code)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(err_body)))
-                    self.end_headers()
-                    self.wfile.write(err_body)
-                    return
-                except Exception as exc:
-                    payload = json.dumps({"error": str(exc)}).encode()
-                    self.send_response(502)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.end_headers()
-                    self.wfile.write(payload)
-                    return
-
-        def log_message(self, fmt, *args):  # suppress noisy proxy logs
-            pass
-
-    # Bind on a random free port
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        port = s.getsockname()[1]
-
-    srv = http.server.HTTPServer(("127.0.0.1", port), _Handler)
-    t = threading.Thread(target=srv.serve_forever, daemon=True, name=f"zai-proxy-{port}")
-    t.start()
-    return srv, port
 
 
 def _tts_prompt_suffix() -> str:
@@ -1640,11 +1519,9 @@ HELP_TEXT = """🤖 *Claude Code Telegram Bot*
 
 ⚙️ *Modelo*
 • `/fable` — Usar Fable 5 (modelo mais capaz da Anthropic)
-• `/opus` — Usar Opus 4.8
+• `/opus` — Usar Opus 5
 • `/sonnet5` — Usar Sonnet 5
-• `/sonnet` — Usar Sonnet 4.6
-• `/haiku` — Usar Haiku
-• `/glm` — Usar GLM 4.7 (z.AI, requer `ZAI_API_KEY`)
+• `/haiku` — Usar Haiku 4.5
 • `/gpt` — Usar GPT-5 (OpenAI, requer `codex login` com ChatGPT Plus/Pro)
 • `/model` — Escolher modelo (teclado)
 • `/fast [on|off|status]` — Fast mode do Opus (saída mais rápida, consome créditos de uso)
@@ -3441,6 +3318,9 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
     if bot is None or ctx is None:
         return {"emitted": False, "sink": "telegram", "error": "no bot/ctx on executor"}
 
+    # PHOTO comment → send image after text message
+    text, photo_url = _extract_photo_comment(text)
+
     # ACTIONS block → inline_keyboard
     visible_text, raw_actions = _extract_actions_block(text)
 
@@ -3565,7 +3445,28 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
             kwargs["parse_mode"] = parse_mode
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
-        bot.send_message(visible_text, **kwargs)
+
+        # When a cover image is available, send it as a single sendPhoto with
+        # the text as caption (Telegram limit: 1024 rendered chars).  Falls back
+        # to the two-message path when the text is too long for a caption or
+        # when ACTIONS buttons are present (inline_keyboard on photos is not
+        # supported when a caption would be truncated and the button layout
+        # deserves its own message in that edge case).
+        _CAPTION_LIMIT = 1024
+        use_photo_caption = bool(photo_url) and len(visible_text) <= _CAPTION_LIMIT
+        if use_photo_caption:
+            photo_kwargs: Dict[str, Any] = {
+                "chat_id": kwargs.get("chat_id"),
+                "thread_id": kwargs.get("thread_id"),
+                "disable_notification": bool(sink_config.get("silent", False)),
+                "parse_mode": kwargs.get("parse_mode", "HTML"),
+            }
+            if reply_markup is not None:
+                photo_kwargs["reply_markup"] = reply_markup
+            bot.send_photo(photo_url, caption=visible_text, **photo_kwargs)
+        else:
+            bot.send_message(visible_text, **kwargs)
+
         # Backfill telegram.message_id into the unified published-index entry
         # that the publish-step script wrote BEFORE this delivery. Without
         # this, every entry stays with an empty message_id and the reply-
@@ -3599,6 +3500,14 @@ def _sink_telegram(executor: Any, step: "PipelineStep",
             logger.warning(
                 "published-index backfill failed (non-fatal, message already sent): %s",
                 backfill_exc,
+            )
+        if photo_url and not use_photo_caption:
+            # Fallback: text was too long for caption → send image separately
+            bot.send_photo(
+                photo_url,
+                chat_id=kwargs.get("chat_id"),
+                thread_id=kwargs.get("thread_id"),
+                disable_notification=bool(sink_config.get("silent", False)),
             )
         result = {"emitted": True, "sink": "telegram"}
         if saved_action_ids:
@@ -4418,8 +4327,7 @@ def _track_cost(cost_usd: float, model: Optional[str] = None) -> None:
               "total": 1.23,          # all providers combined (back-compat)
               "days":  {"2026-04-07": 0.12, ...},         # combined (back-compat)
               "providers": {
-                "anthropic": {"total": 0.80, "days": {...}},
-                "zai":       {"total": 0.43, "days": {...}}
+                "anthropic": {"total": 0.80, "days": {...}}
               }
             }
           }
@@ -4462,7 +4370,7 @@ def get_weekly_cost(provider: Optional[str] = None) -> dict:
     """Read current week cost data. Returns {week, total, today}.
 
     If provider is None, returns combined totals (back-compat).
-    If provider is "anthropic" or "zai", returns that provider's slice.
+    If provider is "anthropic", returns that provider's slice.
     """
     try:
         if not COSTS_FILE.exists():
@@ -5685,7 +5593,7 @@ def _redact_secrets(text: str) -> str:
 
     Masks two classes:
     - Token PATTERNS (sk-ant-…, Bearer …, Authorization: …) regardless of value.
-    - Known LIVE secret VALUES read at runtime (TELEGRAM_BOT_TOKEN, ZAI_API_KEY,
+    - Known LIVE secret VALUES read at runtime (TELEGRAM_BOT_TOKEN,
       GITHUB_TOKEN, CLAUDE_CODE_OAUTH_TOKEN env vars + the access/refresh tokens
       in ~/.claude-bot/claude-auth.json), substituted with ``[REDACTED]``.
 
@@ -5706,7 +5614,7 @@ def _redact_secrets(text: str) -> str:
     # 2) Collect live secret VALUES, then replace each literal occurrence.
     values = []
     try:
-        for var in ("TELEGRAM_BOT_TOKEN", "ZAI_API_KEY", "GITHUB_TOKEN",
+        for var in ("TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN",
                     "CLAUDE_CODE_OAUTH_TOKEN"):
             values.append(os.environ.get(var))
     except Exception:
@@ -5831,7 +5739,7 @@ def _encode_project_dir(cwd: str) -> str:
 
 
 def _resume_model_alias(model_id: Optional[str]) -> Optional[str]:
-    """Map a captured model id (e.g. ``claude-opus-4-8[1m]``) to a bot alias the
+    """Map a captured model id (e.g. ``claude-opus-5[1m]``) to a bot alias the
     resumed session can adopt. Returns None when unmappable so the caller falls
     back to the agent's default model."""
     if not model_id:
@@ -5957,7 +5865,7 @@ class Session:
     active_memory: bool = True
     # Fast mode — per-session toggle for Claude Code's `/fast` (Opus with faster
     # output). Default False: fast mode draws on pay-as-you-go usage credits
-    # ($50/MTok output on Opus 4.8) even on subscription auth, so it must be an
+    # ($50/MTok output on Opus 5) even on subscription auth, so it must be an
     # explicit opt-in. Only takes effect when the session is on an Opus model;
     # inert on Sonnet/Haiku/GLM/GPT. Toggle with /fast on|off. Enforced in
     # ClaudeRunner.run() (passes `--settings '{"fastMode": true}'`).
@@ -5994,6 +5902,12 @@ class SessionManager:
         self.sessions: Dict[str, Session] = {}
         self.active_session: Optional[str] = None
         self.cumulative_turns: int = 0
+        # Reentrant: _evict_old_sessions() calls self.save() while already
+        # holding the lock. Guards against concurrent callers (routine
+        # scheduler thread, pipeline step threads, main polling loop) racing
+        # on the shared sessions.tmp path or mutating self.sessions while
+        # save() iterates it.
+        self._lock = threading.RLock()
         self._load()
 
     # -- persistence --
@@ -6027,30 +5941,32 @@ class SessionManager:
         self._evict_old_sessions()
 
     def save(self) -> None:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "sessions": {n: asdict(s) for n, s in self.sessions.items()},
-            "active_session": self.active_session,
-            "cumulative_turns": self.cumulative_turns,
-        }
-        tmp = SESSIONS_FILE.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        tmp.replace(SESSIONS_FILE)
+        with self._lock:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "sessions": {n: asdict(s) for n, s in self.sessions.items()},
+                "active_session": self.active_session,
+                "cumulative_turns": self.cumulative_turns,
+            }
+            tmp = SESSIONS_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(SESSIONS_FILE)
 
     def _evict_old_sessions(self) -> None:
         """Remove sessions older than SESSION_MAX_AGE_DAYS."""
-        cutoff = time.time() - (SESSION_MAX_AGE_DAYS * 86400)
-        expired = [name for name, s in self.sessions.items() if s.created_at < cutoff]
-        if not expired:
-            return
-        for name in expired:
-            del self.sessions[name]
-            logger.info("Evicted expired session: %s", name)
-        # Fix active session if it was evicted
-        if self.active_session not in self.sessions:
-            self.active_session = next(iter(self.sessions), None)
-        self.save()
-        logger.info("Evicted %d sessions older than %d days", len(expired), SESSION_MAX_AGE_DAYS)
+        with self._lock:
+            cutoff = time.time() - (SESSION_MAX_AGE_DAYS * 86400)
+            expired = [name for name, s in self.sessions.items() if s.created_at < cutoff]
+            if not expired:
+                return
+            for name in expired:
+                del self.sessions[name]
+                logger.info("Evicted expired session: %s", name)
+            # Fix active session if it was evicted
+            if self.active_session not in self.sessions:
+                self.active_session = next(iter(self.sessions), None)
+            self.save()
+            logger.info("Evicted %d sessions older than %d days", len(expired), SESSION_MAX_AGE_DAYS)
 
     # -- CRUD --
 
@@ -6061,26 +5977,29 @@ class SessionManager:
             agent=agent_id,
             workspace=str(agent_base(agent_id)),
         )
-        self.sessions[name] = s
-        self.active_session = name
-        self.save()
+        with self._lock:
+            self.sessions[name] = s
+            self.active_session = name
+            self.save()
         return s
 
     def switch(self, name: str) -> Optional[Session]:
-        if name not in self.sessions:
-            return None
-        self.active_session = name
-        self.save()
-        return self.sessions[name]
+        with self._lock:
+            if name not in self.sessions:
+                return None
+            self.active_session = name
+            self.save()
+            return self.sessions[name]
 
     def delete(self, name: str) -> bool:
-        if name not in self.sessions:
-            return False
-        del self.sessions[name]
-        if self.active_session == name:
-            self.active_session = next(iter(self.sessions), None)
-        self.save()
-        return True
+        with self._lock:
+            if name not in self.sessions:
+                return False
+            del self.sessions[name]
+            if self.active_session == name:
+                self.active_session = next(iter(self.sessions), None)
+            self.save()
+            return True
 
     def clone(self, source_name: str, dest_name: str) -> Optional[Session]:
         """Clone an existing session into a new name.
@@ -6096,33 +6015,36 @@ class SessionManager:
 
         Returns the new Session, or None if source is missing / dest already exists.
         """
-        if source_name not in self.sessions:
-            return None
-        if dest_name in self.sessions:
-            return None
-        src = self.sessions[source_name]
-        clone = Session(
-            name=dest_name,
-            session_id=src.session_id,      # SAME Claude session — continues the thread
-            model=src.model,
-            workspace=src.workspace,
-            agent=src.agent,
-            created_at=time.time(),         # fresh creation timestamp for eviction
-            message_count=src.message_count,  # carry over so auto-compact stats stay accurate
-            total_turns=0,                  # fresh turn counter for this branch
-        )
-        self.sessions[dest_name] = clone
-        self.active_session = dest_name
-        self.save()
-        return clone
+        with self._lock:
+            if source_name not in self.sessions:
+                return None
+            if dest_name in self.sessions:
+                return None
+            src = self.sessions[source_name]
+            clone = Session(
+                name=dest_name,
+                session_id=src.session_id,      # SAME Claude session — continues the thread
+                model=src.model,
+                workspace=src.workspace,
+                agent=src.agent,
+                created_at=time.time(),         # fresh creation timestamp for eviction
+                message_count=src.message_count,  # carry over so auto-compact stats stay accurate
+                total_turns=0,                  # fresh turn counter for this branch
+            )
+            self.sessions[dest_name] = clone
+            self.active_session = dest_name
+            self.save()
+            return clone
 
     def list(self) -> List[Session]:
-        return list(self.sessions.values())
+        with self._lock:
+            return list(self.sessions.values())
 
     def get_active(self) -> Optional[Session]:
-        if self.active_session and self.active_session in self.sessions:
-            return self.sessions[self.active_session]
-        return None
+        with self._lock:
+            if self.active_session and self.active_session in self.sessions:
+                return self.sessions[self.active_session]
+            return None
 
     def ensure_active(self) -> Session:
         s = self.get_active()
@@ -6386,6 +6308,11 @@ _ACTIONS_BLOCK_RE = re.compile(
     re.DOTALL,
 )
 
+_PHOTO_COMMENT_RE = re.compile(
+    r'\s*<!--\s*PHOTO:\s*(?P<url>https?://\S+?)\s*-->\s*$',
+    re.DOTALL,
+)
+
 
 _MD2_RESERVED_RE = re.compile(r'([_*\[\]()~`>#+\-=|{}.!])')
 
@@ -6630,6 +6557,19 @@ def _extract_actions_block(text: str) -> Tuple[str, List[Dict]]:
     return cleaned, actions
 
 
+def _extract_photo_comment(text: str) -> Tuple[str, str]:
+    """Strip trailing ``<!-- PHOTO: url -->`` from text; return (cleaned, url).
+
+    Returns (text, "") when the comment is absent so callers need no guard.
+    """
+    m = _PHOTO_COMMENT_RE.search(text)
+    if not m:
+        return text, ""
+    url = m.group("url").strip()
+    cleaned = text[:m.start()].rstrip() + "\n"
+    return cleaned, url
+
+
 def _md2_escape(text: str) -> str:
     """Escape every MarkdownV2 reserved character in ``text``.
 
@@ -6709,11 +6649,10 @@ def _format_duration(seconds: float) -> str:
 def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str]:
     """Return the next model in MODEL_FALLBACK_CHAIN after failed_model, or None.
 
-    Skips GLM models when ZAI_API_KEY is not set, and gpt-* models when the
-    codex CLI isn't installed. Skips same-provider models for AUTH/CREDIT/
-    RATE_LIMIT errors — those are account-wide failures, so trying another
-    model from the same provider is almost certainly going to hit the same
-    limit/credit/auth wall.
+    Skips gpt-* models when the codex CLI isn't installed. Skips same-provider
+    models for AUTH/CREDIT/RATE_LIMIT errors — those are account-wide failures,
+    so trying another model from the same provider is almost certainly going to
+    hit the same limit/credit/auth wall.
     """
     if failed_model not in MODEL_FALLBACK_CHAIN:
         return None
@@ -6725,8 +6664,6 @@ def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str
 
     for candidate in MODEL_FALLBACK_CHAIN[idx + 1:]:
         cand_provider = model_provider(candidate)
-        if cand_provider == "zai" and not ZAI_API_KEY:
-            continue
         if cand_provider == "openai" and not CODEX_ENABLED:
             continue
         if skip_provider and cand_provider == skip_provider:
@@ -6753,7 +6690,7 @@ class ClaudeRunner:
         self.cost_usd: float = 0.0
         self.total_cost_usd: float = 0.0
         self.captured_session_id: Optional[str] = None
-        # Real model id the CLI resolved this run (e.g. "claude-opus-4-8[1m]"),
+        # Real model id the CLI resolved this run (e.g. "claude-opus-5[1m]"),
         # read from the init event. Used for the response signature so it tracks
         # model upgrades automatically instead of a hardcoded map.
         self.captured_model: Optional[str] = None
@@ -6856,7 +6793,6 @@ class ClaudeRunner:
         self.exit_code = None
         self.activity_type = "thinking"
 
-        _proxy_server = None
         try:
             # Strip CLAUDECODE env var to prevent "nested session" errors.
             clean_env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -6895,47 +6831,17 @@ class ClaudeRunner:
                 if _bearer:
                     clean_env["CLAUDE_CODE_OAUTH_TOKEN"] = _bearer
 
-            # Provider routing: GLM models go through z.AI's Anthropic-compatible gateway.
-            # Claude CLI validates model names client-side, so GLM names ("glm-5.1" etc.)
-            # are rejected before any HTTP call is made. Fix: start a local proxy that
-            # accepts ANY model name from Claude CLI and rewrites it to the real GLM name
-            # before forwarding to z.AI. Claude CLI sees a valid alias ("claude-sonnet-4-6").
-            if provider == "zai":
-                if not ZAI_API_KEY:
-                    self.error_text = (
-                        "❌ Modelo GLM solicitado mas ZAI_API_KEY não está configurado. "
-                        "Defina em ~/claude-bot/.env (obtenha em https://z.ai/manage-apikey)."
-                    )
-                    logger.error(self.error_text)
-                    self.running = False
-                    return
-                _proxy_server, _proxy_port = _start_zai_proxy(model, ZAI_BASE_URL, ZAI_API_KEY)
-                logger.info("ZAI proxy started on port %d for model %s", _proxy_port, model)
-                # Point Claude CLI at our local proxy; use a valid Claude alias so the
-                # CLI's local model validation passes.
-                clean_env["ANTHROPIC_BASE_URL"] = f"http://127.0.0.1:{_proxy_port}"
-                clean_env["ANTHROPIC_AUTH_TOKEN"] = "zai-proxy"
-                clean_env.pop("ANTHROPIC_API_KEY", None)
-                # GLM-5.1 is ~44 tok/s — bump timeout so long generations don't hang.
-                clean_env.setdefault("API_TIMEOUT_MS", "3000000")
-                # Replace the GLM model name in cmd with a valid Claude alias so the
-                # CLI's local model-name check doesn't abort before making the API call.
-                for i, arg in enumerate(cmd):
-                    if arg == "--model" and i + 1 < len(cmd):
-                        cmd[i + 1] = "claude-sonnet-4-6"
-                        break
-
             self._spawn_and_read(cmd, workspace, clean_env)
 
             # Model/context fail-safe: if we pinned a newer concrete id and/or
             # appended [1m] but the account rejected that variant, retry once on
             # the bare alias + base context so the turn still completes
-            # (distribution users without 4.8 or 1M access, etc.).
+            # (distribution users without the pinned model or 1M access, etc.).
             if enhanced_model and self._looks_like_model_unavailable():
                 context_related = (self.context_1m_applied
                                    and self._failure_is_context_related())
                 # 1M-window failure (e.g. usage credits not enabled): keep the
-                # pinned concrete id (claude-opus-4-8 works fine on standard
+                # pinned concrete id (e.g. claude-opus-5 works fine on standard
                 # context), drop only [1m], and trip the process kill switch so
                 # future turns skip [1m] instead of failing-and-retrying each
                 # time. A pinned-id failure instead falls all the way back to the
@@ -6971,8 +6877,6 @@ class ClaudeRunner:
             self.error_text = f"❌ Erro ao executar Claude: {exc}"
             logger.error(self.error_text, exc_info=True)
         finally:
-            if _proxy_server is not None:
-                _proxy_server.shutdown()
             self._cleanup()
 
     def _spawn_and_read(self, cmd: List[str], workspace: str,
@@ -7092,7 +6996,7 @@ class ClaudeRunner:
                 with self._lock:
                     self.captured_session_id = sid
             # The init event reports the model the CLI actually resolved
-            # (e.g. "claude-opus-4-8[1m]"). Capture it for the signature so a
+            # (e.g. "claude-opus-5[1m]"). Capture it for the signature so a
             # model upgrade shows up without touching MODEL_FULL_IDS.
             mdl = obj.get("model")
             if mdl:
@@ -11808,6 +11712,45 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.debug("set_reaction failed for msg %s: %s", message_id, exc)
 
+    def send_photo(self, photo_url: str,
+                   caption: str = "",
+                   chat_id: Optional[str] = None,
+                   thread_id: Optional[str] = None,
+                   disable_notification: bool = False,
+                   parse_mode: str = "HTML",
+                   reply_markup: Optional[Dict] = None) -> bool:
+        """Send a photo by URL via sendPhoto. Returns True on success.
+
+        When ``caption`` is provided it is formatted with ``parse_mode``
+        (default HTML, same as send_message) and Telegram's 1024-char
+        caption limit applies to the rendered text length.
+        Sets ``_last_first_message_id`` on success so the published-index
+        backfill in _sink_telegram works the same as for send_message.
+        """
+        if chat_id is None:
+            chat_id = self._chat_id
+        if thread_id is None:
+            thread_id = self._ctx.thread_id if self._ctx else None
+        data: Dict[str, Any] = {"chat_id": chat_id, "photo": photo_url}
+        if thread_id:
+            data["message_thread_id"] = thread_id
+        if caption:
+            if parse_mode == "HTML":
+                caption = self._markdown_to_html(caption)
+            elif parse_mode == "MarkdownV2":
+                caption = self._sanitize_markdown_v2(caption)
+            data["caption"] = caption
+            data["parse_mode"] = parse_mode
+        if disable_notification:
+            data["disable_notification"] = True
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        resp = self.tg_request("sendPhoto", data)
+        ok = bool(resp and resp.get("ok"))
+        if ok:
+            self._last_first_message_id = resp["result"]["message_id"]
+        return ok
+
     def answer_callback(self, callback_id: str, text: str = "") -> None:
         self.tg_request("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
 
@@ -12361,16 +12304,9 @@ class ClaudeTelegramBot:
         return f"🫀 Scheduler: {warn}último tick há {_format_duration(age)}"
 
     def cmd_model_switch(self, model: str) -> None:
-        if model not in MODEL_PROVIDERS and not model.startswith("glm") and not model.startswith("gpt-"):
+        if model not in MODEL_PROVIDERS and not model.startswith("gpt-"):
             known = ", ".join(sorted(MODEL_PROVIDERS.keys()))
             self.send_message(f"❌ Modelo desconhecido: `{model}`\nConhecidos: {known}")
-            return
-        # Guard: if GLM requested but no key, warn now instead of failing on first message.
-        if model_provider(model) == "zai" and not ZAI_API_KEY:
-            self.send_message(
-                "⚠️ `ZAI_API_KEY` não está configurado no `~/claude-bot/.env`.\n"
-                "Obtenha uma chave em https://z.ai/manage-apikey e adicione ao arquivo."
-            )
             return
         # Guard: if ChatGPT requested but codex CLI absent, warn with install steps.
         if model_provider(model) == "openai" and not CODEX_ENABLED:
@@ -12389,9 +12325,7 @@ class ClaudeTelegramBot:
         s.rate_limit_until = None
         self.sessions.save()
         # Cross-provider bridging: only arm a handoff when crossing the
-        # Claude-CLI ↔ Codex-CLI boundary (the two have separate history
-        # stores). anthropic ↔ zai shares the same `claude --resume` state,
-        # so no handoff is needed between sonnet/opus/haiku and glm-*.
+        # Claude-CLI ↔ Codex-CLI boundary (the two have separate history stores).
         was_openai = model_provider(old_model) == "openai"
         is_openai = model_provider(model) == "openai"
         if was_openai != is_openai:
@@ -12492,16 +12426,9 @@ class ClaudeTelegramBot:
             ],
             [
                 {"text": "Sonnet 5", "callback_data": "model:sonnet-5"},
-                {"text": "Sonnet 4.6", "callback_data": "model:sonnet"},
                 {"text": "Haiku", "callback_data": "model:haiku"},
             ],
         ]
-        if ZAI_API_KEY:
-            rows.append([
-                {"text": "GLM 5.1", "callback_data": "model:glm-5.1"},
-                {"text": "GLM 4.7", "callback_data": "model:glm-4.7"},
-                {"text": "GLM 4.5 Air", "callback_data": "model:glm-4.5-air"},
-            ])
         if CODEX_ENABLED:
             # Only gpt-5 works with ChatGPT Plus/Pro OAuth. gpt-5-codex
             # requires an OpenAI API key and is hidden from the default picker
@@ -17890,7 +17817,6 @@ class ClaudeTelegramBot:
                 "/opus": lambda: self.cmd_model_switch("opus"),
                 "/haiku": lambda: self.cmd_model_switch("haiku"),
                 "/fable": lambda: self.cmd_model_switch("fable"),
-                "/glm": lambda: self.cmd_model_switch("glm-4.7"),
                 "/gpt": lambda: self.cmd_model_switch("gpt-5"),
                 "/model": lambda: self.cmd_model_keyboard(),
                 "/new": lambda: self.cmd_new(arg if arg else None),
