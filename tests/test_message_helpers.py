@@ -387,5 +387,85 @@ class RebalanceHtmlChunks(unittest.TestCase):
         self.assertTrue(all(_html_is_telegram_valid(c) for c in out))
 
 
+class BlockquoteGrouping(unittest.TestCase):
+    """A quote is ONE <blockquote>, not one per line.
+
+    Regression: the live Reasoning panel quotes every line with "> ". The old
+    per-line conversion produced a stack of collapsible bubbles, and because
+    inline-code spans are extracted before the line pass, a quoted line holding
+    `code` had its quote closed early — the command rendered outside the quote.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+        cls.html = staticmethod(cls.bot.ClaudeTelegramBot._markdown_to_html)
+
+    def test_consecutive_quote_lines_make_one_blockquote(self):
+        out = self.html("> linha 1\n> linha 2\n> linha 3")
+        self.assertEqual(out.count("<blockquote>"), 1)
+        self.assertEqual(out.count("</blockquote>"), 1)
+        self.assertIn("linha 1\nlinha 2\nlinha 3", out)
+
+    def test_code_span_stays_inside_the_quote(self):
+        out = self.html("> ⚙️ Bash: `ls -la`")
+        self.assertEqual(out, "<blockquote>⚙️ Bash: <code>ls -la</code></blockquote>")
+
+    def test_blank_quote_line_keeps_one_block(self):
+        out = self.html("> a\n> \n> b")
+        self.assertEqual(out.count("<blockquote>"), 1)
+
+    def test_separate_quotes_stay_separate(self):
+        out = self.html("> primeira\n\ntexto\n\n> segunda")
+        self.assertEqual(out.count("<blockquote>"), 2)
+        self.assertIn("texto", out)
+
+    def test_unquoted_lines_are_untouched(self):
+        out = self.html("antes\n> citada\ndepois")
+        self.assertTrue(out.startswith("antes\n<blockquote>citada</blockquote>\ndepois"))
+
+    def test_reasoning_panel_renders_as_a_single_valid_quote(self):
+        entries = [
+            "⚙️ Bash: `grep -n foo bar.py`",
+            "📖 Read: `claude-fallback-bot.py`",
+        ]
+        body = "\n".join(entries) + "\n\nPensando no roteamento."
+        quoted = "\n".join(f"> {line}" for line in body.split("\n"))
+        out = self.html(f"> 🧠 *Reasoning:*\n{quoted}")
+        self.assertEqual(out.count("<blockquote>"), 1)
+        self.assertNotIn("`", out)           # no leaked backticks
+        self.assertEqual(out.count("<code>"), 2)
+        self.assertTrue(_html_is_telegram_valid(out))
+
+
+class ToolHint(unittest.TestCase):
+    """Tool-log hints must be single-line — a newline breaks the code span."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.bot = load_bot_module()
+
+    def test_newlines_collapse_to_spaces(self):
+        hint = self.bot._tool_hint("python3 - <<'EOF'\nfrom pathlib import Path\nprint(1)")
+        self.assertNotIn("\n", hint)
+        self.assertIn("python3 - <<'EOF' from pathlib", hint)
+
+    def test_long_value_is_truncated_with_ellipsis(self):
+        hint = self.bot._tool_hint("x" * 200)
+        self.assertEqual(len(hint), 61)
+        self.assertTrue(hint.endswith("…"))
+
+    def test_short_value_unchanged(self):
+        self.assertEqual(self.bot._tool_hint("ls -la"), "ls -la")
+
+    def test_multiline_hint_survives_the_renderer(self):
+        hint = self.bot._tool_hint("cd /repo && python3 - <<'PY'\nimport os\nprint(os.getcwd())")
+        out = self.bot.ClaudeTelegramBot._markdown_to_html(f"> ⚙️ Bash: `{hint}`")
+        self.assertEqual(out.count("<blockquote>"), 1)
+        self.assertNotIn("`", out)
+        self.assertTrue(_html_is_telegram_valid(out))
+
+
+
 if __name__ == "__main__":
     unittest.main()
