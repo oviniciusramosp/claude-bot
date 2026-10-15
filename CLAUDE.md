@@ -92,6 +92,18 @@ vault/
 
 **Agent detection.** A top-level directory counts as an agent if and only if it contains `agent-<dirname>.md`. That's the single source of truth — `iter_agent_ids()` (Python) and `iterAgentIds()` (Swift) use this rule. Reserved vault names (`README.md`, `CLAUDE.md`, `Tooling.md`, `Images`, `.graphs`, `.obsidian`) are never agents.
 
+### Topic routing in a primary chat (v3.80.0+)
+
+An agent claims a Telegram forum topic by declaring **both** `chat_id` and `thread_id` in its hub frontmatter. `_resolved_agent_for_chat()` resolves every incoming message in this order:
+
+1. **Secondary-chat lock** (`chats.json`) — topic override, then that chat's default agent.
+2. **Topic binding** (frontmatter `chat_id` + `thread_id`) — the agent that owns that topic.
+3. **General topic** (`thread_id` absent) — the vault's **default agent** (`default: true` in frontmatter, normally Main), but only when the chat already has topic-bound agents.
+
+Step 3 is what keeps the General channel clean. An agent can only claim a *named* topic, so before v3.80.0 General had no owner and kept whichever agent its session was last switched to — and `/agent new` switches the creating context, so creating an agent from General left that specialist answering there indefinitely. The rule is scoped to chats that already have topic-bound agents, so a plain single-room group still honors a manual `/agent` choice; secondary chats always use their own `chats.json` default and never inherit the vault default.
+
+A manual `/agent <name>` still wins inside the General topic (`ctx._manual_override`), but that flag is in-memory only — after a restart General returns to the default agent. When auto-routing changes a session's agent, the Claude transcript (`session_id`) is reset: a transcript belongs to the cwd it was recorded under, so resuming it under another agent's workspace would point the CLI at the wrong project dir.
+
 ## Configuration
 
 The project uses **two `.env` files with distinct purposes**:
