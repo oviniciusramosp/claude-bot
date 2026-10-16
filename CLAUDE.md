@@ -69,7 +69,37 @@ runner.run(
 )
 ```
 
-The `ClaudeRunner` builds the command with `--print --output-format stream-json`. By default the permission flag is `--dangerously-skip-permissions`. When `restricted=True` (multi-tenant secondary chat) it switches to `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json` so the agent runs against an allowlist scoped to its own vault directory. The `--append-system-prompt` instructs Claude to read the vault (Journal, Tooling, etc.) — it can be omitted via `system_prompt=None` when the routine uses `context: minimal`.
+The `ClaudeRunner` builds the command with `--print --output-format stream-json --input-format stream-json`. The **prompt is written to the subprocess's stdin** (one stream-json `user` message, then EOF) rather than passed as an argv positional: argv is readable by any local process via `ps` and is capped by ARG_MAX (1MB on macOS). A writer thread feeds stdin while `_read_stream` drains stdout, so a prompt larger than the 64KB pipe buffer cannot deadlock. By default the permission flag is `--dangerously-skip-permissions`. When `restricted=True` (multi-tenant secondary chat) it switches to `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json` so the agent runs against an allowlist scoped to its own vault directory. The `--append-system-prompt` instructs Claude to read the vault (Journal, Tooling, etc.) — it can be omitted via `system_prompt=None` when the routine uses `context: minimal`.
+
+### Turn integrity (v3.81.0+)
+
+Three contracts protect a single turn from being lost, leaked, or duplicated.
+
+**A dead `--resume` is never passed.** A Claude transcript lives at
+`~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`, so it is bound to the cwd
+it was recorded under *and* pruned by the CLI after ~30 days. Resuming a missing
+one does not degrade gracefully — the CLI exits with "No conversation found with
+session ID", `num_turns: 0`, and the turn is spent on an error. `ClaudeRunner.run`
+calls `_claude_transcript_exists()` first and runs fresh instead, setting
+`runner.resume_dropped` so `_finalize_response` tells the user the history is
+gone (a silent context loss just looks like the agent forgetting).
+
+**The prompt never touches argv** — see the invocation note above.
+
+**A Telegram send is never blindly retried.** The Bot API has no idempotency
+key, so a retry after an *ambiguous* failure can deliver the same message twice.
+`_tg_retry_is_safe()` splits on whether the failure proves the request never
+left: urllib wraps connect/send errors (DNS, no route, refused, TLS handshake
+timeout) in `URLError` → retry is free; a bare socket timeout comes from reading
+the *response*, and a reset can land after the body flushed → Telegram may have
+already delivered it, so the attempt stops and logs `delivery UNKNOWN`.
+`_tg_http_retry_is_safe()` adds the status rule: 429 always retries, a 4xx is
+final (three identical attempts only tripled the log noise), and a 5xx retries
+only for methods where a duplicate is impossible. Reads and idempotent writes
+(`getUpdates`, `editMessageText`, `deleteMessage`, `answerCallbackQuery`,
+`sendChatAction`) retry either way.
+
+Tests: `tests/test_turn_integrity.py` (32 tests).
 
 ### v3.1 flat per-agent vault layout
 
