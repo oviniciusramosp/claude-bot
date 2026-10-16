@@ -34,6 +34,27 @@ Context for the Python implementation of the bot's runtime features: routines, v
 | `effort` | string | — | Reasoning effort: `low`, `medium`, `high`, `xhigh`, or `max`. If omitted, Anthropic steps default to `DEFAULT_EFFORT` (env, default `max`); z.AI is not forced. See `.claude/rules/multi-provider-models.md` |
 | `voice` | bool | `false` | Also send response as audio (TTS) |
 | `notify` | string | `final` | Pipeline only: `final\|all\|summary\|none` |
+| `script` | string | — | Routine only (v3.82): shell command run instead of a model turn — see "Script routines" |
+| `timeout` | int | `300` | Seconds for a `script:` routine (max 3600) |
+| `context_from` | string/list | — | Routine only (v3.82): `self` and/or routine names of the same agent whose previous outputs are injected into the prompt |
+| `context_runs` | int | `1` | How many past runs per `context_from` source (max 20) |
+| `failure_deliver` | string | `notify` | Routine only (v3.82): `notify` posts failures to Telegram; `silent` only logs/records them |
+
+### Routine task construction
+
+Every trigger (scheduler interval/clock, `/run`, resume after restart, control API `/routine/run`, Reactions) builds its `RoutineTask` through `routine_task_from_frontmatter()`. Add new routine fields there — before v3.82 each trigger parsed its own subset, and the control API silently dropped `voice`.
+
+### Script routines (v3.82)
+
+`script:` makes `_execute_routine_task` delegate to `_execute_script_routine`: `/bin/bash -c <script>` with cwd = repo root, `AGENT_ID`/`AGENT_WORKSPACE`/`VAULT_DIR`/`ROUTINE_NAME` exported, stdin closed. Exit 0 + empty stdout (or bare `NO_REPLY`) = silence; other stdout is sent verbatim (`parse_mode=""`, capped at `ROUTINE_SCRIPT_MAX_OUTPUT`). Non-zero exit / timeout = failure with the stderr tail. No progress message and no vault checkpoint (deterministic, and a rollback would hide what the script did). The routine body may be empty when `script:` is set — the empty-body guards at every routine entry point accept it.
+
+**Security:** refused for any agent that is a default or topic agent of a secondary chat (`_agent_serves_secondary_chat`). Those agents run under `--permission-mode dontAsk` but can write their own `Routines/`, so `script:` would be a shell escape out of the allowlist.
+
+### Run history and `context_from` (v3.82)
+
+Every routine run (model or script) appends `{ts, time_slot, status, output, error}` to `~/.claude-bot/routine-history/<agent>/<routine>.jsonl` (`record_routine_run`, last `ROUTINE_HISTORY_KEEP`=20 kept). With `context_from`, `build_routine_context_block` renders the last `context_runs` runs of each source (truncated to `ROUTINE_HISTORY_INJECT_CHARS` each, oldest first) as an "Execuções anteriores" block placed before the task. Sources resolve within the routine's own agent only (isolamento total). Routines still run with `session_id=None` — continuity comes from the recorded outputs, not from resuming a transcript that would grow forever.
+
+`failure_deliver: silent` suppresses the FAILED message and the lesson-draft notice for routine failures (they are still logged at ERROR, recorded in state/history/execution report). A bot-level crash of the routine thread is always notified.
 
 ### Minimal vs full context
 
@@ -125,7 +146,9 @@ The SYSTEM_PROMPT instructs Claude to scan `Lessons/` before similar tasks. Test
 
 ## Auto-compact and session rotation
 
-- **Auto-compact**: every `AUTO_COMPACT_INTERVAL` (25) turns, runs `/compact` in background
+- **Native auto-compact (v3.82)**: context size is the Claude CLI's job. `ClaudeRunner.run` sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW=AUTO_COMPACT_WINDOW` (env `AUTO_COMPACT_WINDOW`, default 400000; `0`/`off` = CLI default = full model window) for native Anthropic runs, unless the bot's own environment already sets it. The CLI clamps it to the model window and floors it at 100k, and compacts on real token count. Verified in `--print --resume` mode on CLI 2.1.292: it emits `{"type":"system","subtype":"compact_boundary","compact_metadata":{"trigger":"auto","pre_tokens":…,"post_tokens":…}}`, which `_handle_event` logs and stores in `runner.native_compact`.
+- **Memory snapshot**: every `MEMORY_SNAPSHOT_INTERVAL` (20) turns, `_auto_compact(session, compact=False)` snapshots the session to the journal and refreshes the agent hot cache — silently, without `/compact`. (Before v3.82 this rode on our own every-N-turns `/compact`.)
+- **Idle compact** (`IDLE_COMPACT_HOURS`) still runs our `/compact`: the CLI's idle compaction is gated by a server-side flag that is off by default.
 - **Auto-rotate**: after `AUTO_ROTATE_THRESHOLD` (80) turns, resets session_id (next message starts a new session)
 - Applies only to interactive sessions (routines use session_id=None)
 

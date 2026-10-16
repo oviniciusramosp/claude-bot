@@ -158,6 +158,22 @@ Ask if the user needs any of these additional fields:
 - The user consumes routines on the go (e.g.: morning briefing, news summary)
 - The content is short and makes sense to listen to (not tables or long lists)
 
+**`script: <shell command>`** — Runs a command instead of a model turn: zero tokens, no LLM. Use when the routine is pure automation (a Python script, a backup, a check whose result is mechanical). Rules:
+- Runs with `/bin/bash -c` from the bot repo root (so `python3 scripts/foo.py` works); `AGENT_ID`, `AGENT_WORKSPACE`, `VAULT_DIR` and `ROUTINE_NAME` are exported.
+- **Empty stdout = silence.** Any stdout is sent to Telegram verbatim (plain text, no Markdown). Print only when there is something to report; redirect noise to `/dev/null`.
+- Non-zero exit or timeout = failure, reported with the stderr tail. `timeout: <seconds>` (default 300, max 3600).
+- `model`, `context`, `effort` and `voice` are ignored. The body is still required as documentation of what the script does — but may be short.
+- Not allowed for agents bound to a secondary (guest) chat.
+
+```yaml
+script: python3 scripts/journal-weekly-rollup.py > /dev/null
+timeout: 900
+```
+
+**`context_from: self`** (or a list of routine names of the same agent, e.g. `[self, crypto-news]`) — Injects the output of the previous run(s) into the prompt, so a daily briefing knows what it said yesterday. `context_runs: N` (default 1, max 20) sets how many past runs per routine. Every run is recorded automatically; failed runs appear as `(falhou: …)`. Use when continuity matters ("what changed since yesterday", "don't repeat yesterday's news").
+
+**`failure_deliver: silent`** — By default (`notify`) a failed run posts a FAILED message to Telegram. `silent` only records the failure (log, `/routine status`, execution report, history). Use for frequent, non-critical routines where a transient failure is noise.
+
 **Agent ownership (folder is the source of truth).** In v3.5, a routine's owning agent is determined by **where the file lives on disk**, NOT by a frontmatter field. If the user wants the routine to belong to agent `crypto-bro`, save it at `vault/crypto-bro/Routines/<name>.md` — no `agent:` field needed. The bot will run it with `crypto-bro`'s cwd, skills, journal, and Telegram chat/thread automatically. If the user doesn't mention an owning agent, save to `vault/main/Routines/<name>.md` (the default). The legacy `agent: <id>` frontmatter field is still accepted for backcompat, but if it disagrees with the folder, the folder wins and a warning is logged.
 
 If no optional fields are needed, move forward without adding them.
