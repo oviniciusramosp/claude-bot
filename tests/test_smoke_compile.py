@@ -34,6 +34,47 @@ class CompilesCleanly(unittest.TestCase):
                     self.fail(f"{path.relative_to(REPO_ROOT)} failed to compile:\n{exc}")
 
 
+class BotParsesUnderLaunchdInterpreter(unittest.TestCase):
+    """launchd runs the bot as `/usr/bin/python3 claude-fallback-bot.py`.
+
+    Python 3.9's script tokenizer (unlike py_compile, which parses from
+    memory) reads long lines in chunks and rejects a multibyte char split
+    across a chunk boundary: "Non-UTF-8 code starting with '\\xe2'". The
+    BOT_VERSION changelog line grew past ~17KB and crash-looped the bot
+    (v3.81.1). The coding cookie routes it through the codec reader.
+    """
+
+    BOT = REPO_ROOT / "claude-fallback-bot.py"
+    LAUNCHD_PYTHON = Path("/usr/bin/python3")
+
+    def test_coding_cookie_present(self):
+        head = self.BOT.read_text(encoding="utf-8").splitlines()[:2]
+        self.assertTrue(
+            any("coding: utf-8" in line for line in head),
+            "claude-fallback-bot.py must declare `# -*- coding: utf-8 -*-` "
+            "in its first two lines (see class docstring)",
+        )
+
+    def test_script_path_parse(self):
+        import subprocess
+        import tempfile
+        if not self.LAUNCHD_PYTHON.is_file():
+            self.skipTest("/usr/bin/python3 not available")
+        lines = self.BOT.read_text(encoding="utf-8").splitlines(keepends=True)
+        # The whole file is parsed before the inserted line executes, so this exercises
+        # the real tokenizer path with zero module side effects.
+        cookie = next(i for i, l in enumerate(lines[:2]) if "coding: utf-8" in l)
+        lines.insert(cookie + 1, "raise SystemExit(0)\n")
+        with tempfile.TemporaryDirectory() as d:
+            copy = Path(d) / "bot_parse_check.py"
+            copy.write_text("".join(lines), encoding="utf-8")
+            result = subprocess.run(
+                [str(self.LAUNCHD_PYTHON), str(copy)],
+                capture_output=True, text=True, timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class ShellScriptsSyntaxOk(unittest.TestCase):
     """bash -n catches syntax errors in shell scripts."""
 
