@@ -14,10 +14,10 @@ final class ModelCatalogTests: XCTestCase {
     }
 
     func testLabelForKnownID() {
-        XCTAssertEqual(ModelCatalog.label(for: "fable"), "Fable 5")
-        XCTAssertEqual(ModelCatalog.label(for: "sonnet-5"), "Sonnet 5")
+        XCTAssertEqual(ModelCatalog.label(for: "fable"), "Fable 5.1")
+        XCTAssertEqual(ModelCatalog.label(for: "sonnet-5"), "Sonnet 5.5")
         XCTAssertEqual(ModelCatalog.label(for: "opus"), "Opus 5")
-        XCTAssertEqual(ModelCatalog.label(for: "haiku"), "Haiku 4.5")
+        XCTAssertEqual(ModelCatalog.label(for: "haiku"), "Haiku 5.5")
     }
 
     func testLabelForUnknownIDFallsBack() {

@@ -577,8 +577,8 @@ class MaxEffortAndContext(unittest.TestCase):
     def test_resolve_model_alias_concrete_id_map(self):
         # fable / sonnet-5 aren't bare CLI aliases — they must translate to the
         # concrete API id so the Claude CLI accepts --model.
-        self.assertEqual(self.bot.resolve_model_alias("fable"), "claude-fable-5")
-        self.assertEqual(self.bot.resolve_model_alias("sonnet-5"), "claude-sonnet-5")
+        self.assertEqual(self.bot.resolve_model_alias("fable"), "claude-fable-5-1")
+        self.assertEqual(self.bot.resolve_model_alias("sonnet-5"), "claude-sonnet-5-5")
 
     def test_new_models_are_anthropic_provider(self):
         self.assertEqual(self.bot.model_provider("fable"), "anthropic")
