@@ -251,7 +251,8 @@ class ActiveMemoryCommandTests(unittest.TestCase):
         self.assertIn('"/active-memory"', src)
 
     def test_help_text_mentions_active_memory(self) -> None:
-        self.assertIn("/active-memory", self.bot.HELP_TEXT)
+        # Underscore form: hyphens are not valid Telegram commands (not tappable)
+        self.assertIn("/active_memory", self.bot.HELP_TEXT)
 
 
 if __name__ == "__main__":

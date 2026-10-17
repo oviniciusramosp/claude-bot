@@ -131,7 +131,7 @@ Executor models (Sonnet, Haiku, GLM) can escalate to a strategic advisor (defaul
 - Per-session call limit: 5 (counter file at `/tmp/advisor-<SESSION_ID>.count`)
 - Hard cost cap: `--max-budget-usd 1.00` per invocation; hard timeout: 120s
 - Advisor instructions are only injected into `effective_sp` when `session.model != ADVISOR_MODEL` (no self-loop)
-- Bot detects `advisor.sh` in Bash tool hints and sets `activity_type = "consulting_advisor"` → shows 🧠 reaction on Telegram
+- Bot detects `advisor.sh` in Bash tool hints and sets `activity_type = "consulting_advisor"` → shows 🤓 reaction on Telegram (🧠 is not an allowed reaction)
 
 **Configuration:** `ADVISOR_MODEL` in `~/claude-bot/.env` (default: `opus`).
 
