@@ -54,6 +54,28 @@ _WEEKLY_FNAME_RE = re.compile(r"^(\d{4})-W(\d{2})\.md$")
 _DAILY_FNAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 
 
+def _resolve_oauth_token() -> Optional[str]:
+    """Return the bot-managed Anthropic OAuth token, if available.
+
+    Mirrors the resolution logic in ``ClaudeRunner`` so script subprocesses
+    benefit from the same bot-owned credential and don't depend on the
+    shared macOS keychain (which the desktop app can rotate under us).
+    """
+    import json as _json
+
+    auth_file = Path.home() / ".claude-bot" / "claude-auth.json"
+    try:
+        data = _json.loads(auth_file.read_text())
+        method = data.get("method")
+        if method == "setup_token":
+            return data.get("token")
+        if method == "oauth":
+            return data.get("access_token")
+    except Exception:
+        pass
+    return os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+
+
 def _resolve_vault_dir() -> Path:
     env = os.environ.get("CLAUDE_BOT_VAULT")
     if env:
@@ -226,12 +248,17 @@ def _run_claude_summary(
         "--output-format", "text",
         "-p", prompt,
     ]
+    env = os.environ.copy()
+    token = _resolve_oauth_token()
+    if token:
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
     result = subprocess.run(
         cmd,
         cwd=str(workspace),
         capture_output=True,
         text=True,
         timeout=240,
+        env=env,
     )
     if result.returncode != 0:
         raise RuntimeError(

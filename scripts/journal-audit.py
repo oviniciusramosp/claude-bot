@@ -199,12 +199,17 @@ def fix_frontmatter(path: Path, agent: str, target_date: str) -> str:
     has_opening = lines[0].strip() == "---" if lines else False
 
     if has_opening:
-        # Look for closing ---
+        # Look for closing --- (this function is also called when the
+        # delimiters are well-formed but a required field is missing, so a
+        # closing `---` must extract fm/body and fall through — not return
+        # early — or the missing field never gets backfilled).
         for i in range(1, min(len(lines), 30)):
             stripped = lines[i].strip()
             if stripped == "---":
                 body_start = i + 1
-                return "frontmatter already valid"  # shouldn't be called
+                fm_lines = lines[1:i]
+                body_lines = lines[body_start:]
+                break
             if stripped.startswith("#") or (stripped.startswith("- ") and ":" not in stripped):
                 # Markdown content before closing --- → insert closing before this line
                 # Extract existing frontmatter fields

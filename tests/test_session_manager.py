@@ -206,6 +206,39 @@ class SessionManagerCRUD(unittest.TestCase):
         sm.create("b")
         self.assertIsNone(sm.clone("a", "b"))
 
+    def test_concurrent_save_does_not_race(self):
+        """Regression: SessionManager.save() used a shared sessions.tmp path
+        with no lock. Two threads racing inside save() could both write the
+        tmp file, then the first to finish tmp.replace() would consume it —
+        leaving the second's replace() to fail with FileNotFoundError
+        ("[Errno 2] No such file or directory: sessions.tmp -> sessions.json").
+        """
+        import threading
+
+        sm = self.bot.SessionManager()
+        sm.create("base")
+        errors = []
+
+        def hammer(i):
+            try:
+                for _ in range(25):
+                    sm.sessions[f"t{i}"] = self.bot.Session(name=f"t{i}")
+                    sm.save()
+            except Exception as exc:  # noqa: BLE001 - captured for assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=hammer, args=(i,)) for i in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        self.assertEqual(errors, [])
+        self.assertTrue(self.bot.SESSIONS_FILE.exists())
+        # Final on-disk state must be valid JSON reflecting a complete save.
+        on_disk = json.loads(self.bot.SESSIONS_FILE.read_text())
+        self.assertIn("base", on_disk["sessions"])
+
 
 class MakeSessionName(unittest.TestCase):
     @classmethod

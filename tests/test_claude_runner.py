@@ -30,7 +30,7 @@ class HandleEvent(unittest.TestCase):
     def test_init_event_captures_fast_mode_state(self):
         self.runner._handle_event({
             "type": "system", "subtype": "init",
-            "model": "claude-opus-4-8", "fast_mode_state": "on",
+            "model": "claude-opus-5", "fast_mode_state": "on",
         })
         self.assertEqual(self.runner.captured_fast_mode, "on")
 
@@ -525,8 +525,8 @@ class MaxEffortAndContext(unittest.TestCase):
     # --- pure helpers ---
     def test_resolve_max_context_model_anthropic(self):
         self.assertEqual(self.bot.resolve_max_context_model("opus"), "opus[1m]")
-        self.assertEqual(self.bot.resolve_max_context_model("claude-opus-4-8"),
-                         "claude-opus-4-8[1m]")
+        self.assertEqual(self.bot.resolve_max_context_model("claude-opus-5"),
+                         "claude-opus-5[1m]")
 
     def test_resolve_max_context_model_skips_haiku(self):
         # haiku has no [1m] variant; CLI v2.1.153+ hangs instead of rejecting it
@@ -560,14 +560,14 @@ class MaxEffortAndContext(unittest.TestCase):
         self.assertEqual(self.bot.resolve_model_alias("opus"), "opus")
 
     def test_resolve_model_alias_env_override(self):
-        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        os.environ["OPUS_MODEL"] = "claude-opus-5"
         try:
-            self.assertEqual(self.bot.resolve_model_alias("opus"), "claude-opus-4-8")
+            self.assertEqual(self.bot.resolve_model_alias("opus"), "claude-opus-5")
         finally:
             os.environ.pop("OPUS_MODEL", None)
 
     def test_resolve_model_alias_ignores_non_alias(self):
-        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        os.environ["OPUS_MODEL"] = "claude-opus-5"
         try:
             self.assertEqual(self.bot.resolve_model_alias("sonnet"), "sonnet")
             self.assertEqual(self.bot.resolve_model_alias("glm-4.7"), "glm-4.7")
@@ -613,20 +613,20 @@ class MaxEffortAndContext(unittest.TestCase):
 
     def test_alias_override_pins_concrete_id_with_1m(self):
         self.bot.ZAI_API_KEY = ""
-        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        os.environ["OPUS_MODEL"] = "claude-opus-5"
         try:
             mock_popen, _ = self._run_capture_cmd("opus")
         finally:
             os.environ.pop("OPUS_MODEL", None)
         cmd = mock_popen.call_args.args[0]
-        self.assertEqual(self._arg_after(cmd, "--model"), "claude-opus-4-8[1m]")
+        self.assertEqual(self._arg_after(cmd, "--model"), "claude-opus-5[1m]")
 
     def test_credit_failure_retries_on_concrete_id_and_trips_switch(self):
         # Full two-spawn flow: opus[1m] (pinned to 4.8) hits the usage-credits
-        # error in result_text, then retries on claude-opus-4-8 (keeps the pin,
+        # error in result_text, then retries on claude-opus-5 (keeps the pin,
         # drops [1m]) and trips the process kill switch.
         self.bot.ZAI_API_KEY = ""
-        os.environ["OPUS_MODEL"] = "claude-opus-4-8"
+        os.environ["OPUS_MODEL"] = "claude-opus-5"
         try:
             runner = self.bot.ClaudeRunner()
             proc1 = self._make_mock_popen_proc()
@@ -648,7 +648,7 @@ class MaxEffortAndContext(unittest.TestCase):
 
             with patch.object(self.bot.subprocess, "Popen", side_effect=_side_effect):
                 runner.run(prompt="hi", model="opus", system_prompt=None)
-            self.assertEqual(seen, ["claude-opus-4-8[1m]", "claude-opus-4-8"])
+            self.assertEqual(seen, ["claude-opus-5[1m]", "claude-opus-5"])
             self.assertTrue(self.bot._MAX_CONTEXT_RUNTIME_OFF)
         finally:
             os.environ.pop("OPUS_MODEL", None)
@@ -693,9 +693,9 @@ class CapturedModelAndSignature(unittest.TestCase):
         runner.running = True
         runner._handle_event({
             "type": "system", "subtype": "init",
-            "session_id": "s1", "model": "claude-opus-4-8[1m]",
+            "session_id": "s1", "model": "claude-opus-5[1m]",
         })
-        self.assertEqual(runner.captured_model, "claude-opus-4-8[1m]")
+        self.assertEqual(runner.captured_model, "claude-opus-5[1m]")
 
     def test_signature_includes_agent_icon(self):
         with patch.object(self.bot, "load_agent", return_value={"icon": "🧠"}):
@@ -713,9 +713,9 @@ class CapturedModelAndSignature(unittest.TestCase):
         sig = self.bot._build_signature(
             self._session(model="opus"),
             effective_model="opus",
-            resolved_model="claude-opus-4-8[1m]",
+            resolved_model="claude-opus-5[1m]",
         )
-        self.assertIn("claude-opus-4-8[1m]", sig)
+        self.assertIn("claude-opus-5[1m]", sig)
 
     def test_signature_ignores_resolved_model_for_glm(self):
         # GLM proxies through a sonnet alias — captured id is meaningless there.
@@ -747,7 +747,7 @@ class OneMillionContextFallback(unittest.TestCase):
 
     def test_rejection_detected_from_error_text(self):
         r = self._runner()
-        r.error_text = "model claude-opus-4-8[1m] not_found"
+        r.error_text = "model claude-opus-5[1m] not_found"
         self.assertTrue(r._looks_like_model_unavailable())
 
     def test_no_rejection_when_clean(self):

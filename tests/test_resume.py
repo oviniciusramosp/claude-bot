@@ -20,7 +20,7 @@ from tests._botload import load_bot_module
 from tests.test_bot_integration import _BotFixture
 
 
-def _write_claude_app_session(bot, *, sid, cwd, title, model="claude-opus-4-8",
+def _write_claude_app_session(bot, *, sid, cwd, title, model="claude-opus-5",
                               last_activity_ms=None, archived=False,
                               with_transcript=True, ws="ws1", grp="grp1"):
     """Create a Claude.app index entry (+ optional live transcript) for `sid`."""
@@ -71,7 +71,7 @@ class ResumeHelpers(unittest.TestCase):
 
     def test_resume_model_alias_maps_captured_ids(self):
         f = self.bot._resume_model_alias
-        self.assertEqual(f("claude-opus-4-8[1m]"), "opus")   # strips [1m]
+        self.assertEqual(f("claude-opus-5[1m]"), "opus")   # strips [1m]
         self.assertEqual(f("claude-sonnet-4-6"), "sonnet")
         self.assertEqual(f("claude-haiku-4-5"), "haiku")
         self.assertEqual(f("opus"), "opus")                  # already an alias
