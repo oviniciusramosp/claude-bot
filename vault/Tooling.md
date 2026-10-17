@@ -13,7 +13,10 @@ Which tool to use for each type of task. Check before choosing an approach.
 
 ## Web browsing
 
-- **PinchTab** — Web browsing CLI with logged-in sessions (X, Threads). Prefer over urllib to avoid bot fingerprinting.
+- **Browser tools (preferred)** — when PinchTab's Chrome is up, every run in the owner's chats gets native browser tools from the `browser` MCP server: `mcp__browser__browser_navigate`, `browser_snapshot` (accessibility tree — better than screenshots), `browser_click`, `browser_type`, `browser_fill_form`, `browser_take_screenshot`, `browser_tabs`, `browser_evaluate`. They drive the **same logged-in Chrome** as PinchTab (CDP `:9869`), so sessions (X, Threads, …) are shared. If they're not in your tool list, the browser is down — say so plainly (the bot already alerts the owner) and fall back to WebFetch/WebSearch.
+- **Always finish with `browser_close`** (closes your page only — the shared Chrome keeps running). Open pages accumulate and slow every other agent down.
+- Guest (secondary) chats never get these tools — they would act on the owner's logged-in accounts.
+- **PinchTab** — Web browsing CLI with logged-in sessions (X, Threads). Prefer over urllib to avoid bot fingerprinting. Use it from Bash when you need its CLI specifically; otherwise prefer the browser tools above.
 - Repo/docs: https://github.com/pinchtab/pinchtab
 - Default port: `9867`
 - Requires `PINCHTAB_ALLOW_EVALUATE=1` for JavaScript form submission (X and other sites)
