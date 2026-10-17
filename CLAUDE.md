@@ -101,6 +101,18 @@ only for methods where a duplicate is impossible. Reads and idempotent writes
 
 Tests: `tests/test_turn_integrity.py` (32 tests).
 
+### Rich Messages (Bot API 10.1)
+
+Model answers go out as **Rich Messages** — `sendRichMessage` / `editMessageText` with `rich_message: {"markdown": …}` — so tables, task lists, headings and collapsible `<details>` render natively and one message holds up to **32768 chars / 500 blocks** instead of 4096-char HTML chunks. It is strictly **opt-in per call site** (`rich=True` on `send_message`/`edit_message`): only the final answer (`_finalize_response`), the streaming preview (`_stream_updates`) and routine output use it; every internal status message keeps the HTML path. A message that already became rich keeps being edited as rich.
+
+- **Fallback:** any rich failure lands on the existing HTML path — env off, kill switch tripped, API error (one HTML retry), or text above the rich limits (HTML split / document). An *ambiguous* `sendRichMessage` transport failure is **not** re-sent (same "delivery UNKNOWN" contract as `tg_request`).
+- **Kill switch:** a 404 / "message text is empty" / "rich message must be non-empty" answer means the server doesn't understand rich messages → `_disable_rich_runtime()` turns it off for the process (WARNING, once). Three consecutive messages rejecting a rich edit disable rich *edits* only.
+- **Markdown prep** (`_rich_markdown_from_model`): rich Markdown treats `$…$` as LaTeX, `==…==` as highlight, `||…||` as spoiler and a lone `~` as strikethrough, so those are escaped in prose (never in code or URLs).
+- **Reasoning panel:** `_build_stream_display` opens the 🧠 block with `**>` → HTML `<blockquote expandable>`, rich `<details>` — collapsed by default on both paths.
+- `sendMessageDraft`/`sendRichMessageDraft` streaming is **not** used (private chats only).
+
+Tests: `tests/test_rich_messages.py`. The harness (`tests/_botload.py`) forces `RICH_MESSAGES=false` and `NOTIFY_DONE_AFTER_SECONDS=0`; those tests flip the module constants per case.
+
 ### v3.1 flat per-agent vault layout
 
 Default workspace: `vault/main/` — the bot operates as the Main agent by default. Every session has an explicit `agent` string (defaults to `"main"`) and cwd is always `vault/<agent>/`.
@@ -155,6 +167,8 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager. Contains cr
 | `MAX_CONTEXT` | No | `true` | When on, appends the `[1m]` 1M-context variant to native Anthropic models. **1M context requires pay-as-you-go usage credits enabled at claude.ai/settings/usage — even on subscription auth.** Without them the CLI rejects `[1m]`; the bot retries once on standard 200K context and then trips a process kill switch so subsequent turns skip `[1m]` (one wasted attempt per restart, no per-turn tax). Set `false`/`0`/`off` to skip the attempt entirely |
 | `AUTO_COMPACT_WINDOW` | No | `400000` | Token window handed to the Claude CLI's native auto-compactor (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`) on every Anthropic run — the CLI compacts when context nears it (clamped to the model window, floor 100k). `0`/`off` = CLI default (full model window). See `.claude/rules/vault-runtime-features.md` |
 | `OPUS_MODEL` / `SONNET_MODEL` / `HAIKU_MODEL` | No | — | Pin a concrete model id for that alias when the CLI's bare alias lags a release (this was needed for `OPUS_MODEL=claude-opus-4-8` while `--model opus` still resolved to 4.7 — `opus` now resolves directly to `claude-opus-5`). Unset → built-in default pins apply (`sonnet`/`haiku` → 5.5 ids, see `MODEL_ALIAS_DEFAULT_PIN`); `opus` uses the auto-tracking alias. Falls back to the alias if the pinned id is unavailable |
+| `RICH_MESSAGES` | No | `true` | Deliver model answers (final edit, streaming preview, routine output) as Telegram Rich Messages (Bot API 10.1). `false`/`0`/`off` keeps the HTML path. See "Rich Messages" below |
+| `NOTIFY_DONE_AFTER_SECONDS` | No | `20` | When a turn ran at least this long and its answer was delivered by editing the placeholder (edits never notify), send a short notifying "✅ Pronto · <duração>" reply to the user's message. `0` disables. Not sent for routines, `#voice` replies, cancelled turns, or answers already sent as new messages |
 
 Edited via: ClaudeBotManager → Settings, or directly.
 

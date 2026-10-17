@@ -85,6 +85,9 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("CODEX_PATH", _v)
             elif _k == "PIPELINE_V2_ENABLED":
                 os.environ.setdefault("PIPELINE_V2_ENABLED", _v)
+            elif _k in ("RICH_MESSAGES", "NOTIFY_DONE_AFTER_SECONDS"):
+                # Rich Messages kill switch + completion-notice threshold.
+                os.environ.setdefault(_k, _v)
             elif _k in ("DEFAULT_EFFORT", "MAX_CONTEXT",
                         "OPUS_MODEL", "SONNET_MODEL", "HAIKU_MODEL"):
                 # Max-effort / max-context tuning + per-family model pins (v3.70).
@@ -1255,6 +1258,33 @@ STREAM_EDIT_INTERVAL = 3.0
 TYPING_INTERVAL = 4.0
 MAX_MESSAGE_LENGTH = 4000
 APPROVAL_EXPIRY_SECONDS = 300  # 5 minutes
+
+# --- Rich Messages (Bot API 10.1) ---
+# Model answers (final + streaming preview + routine output) are delivered as
+# Telegram Rich Messages (sendRichMessage / editMessageText.rich_message with an
+# InputRichMessage.markdown body): real tables, task lists, headings, collapsible
+# <details>, and up to 32768 chars in ONE message instead of 4096-char HTML
+# chunks. Any failure falls back to the HTML path, so this is purely additive.
+# RICH_MESSAGES=false/0/off disables it; the bot also trips a process-wide kill
+# switch the first time the API rejects the method/parameter as unknown.
+RICH_MESSAGES_ENABLED: bool = os.environ.get("RICH_MESSAGES", "true").strip().lower() not in (
+    "false", "0", "off", "no")
+RICH_MESSAGE_MAX_CHARS = 32768   # "Up to 32768 UTF-8 characters" (Rich Message Limits)
+RICH_MESSAGE_MAX_BLOCKS = 500    # "Up to 500 blocks, including nested blocks, … table rows"
+# --- end Rich Messages ---
+
+# Completion notice ("aviso de pronto"): final answers are delivered by EDITING
+# the "⏳ Processando…" placeholder and Telegram never notifies on edits, so a
+# long turn finished silently. When a turn ran at least this many seconds and
+# its answer landed via edit, the bot sends a short notifying reply to the
+# user's message. 0 disables.
+_ndas_raw = os.environ.get("NOTIFY_DONE_AFTER_SECONDS", "20").strip()
+try:
+    NOTIFY_DONE_AFTER_SECONDS = max(0, int(float(_ndas_raw or "20")))
+except ValueError:
+    NOTIFY_DONE_AFTER_SECONDS = 20
+    logging.getLogger("claude-bot").warning(
+        "NOTIFY_DONE_AFTER_SECONDS=%r is not a number — using the default 20s", _ndas_raw)
 
 # ---------------------------------------------------------------------------
 # Manual pipeline review — web editor
@@ -10596,6 +10626,177 @@ def _tg_http_retry_is_safe(method: str, status: int) -> bool:
     return False
 
 
+# --- Rich Messages (Bot API 10.1) ---
+# Process-wide kill switches, tripped (once, logged at WARNING) when Telegram
+# says the method or the rich_message parameter does not exist — an older Bot
+# API server, or a self-hosted one that lags. Cleared by a restart.
+_RICH_RUNTIME_OFF = False        # sendRichMessage AND rich edits
+_RICH_EDIT_RUNTIME_OFF = False   # rich edits only (repeated edit failures)
+_RICH_STATE_LOCK = threading.Lock()
+
+# Sentinel returned by _send_rich when the request may have been delivered
+# (ambiguous transport failure) — the caller must NOT re-send via HTML, or the
+# user could get the answer twice. Same contract as tg_request's
+# "delivery UNKNOWN" path.
+_RICH_DELIVERY_UNKNOWN = object()
+
+# Telegram answers that prove the server does not understand rich messages (as
+# opposed to a content problem in one message). Probed live on 2026-10-16:
+#   unknown method            → 404 "Not Found"
+#   rich_message ignored      → 400 "message text is empty" (editMessageText)
+#   InputRichMessage rejected → 400 "rich message must be non-empty"
+_RICH_UNSUPPORTED_MARKERS = (
+    "method not found", "message text is empty", "rich message must be non-empty",
+    "unknown parameter", "unsupported parameter", "rich messages are not supported",
+)
+
+_RICH_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+_RICH_URL_RE = re.compile(r"((?:https?|tg)://[^\s<>()]+)")
+
+
+def _disable_rich_runtime(reason: str, edits_only: bool = False) -> None:
+    """Trip the Rich Messages kill switch once, with a WARNING (never silent)."""
+    global _RICH_RUNTIME_OFF, _RICH_EDIT_RUNTIME_OFF
+    with _RICH_STATE_LOCK:
+        if edits_only:
+            if _RICH_EDIT_RUNTIME_OFF or _RICH_RUNTIME_OFF:
+                return
+            _RICH_EDIT_RUNTIME_OFF = True
+        else:
+            if _RICH_RUNTIME_OFF:
+                return
+            _RICH_RUNTIME_OFF = True
+    logging.getLogger("claude-bot").warning(
+        "Rich Messages %s disabled until restart — falling back to HTML: %s",
+        "edits" if edits_only else "(send + edit)", reason)
+
+
+def _rich_response_unsupported(resp: Optional[Dict]) -> bool:
+    """True when a Telegram error says rich messages aren't understood at all."""
+    if not resp or resp.get("ok"):
+        return False
+    if resp.get("error_code") == 404:
+        return True
+    desc = str(resp.get("description") or "").lower()
+    return any(marker in desc for marker in _RICH_UNSUPPORTED_MARKERS)
+
+
+def _rich_escape_prose(line: str) -> str:
+    """Neutralize rich-Markdown syntax that plain model prose triggers by accident.
+
+    Rich Markdown is GFM plus Telegram extensions, and three of them collide
+    with everyday text: ``$…$`` is inline LaTeX (``$65k → $70k`` would render
+    as a formula — the cost line alone has two dollars), ``==…==`` is a marker
+    highlight (``a == b``) and ``||…||`` a spoiler. A lone ``~`` (``~30s``) is
+    GFM single-tilde strikethrough. URLs are left untouched.
+    """
+    out: List[str] = []
+    table_row = line.lstrip().startswith("|")
+    setext = bool(line.strip()) and set(line.strip()) == {"="}
+    for i, part in enumerate(_RICH_URL_RE.split(line)):
+        if i % 2 == 1:
+            out.append(part)
+            continue
+        part = re.sub(r"(?<!\\)\$", r"\\$", part)
+        if not setext:
+            part = part.replace("==", "\\=\\=")
+        part = re.sub(r"(?<![~\\])~(?!~)", r"\\~", part)
+        if not table_row:
+            part = part.replace("||", "\\|\\|")
+        out.append(part)
+    return "".join(out)
+
+
+def _rich_markdown_from_model(text: str) -> str:
+    """Turn the bot's model-facing Markdown into InputRichMessage.markdown.
+
+    Two passes, both fence-aware (code blocks are never touched):
+
+    1. An expandable quote group — a line starting with ``**>`` followed by
+       ``>`` lines, the marker ``_build_stream_display`` uses for the 🧠
+       reasoning panel — becomes ``<details><summary>…</summary>…</details>``,
+       the rich equivalent of ``<blockquote expandable>`` (collapsed by
+       default, and Markdown is parsed inside it).
+    2. Prose outside fences and inline code spans is escaped with
+       ``_rich_escape_prose``.
+    """
+    lines = text.split("\n")
+    grouped: List[str] = []
+    fence: Optional[str] = None
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _RICH_FENCE_RE.match(line)
+        if m:
+            marker = m.group(1)
+            if fence is None:
+                fence = marker[0] * 3
+            elif line.strip().startswith(fence):
+                fence = None
+        if fence is None and not m and line.lstrip().startswith("**>"):
+            summary = line.lstrip()[3:].strip() or "…"
+            body: List[str] = []
+            i += 1
+            while i < len(lines) and lines[i].lstrip().startswith(">"):
+                q = lines[i].lstrip()[1:]
+                body.append(q[1:] if q.startswith(" ") else q)
+                i += 1
+            if sum(1 for b in body if _RICH_FENCE_RE.match(b)) % 2:
+                body.append("```")   # a truncated snapshot must not swallow </details>
+            grouped.append(f"<details><summary>{summary}</summary>")
+            grouped.append("")
+            grouped.extend(body)
+            grouped.append("")
+            grouped.append("</details>")
+            continue
+        grouped.append(line)
+        i += 1
+
+    out: List[str] = []
+    fence = None
+    for line in grouped:
+        m = _RICH_FENCE_RE.match(line)
+        if m:
+            if fence is None:
+                fence = m.group(1)[0] * 3
+            elif line.strip().startswith(fence):
+                fence = None
+            out.append(line)
+            continue
+        if fence is not None:
+            out.append(line)
+            continue
+        segs = re.split(r"(`[^`\n]+`)", line)
+        out.append("".join(
+            s if (k % 2 == 1) else _rich_escape_prose(s) for k, s in enumerate(segs)))
+    return "\n".join(out)
+
+
+def _rich_block_estimate(markdown: str) -> int:
+    """Upper-bound estimate of the rich blocks ``markdown`` will produce.
+
+    Every non-blank line outside a code fence (paragraph line, list item, table
+    row, heading…) counts as a block and each fenced code block as one. It
+    over-counts multi-line paragraphs, which is the safe direction: an answer
+    near the 500-block limit goes to the HTML path instead of being rejected.
+    """
+    count = 0
+    fence: Optional[str] = None
+    for line in markdown.split("\n"):
+        m = _RICH_FENCE_RE.match(line)
+        if m:
+            if fence is None:
+                fence = m.group(1)[0] * 3
+                count += 1
+            elif line.strip().startswith(fence):
+                fence = None
+            continue
+        if fence is None and line.strip():
+            count += 1
+    return count
+# --- end Rich Messages ---
+
+
 class ClaudeTelegramBot:
     def __init__(self) -> None:
         self.token = TELEGRAM_BOT_TOKEN
@@ -11980,7 +12181,24 @@ class ClaudeTelegramBot:
                      chat_id: Optional[str] = None,
                      thread_id: Optional[str] = None,
                      reply_to_message_id: Optional[int] = None,
-                     disable_notification: bool = False) -> Optional[int]:
+                     disable_notification: bool = False,
+                     rich: bool = False) -> Optional[int]:
+        # --- Rich Messages (Bot API 10.1) ---
+        # Opt-in (rich=True) for model-generated Markdown only. Any failure
+        # (disabled, kill switch, API error, above the rich limits) falls
+        # through to the HTML path below — except an ambiguous delivery, where
+        # re-sending could duplicate the answer.
+        if rich and self._rich_enabled(parse_mode):
+            _rich_id = self._send_rich(text, chat_id=chat_id, thread_id=thread_id,
+                                       reply_to_message_id=reply_to_message_id,
+                                       reply_markup=reply_markup,
+                                       disable_notification=disable_notification)
+            if _rich_id is _RICH_DELIVERY_UNKNOWN:
+                self._last_first_message_id = None
+                return None
+            if _rich_id is not None:
+                return _rich_id
+        # --- end Rich Messages ---
         # Hermes #5: strip any leaked <memory-context>...</memory-context>
         # block BEFORE formatting so internal context tags never reach Telegram.
         text = _strip_memory_context(text)
@@ -12042,7 +12260,21 @@ class ClaudeTelegramBot:
 
     def edit_message(self, message_id: int, text: str, parse_mode: str = "HTML",
                      chat_id: Optional[str] = None,
-                     reply_markup: Optional[Dict] = None) -> bool:
+                     reply_markup: Optional[Dict] = None,
+                     rich: bool = False) -> bool:
+        # --- Rich Messages (Bot API 10.1) ---
+        # rich=True (stream preview) opts in; a message that is ALREADY rich is
+        # always edited as rich, whatever the caller passed, so a later status
+        # edit ("✅", "Sessão expirada", stuck-message watchdog) never depends on
+        # Telegram accepting a rich → plain-text conversion. A message whose
+        # rich edit failed on content stays on HTML for the rest of the stream.
+        # On failure, fall through to the HTML path below.
+        if self._rich_enabled(parse_mode) and (
+                self._rich_is(message_id, "rich_msgs")
+                or (rich and not self._rich_is(message_id, "failed"))):
+            if self._edit_rich(message_id, text, chat_id=chat_id, reply_markup=reply_markup):
+                return True
+        # --- end Rich Messages ---
         # Hermes #5: scrub leaked memory-context fences from the streaming
         # edit path — same defense as send_message for partial streamed text.
         text = _strip_memory_context(text)
@@ -12106,6 +12338,232 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.warning("editMessageText error: %s", exc)
             return None
+
+    # --- Rich Messages (Bot API 10.1) ---
+    # Opt-in per call site (``rich=True`` on send_message / edit_message) so
+    # only model-generated Markdown takes this path — internal status messages
+    # and HTML fragments keep the HTML path untouched. A message that already
+    # became rich keeps being edited as rich (see _rich_tracking).
+
+    def _rich_enabled(self, parse_mode: str = "HTML") -> bool:
+        """Rich delivery allowed: env on, kill switch not tripped, Markdown input."""
+        return (RICH_MESSAGES_ENABLED and not _RICH_RUNTIME_OFF
+                and parse_mode == "HTML")
+
+    def _rich_tracking(self) -> Dict[str, Any]:
+        """Lazily created per-bot rich state (no __init__ change needed).
+
+        ``rich_msgs``  message ids that are currently rich messages (bounded).
+        ``failed``     ids whose rich edit failed for content reasons — the
+                       stream keeps them on HTML instead of paying two calls
+                       per edit (and tripping the group's 20 msg/min limit).
+        ``streak``     consecutive distinct messages failing a rich edit; 3 in
+                       a row trips the edit kill switch.
+        """
+        st = self.__dict__.get("_rich_state")
+        if st is None:
+            with _RICH_STATE_LOCK:
+                st = self.__dict__.get("_rich_state")
+                if st is None:
+                    st = {"rich_msgs": {}, "failed": {}, "streak": 0,
+                          "lock": threading.Lock()}
+                    self.__dict__["_rich_state"] = st
+        return st
+
+    def _rich_mark(self, message_id: Optional[int], key: str) -> None:
+        if not message_id:
+            return
+        st = self._rich_tracking()
+        with st["lock"]:
+            bucket = st[key]
+            bucket[message_id] = True
+            while len(bucket) > 512:
+                bucket.pop(next(iter(bucket)))
+
+    def _rich_is(self, message_id: Optional[int], key: str) -> bool:
+        st = self._rich_tracking()
+        with st["lock"]:
+            return bool(message_id) and message_id in st[key]
+
+    def _rich_payload(self, text: str) -> Optional[Dict[str, Any]]:
+        """Build InputRichMessage from model Markdown, or None if ineligible.
+
+        None (→ caller uses the HTML path) when the text is empty after the
+        memory-context scrub, or exceeds the documented rich limits (32768
+        chars / 500 blocks) — the HTML path then splits or attaches it.
+        """
+        text = _strip_memory_context(text)
+        if not text.strip():
+            return None
+        markdown = _rich_markdown_from_model(text)
+        if len(markdown) > RICH_MESSAGE_MAX_CHARS:
+            logger.info("Rich message skipped: %d chars > %d — using HTML path",
+                        len(markdown), RICH_MESSAGE_MAX_CHARS)
+            return None
+        blocks = _rich_block_estimate(markdown)
+        if blocks > RICH_MESSAGE_MAX_BLOCKS:
+            logger.info("Rich message skipped: ~%d blocks > %d — using HTML path",
+                        blocks, RICH_MESSAGE_MAX_BLOCKS)
+            return None
+        return {"markdown": markdown}
+
+    def _rich_request(self, method: str, data: Dict[str, Any],
+                      timeout: int = 30) -> Dict[str, Any]:
+        """ONE Bot API call that always returns Telegram's JSON body.
+
+        Unlike tg_request this keeps the error ``description`` (the kill switch
+        and the fallback decision depend on it) and never retries: a failed
+        rich call falls back to the HTML path, which has its own retry policy.
+        A transport failure is reported as ``{"ok": False, "transport_error":
+        exc}`` so the caller can tell "never left" from "maybe delivered".
+        """
+        url = f"{self.base_url}/{method}"
+        payload = json.dumps(data).encode("utf-8")
+        req = urllib.request.Request(url, data=payload,
+                                     headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+                if isinstance(body, dict):
+                    body.setdefault("ok", False)
+                    body.setdefault("error_code", exc.code)
+                    return body
+            except Exception as parse_exc:
+                logger.warning("%s: unreadable HTTP %s error body: %s",
+                               method, exc.code, parse_exc)
+            return {"ok": False, "error_code": exc.code, "description": str(exc.reason)}
+        except Exception as exc:
+            return {"ok": False, "error_code": 0, "description": str(exc),
+                    "transport_error": exc}
+
+    def _send_rich(self, text: str, chat_id: Optional[str] = None,
+                   thread_id: Optional[str] = None,
+                   reply_to_message_id: Optional[int] = None,
+                   reply_markup: Optional[Dict] = None,
+                   disable_notification: bool = False) -> Any:
+        """sendRichMessage. Returns the message id, None to fall back to HTML,
+        or ``_RICH_DELIVERY_UNKNOWN`` when a re-send could duplicate the answer."""
+        rich_message = self._rich_payload(text)
+        if rich_message is None:
+            return None
+        if chat_id is None:
+            chat_id = self._chat_id
+        if thread_id is None:
+            thread_id = self._ctx.thread_id if self._ctx else None
+        data: Dict[str, Any] = {"chat_id": chat_id, "rich_message": rich_message}
+        if thread_id:
+            data["message_thread_id"] = thread_id
+        if reply_to_message_id:
+            data["reply_parameters"] = {"message_id": reply_to_message_id,
+                                        "allow_sending_without_reply": True}
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        if disable_notification:
+            data["disable_notification"] = True
+        resp = self._rich_request("sendRichMessage", data)
+        if resp.get("ok"):
+            msg_id = (resp.get("result") or {}).get("message_id")
+            if msg_id:
+                self._rich_mark(msg_id, "rich_msgs")
+                self._last_first_message_id = msg_id
+                return msg_id
+            logger.warning("sendRichMessage ok without message_id — falling back to HTML")
+            return None
+        exc = resp.get("transport_error")
+        if exc is not None:
+            if _tg_retry_is_safe("sendRichMessage", exc):
+                logger.warning("sendRichMessage never left (%s) — retrying via HTML", exc)
+                return None
+            logger.error("sendRichMessage delivery UNKNOWN (failure after the request "
+                         "was sent): %s — not re-sending to avoid a duplicate", exc)
+            return _RICH_DELIVERY_UNKNOWN
+        code = resp.get("error_code")
+        desc = resp.get("description", "")
+        if isinstance(code, int) and 500 <= code < 600:
+            logger.error("sendRichMessage HTTP %s — delivery UNKNOWN, not re-sending: %s",
+                         code, desc)
+            return _RICH_DELIVERY_UNKNOWN
+        if _rich_response_unsupported(resp):
+            _disable_rich_runtime(f"sendRichMessage HTTP {code}: {desc}")
+            return None
+        logger.warning("sendRichMessage rejected (HTTP %s: %s) — retrying via HTML", code, desc)
+        return None
+
+    def _edit_rich(self, message_id: int, text: str, chat_id: Optional[str] = None,
+                   reply_markup: Optional[Dict] = None) -> bool:
+        """editMessageText with rich_message. True = edited (or already identical)."""
+        if not message_id or _RICH_RUNTIME_OFF or _RICH_EDIT_RUNTIME_OFF:
+            return False
+        rich_message = self._rich_payload(text)
+        if rich_message is None:
+            return False
+        data: Dict[str, Any] = {"chat_id": chat_id or self._chat_id,
+                                "message_id": message_id, "rich_message": rich_message}
+        if reply_markup:
+            data["reply_markup"] = reply_markup
+        resp = self._rich_request("editMessageText", data, timeout=60)
+        st = self._rich_tracking()
+        desc = str(resp.get("description") or "")
+        if resp.get("ok") or "message is not modified" in desc:
+            self._rich_mark(message_id, "rich_msgs")
+            with st["lock"]:
+                st["streak"] = 0
+            return True
+        if resp.get("transport_error") is not None:
+            logger.warning("rich editMessageText transport error: %s", desc)
+            return False   # edits are idempotent — the HTML path may retry
+        if "message to edit not found" in desc:
+            return False
+        if _rich_response_unsupported(resp):
+            _disable_rich_runtime(f"editMessageText HTTP {resp.get('error_code')}: {desc}")
+            return False
+        logger.warning("rich editMessageText rejected for msg %s (HTTP %s: %s) — HTML fallback",
+                       message_id, resp.get("error_code"), desc)
+        if not self._rich_is(message_id, "failed"):
+            self._rich_mark(message_id, "failed")
+            with st["lock"]:
+                st["streak"] += 1
+                streak = st["streak"]
+            if streak >= 3:
+                _disable_rich_runtime(
+                    f"{streak} consecutive messages rejected the rich edit (last: {desc})",
+                    edits_only=True)
+        return False
+    # --- end Rich Messages ---
+
+    # --- Completion notice ("aviso de pronto") ---
+    def _maybe_notify_done(self, runner: Any, delivered_by_edit: bool) -> Optional[int]:
+        """Completion notice: a notifying reply when a long turn ended silently.
+
+        Telegram never notifies on edits, and the final answer is an edit of
+        the placeholder — so a turn that ran ≥ NOTIFY_DONE_AFTER_SECONDS gets a
+        short reply to the user's own message. Skipped when the answer already
+        went out as new message(s) (those notify), when the user cancelled it,
+        and when disabled (0).
+        """
+        ctx = self._ctx
+        if NOTIFY_DONE_AFTER_SECONDS <= 0 or not delivered_by_edit:
+            return None
+        if not ctx or not ctx.user_msg_id or runner.exit_code == 130:
+            return None
+        started = getattr(runner, "start_time", 0.0) or 0.0
+        if not started:
+            return None
+        elapsed = time.time() - started
+        if elapsed < NOTIFY_DONE_AFTER_SECONDS:
+            return None
+        failed = bool(runner.error_text) or runner.exit_code not in (None, 0)
+        label = "⚠️ Terminou com erro" if failed else "✅ Pronto"
+        msg_id = self.send_message(f"{label} · {_format_duration(elapsed)}", parse_mode="",
+                                   reply_to_message_id=ctx.user_msg_id)
+        if not msg_id:
+            logger.warning("Completion notice not delivered (chat=%s, thread=%s)",
+                           ctx.chat_id, ctx.thread_id)
+        return msg_id
+    # --- end completion notice ---
 
     def delete_message(self, message_id: int, chat_id: Optional[str] = None) -> bool:
         if chat_id is None:
@@ -12230,19 +12688,33 @@ class ClaudeTelegramBot:
         one collapsible bubble per line, and because inline-code spans are
         extracted before the line pass, a quoted line containing `code` had its
         quote closed early — the code then rendered outside the bubble.
+
+        A group whose FIRST line starts with ``**>`` (Telegram MarkdownV2's
+        expandable-quote marker; ``_build_stream_display`` uses it for the 🧠
+        reasoning panel) becomes ``<blockquote expandable>`` — collapsed by
+        default. The rich path renders the same marker as ``<details>``.
         """
         out: List[str] = []
         quoted: List[str] = []
+        expandable = [False]
 
         def flush() -> None:
             if not quoted:
                 return
             inner = ClaudeTelegramBot._md_inline_to_html("\n".join(quoted))
-            out.append(f"<blockquote>{inner}</blockquote>")
+            tag = "<blockquote expandable>" if expandable[0] else "<blockquote>"
+            out.append(f"{tag}{inner}</blockquote>")
             quoted.clear()
+            expandable[0] = False
 
         for line in text.split("\n"):
             stripped = line.lstrip()
+            if stripped.startswith("**>"):
+                flush()
+                expandable[0] = True
+                inner_line = stripped[3:]
+                quoted.append(inner_line[1:] if inner_line.startswith(" ") else inner_line)
+                continue
             if stripped.startswith(">"):
                 inner_line = stripped[1:]
                 quoted.append(inner_line[1:] if inner_line.startswith(" ") else inner_line)
@@ -12310,6 +12782,9 @@ class ClaudeTelegramBot:
 
     # Tags Telegram's HTML parser accepts. Anything else is dropped so a stray
     # tag from the model (e.g. <div>, <h2>) can't 400 the whole message.
+    # Attributes ride on the literal opening tag, so ``<blockquote expandable>``
+    # keeps its attribute through _sanitize_telegram_html and is re-opened
+    # verbatim by _rebalance_html_chunks after a split.
     _TG_HTML_TAGS = {
         "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
         "code", "pre", "a", "blockquote", "tg-spoiler", "span",
@@ -17769,7 +18244,11 @@ class ClaudeTelegramBot:
             if reasoning_parts:
                 reasoning_text = "\n\n".join(reasoning_parts)
                 quoted = "\n".join(f"> {line}" for line in reasoning_text.split("\n"))
-                reasoning_block = f"> 🧠 *Reasoning:*\n{quoted}"
+                # `**>` opens an EXPANDABLE quote (collapsed by default) so the
+                # reasoning panel doesn't push the answer off-screen: HTML →
+                # <blockquote expandable>, rich → <details> (see
+                # _md_prose_to_html / _rich_markdown_from_model).
+                reasoning_block = f"**> 🧠 *Reasoning:*\n{quoted}"
                 parts.append(reasoning_block)
                 reasoning_chars = len(reasoning_block) + 4  # +4 for separator
         if snapshot:
@@ -17840,7 +18319,7 @@ class ClaudeTelegramBot:
                 if (has_new or thinking_changed or tool_log_changed) and now - last_edit >= STREAM_EDIT_INTERVAL:
                     display = self._build_stream_display(snapshot, runner, stream_msg, elapsed, reasoning_on)
                     if len(snapshot) >= len(_last_sent_text) or thinking_changed or tool_log_changed:
-                        self.edit_message(stream_msg, display, reply_markup=markup)
+                        self.edit_message(stream_msg, display, reply_markup=markup, rich=True)
                         if ctx:
                             ctx.last_edit_time = now
                             ctx.last_snapshot_len = len(snapshot)
@@ -17854,7 +18333,7 @@ class ClaudeTelegramBot:
                         display = self._build_stream_display(snapshot, runner, stream_msg, elapsed, reasoning_on)
                     else:
                         display = f"⏳ _Aguardando resposta do Claude... {elapsed}s_"
-                    self.edit_message(stream_msg, display, reply_markup=markup)
+                    self.edit_message(stream_msg, display, reply_markup=markup, rich=True)
 
     def _finalize_response(self, session: Session, runner: ClaudeRunner, prompt: Optional[str] = None,
                            routine_mode: bool = False, force_tts: bool = False,
@@ -17983,7 +18462,7 @@ class ClaudeTelegramBot:
                 self.delete_message(stream_msg)
                 if ctx:
                     ctx.stream_msg_id = None
-            self.send_message(final_text, disable_notification=True)
+            self.send_message(final_text, disable_notification=True, rich=True)
         elif suppress_text:
             # Inline #voice: send only audio, suppress text message
             if stream_msg:
@@ -17992,7 +18471,14 @@ class ClaudeTelegramBot:
                     ctx.stream_msg_id = None
         else:
             sent = False
-            if stream_msg and len(final_text) <= MAX_MESSAGE_LENGTH:
+            # --- Rich Messages (Bot API 10.1) ---
+            # One rich message holds up to 32768 chars, so try it before the
+            # 4096-char HTML edit. _edit_rich never falls back on its own — a
+            # failure leaves `sent` False and the HTML path below runs as before.
+            if stream_msg and self._rich_enabled():
+                sent = self._edit_rich(stream_msg, final_text)
+            # --- end Rich Messages ---
+            if not sent and stream_msg and len(final_text) <= MAX_MESSAGE_LENGTH:
                 sent = self.edit_message(stream_msg, final_text)
             if not sent:
                 if stream_msg:
@@ -18004,7 +18490,16 @@ class ClaudeTelegramBot:
                     caption = f"{first_line}\n\n📎 _Resposta completa no arquivo anexo_"
                     self._send_as_document(final_text, filename="response.md", caption=caption)
                 else:
-                    self.send_message(final_text, reply_markup=copy_markup)
+                    self.send_message(final_text, reply_markup=copy_markup, rich=True)
+
+        # --- Completion notice ("aviso de pronto") ---
+        # Interactive text replies only: routines have their own notify policy
+        # and #voice replies arrive as a (notifying) audio message. `sent` is
+        # True only when the answer landed by EDITING the placeholder — the one
+        # delivery Telegram doesn't notify.
+        if not routine_mode and not suppress_text:
+            self._maybe_notify_done(runner, delivered_by_edit=sent)
+        # --- end completion notice ---
 
         # Unregister the stream message from active tracking (it's finalized now)
         if stream_msg:
