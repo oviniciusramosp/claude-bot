@@ -59,6 +59,13 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     # ambient config and fail. Tests that need the flag ON use
     # `patch.object(bot, "PIPELINE_V2_ENABLED", True)` per-case.
     os.environ["PIPELINE_V2_ENABLED"] = "false"
+    # Rich Messages talk to Telegram through their own single-shot transport
+    # (_rich_request), which a test faking only `tg_request` would not
+    # intercept — so they stay OFF here, like the completion notice (it would
+    # add an extra sendMessage to any slow-looking fake turn). Tests for those
+    # features flip the module constants per case (tests/test_rich_messages.py).
+    os.environ["RICH_MESSAGES"] = "false"
+    os.environ["NOTIFY_DONE_AFTER_SECONDS"] = "0"
 
     spec = importlib.util.spec_from_file_location("bot_under_test", str(BOT_FILE))
     if spec is None or spec.loader is None:
