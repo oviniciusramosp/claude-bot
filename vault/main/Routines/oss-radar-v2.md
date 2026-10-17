@@ -10,7 +10,7 @@ schedule:
   days: ["*"]
   times: ["07:00"]
 model: opus
-enabled: true
+enabled: false
 notify: final
 context: minimal
 ---
