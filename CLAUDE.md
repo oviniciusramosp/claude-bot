@@ -101,6 +101,34 @@ only for methods where a duplicate is impossible. Reads and idempotent writes
 
 Tests: `tests/test_turn_integrity.py` (32 tests).
 
+**Failure reasons travel on a side channel.** `tg_request` still returns the
+body or `None`, but every real call records a `TgResult` (status, description,
+`retry_after`, `delivery_unknown`, `dropped`) readable via `tg_last_result()`
+on the same thread; `send_message` records a per-chunk `_SendOutcome`
+(`_last_send_outcome()`: `delivered|failed|unknown`). Built on that:
+the plain-text resend happens **only** on "can't parse entities"; "message is
+not modified" is a successful edit; a failed chunk stops the rest (no answer
+with a hole); a `delivery UNKNOWN` send is never repeated.
+
+**A final answer is never silently cut.** "Fits in one message" is measured
+*after* HTML conversion. `edit_message(..., preview=False)` refuses to
+truncate (returns `False`); only `preview=True` (stream/pipeline progress)
+truncates. `_deliver_final_text` edits in place (with the copy-code button) or
+sends the full text and retires the `⏳` placeholder (✅ or delete). The stream
+message is unregistered/uncached only once delivery is settled: a transient
+failure keeps both, posts a notice and retries once (`_handle_undelivered_final`);
+restart recovery uses the same path.
+
+**Rate limits.** `TelegramRateLimiter` paces send*/edit* per chat (private ≈1/s
+with bursts of 3, groups 20/min) and globally (30/s), plus a per-chat
+"do not send before" from a 429's full `retry_after`. Previews and chat actions
+are *dropped* (never slept on) while a chat is throttled and cannot use the
+last slots of a window; final deliveries wait up to `TG_MAX_RATE_WAIT` (90s).
+Streaming edits in groups use `STREAM_EDIT_INTERVAL_GROUP` (4.5s).
+`getUpdates` failures back off 5s→60s; a 409 calls `deleteWebhook` once and
+alerts the primary chat (hourly throttle), as does a 401. The update offset is
+written atomically. Tests: `tests/test_telegram_delivery.py`.
+
 ### v3.1 flat per-agent vault layout
 
 Default workspace: `vault/main/` — the bot operates as the Main agent by default. Every session has an explicit `agent` string (defaults to `"main"`) and cwd is always `vault/<agent>/`.
