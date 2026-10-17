@@ -134,6 +134,8 @@ Step 3 is what keeps the General channel clean. An agent can only claim a *named
 
 A manual `/agent <name>` still wins inside the General topic (`ctx._manual_override`), but that flag is in-memory only — after a restart General returns to the default agent. When auto-routing changes a session's agent, the Claude transcript (`session_id`) is reset: a transcript belongs to the cwd it was recorded under, so resuming it under another agent's workspace would point the CLI at the wrong project dir.
 
+Routines follow the same ownership (`_find_context_for_routine`): an agent with frontmatter `chat_id` reports to its topic; the **default agent** reports to the General topic of the primary chat that has topic-bound agents, then the owner's private chat, then the first `TELEGRAM_CHAT_ID`. Contexts with an empty/`"0"` chat_id are never used (nor stored — `_get_context("")` returns a transient context), and a secondary chat is only used for the agent bound to it in `chats.json` — never as a generic fallback.
+
 ## Configuration
 
 The project uses **two `.env` files with distinct purposes**:
@@ -198,7 +200,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/clear` | Reset current session |
 | `/important` | Record key points from the current session into today's Journal |
 | `/lesson <text>` | Record a manual lesson in `<agent>/Lessons/` |
-| `/active-memory [on\|off\|status]` | Toggle proactive vault context injection |
+| `/active_memory [on\|off\|status]` | Toggle proactive vault context injection (`/active-memory` still works) |
 | `/agent [name\|new\|list]` | Switch/create/list agents |
 | `/routine [list\|status]` | Create a routine interactively, or list/status |
 | `/skill [name]` | Run a vault skill directly |
@@ -207,6 +209,8 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `#voice` (in message) | One-shot voice response (audio only) |
 | `/onboard <chat_id> <agent>` | (Primary chat only) Bind a secondary chat to a locked agent. See "Multi-tenant secondary chats". |
 | `/onboard list` | (Primary chat only) List secondary chat bindings. |
+
+Telegram command names must match `^[a-z0-9_]{1,32}$`, so hyphenated commands have underscore aliases — `/restart_agent`, `/active_memory`, `/dry_run` — used in the menus and `HELP_TEXT` (the hyphen forms keep working when typed). Menus live in `TELEGRAM_PRIVATE_COMMANDS` / `TELEGRAM_GROUP_COMMANDS` / `TELEGRAM_SECONDARY_COMMANDS`; `tests/test_telegram_ux_fixes.py` checks every entry is valid and dispatches. `/cmd@otherbot` is ignored (the bot's own username comes from `getMe` at startup). A command sent as a *reply* is dispatched as a command (reply context is only prepended to plain text). Buttons whose `callback_data` would exceed Telegram's 64-byte limit go through `_cb_data()` → `cbref:<id>` (persisted in `~/.claude-bot/callback-refs.json`, 7-day TTL) and are resolved at the top of `_handle_callback`.
 
 ## Restart and Watchdog
 
@@ -255,7 +259,7 @@ The bot supports multiple Telegram chats on a single instance — useful for sha
 **Model:** secondary chats can host multiple agents — one per Telegram **forum topic** — with a **default** agent answering everywhere a topic isn't explicitly mapped (v3.50.0+). Two chat tiers:
 
 - **Primary chat(s)** — your own group(s). Full access: any agent, all commands, `--dangerously-skip-permissions`. Seeded by `TELEGRAM_CHAT_ID` env var; auto-discovery still adds groups where an authorized user is present.
-- **Secondary chat(s)** — your friends' groups. Each chat has a **default** agent and an optional map of `topic_id → agent`. Agent-switching commands (`/agent`, `/agent new`, `/clone`, `/switch <other-agent's-session>`) are blocked there. Subprocess runs with `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json`. Curation is admin-only — only the primary chat can create or rebind agents.
+- **Secondary chat(s)** — your friends' groups. Each chat has a **default** agent and an optional map of `topic_id → agent`. Commands run an explicit **allowlist** (`SECONDARY_ALLOWED_COMMANDS`, enforced in `_handle_text` before dispatch): `/start /help /status /new /sessions /switch /clear /stop /btw /compact /cost /voice /lesson /important /save /skill`. Everything else — admin/global commands such as `/restart`, `/model` and the model shortcuts, `/effort` and `/audio` (bot-wide state), `/workspace`, `/timeout`, `/routine`, `/run`, `/delegate`, `/agent`, `/onboard`, `/doctor`, `/find` — answers "não está disponível neste chat". `/switch` still refuses another agent's session, `/help` shows `SECONDARY_HELP_TEXT`, and each secondary chat gets a chat-scoped `setMyCommands` menu (`BotCommandScopeChat`, also registered on `/onboard`). `/delegate` additionally passes `restricted=True` when invoked from a secondary chat (defense in depth). Subprocess runs with `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json`. Curation is admin-only — only the primary chat can create or rebind agents.
 
 **`chats.json` schema (v3.50.0+):**
 ```json
