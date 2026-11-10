@@ -136,6 +136,7 @@ Model answers go out as **Rich Messages** — `sendRichMessage` / `editMessageTe
 - **Fallback:** any rich failure lands on the existing HTML path — env off, kill switch tripped, API error (one HTML retry), or text above the rich limits (HTML split / document). An *ambiguous* `sendRichMessage` transport failure is **not** re-sent (same "delivery UNKNOWN" contract as `tg_request`).
 - **Kill switch:** a 404 / "message text is empty" / "rich message must be non-empty" answer means the server doesn't understand rich messages → `_disable_rich_runtime()` turns it off for the process (WARNING, once). Three consecutive messages rejecting a rich edit disable rich *edits* only.
 - **Markdown prep** (`_rich_markdown_from_model`): rich Markdown treats `$…$` as LaTeX, `==…==` as highlight, `||…||` as spoiler and a lone `~` as strikethrough, so those are escaped in prose (never in code or URLs).
+- **System prompt:** with `RICH_MESSAGES` on, `SYSTEM_PROMPT` carries `_REPLY_FORMAT_RICH` (use headings, bold, small tables, task lists, blockquotes, `<details>` when they help); with it off, `_REPLY_FORMAT_PLAIN` keeps the old "never use tables" rule.
 - **Reasoning panel:** `_build_stream_display` opens the 🧠 block with `**>` → HTML `<blockquote expandable>`, rich `<details>` — collapsed by default on both paths.
 - `sendMessageDraft`/`sendRichMessageDraft` streaming is **not** used (private chats only).
 
