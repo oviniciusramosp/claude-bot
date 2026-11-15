@@ -311,6 +311,7 @@ Useful when doing manual maintenance to avoid spurious alerts and auto-restarts.
 - Telegram API calls use raw `urllib.request` (no `requests` library).
 - All Telegram message edits are rate-limited (`STREAM_EDIT_INTERVAL = 3.0s`).
 - Long messages are split respecting Markdown code blocks.
+- Absolute dates/times the bot shows (`/status`, `/sessions`, `/routine list|status`, routine "🕐 Início") use the Telegram `date_time` entity via `tg_time(unix, fmt)` → `<tg-time unix="…" format="…">texto local</tg-time>` (format `r|w?[dD]?[tT]?`), so they render in the reader's timezone. The HTML converter/sanitizer/rebalancer and the rich escaper keep the tag; invalid tags degrade to their text; tables, MarkdownV2 and TTS use `_tg_time_to_plain`. Agents may emit the tag too (optional, documented in `_REPLY_FORMAT_DATETIME`). Durations stay plain.
 - The bot validates `AUTHORIZED_CHAT_ID` on every incoming message — unauthorized messages are silently ignored.
 - Plist files use `__HOME__` and `__SCRIPT_DIR__` placeholders — the install script (`claude-bot.sh`) substitutes them via `sed`.
 
