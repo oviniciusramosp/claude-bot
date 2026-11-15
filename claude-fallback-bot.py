@@ -11574,9 +11574,22 @@ def _rich_normalize_native_buttons(text: str) -> str:
                 joined = " ".join(row)
                 joined = _RICH_NATIVE_ROW_OPEN_RE.sub(" ", joined)
                 joined = _RICH_NATIVE_ROW_CLOSE_RE.sub(" ", joined)
-                joined = _RICH_NATIVE_BUTTON_RE.sub(
-                    lambda mm: " " + _rich_native_button_to_token(mm) + " ", joined)
-                out.append(re.sub(r"[ \t]+", " ", joined).strip())
+                # Link buttons stay one row; a dropped (non-link) button's
+                # label goes on its own line so it can't break the row.
+                tokens: List[str] = []
+                dropped: List[str] = []
+                for mm in _RICH_NATIVE_BUTTON_RE.finditer(joined):
+                    tok = _rich_native_button_to_token(mm)
+                    if not tok:
+                        continue
+                    (tokens if tok.startswith("[button") else dropped).append(tok)
+                rest = re.sub(r"\s+", " ", _RICH_NATIVE_BUTTON_RE.sub(" ", joined)).strip()
+                if rest:
+                    dropped.insert(0, rest)
+                if dropped:
+                    out.append(" · ".join(dropped))
+                if tokens:
+                    out.append(" ".join(tokens))
                 row = None
             continue
         out.append(_RICH_NATIVE_BUTTON_RE.sub(_rich_native_button_to_token, line))
