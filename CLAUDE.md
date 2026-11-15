@@ -69,7 +69,7 @@ runner.run(
 )
 ```
 
-The `ClaudeRunner` builds the command with `--print --output-format stream-json --input-format stream-json`. The **prompt is written to the subprocess's stdin** (one stream-json `user` message, then EOF) rather than passed as an argv positional: argv is readable by any local process via `ps` and is capped by ARG_MAX (1MB on macOS). A writer thread feeds stdin while `_read_stream` drains stdout, so a prompt larger than the 64KB pipe buffer cannot deadlock. By default the permission flag is `--dangerously-skip-permissions`. When `restricted=True` (multi-tenant secondary chat) it switches to `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json` so the agent runs against an allowlist scoped to its own vault directory. The `--append-system-prompt` instructs Claude to read the vault (Journal, Tooling, etc.) — it can be omitted via `system_prompt=None` when the routine uses `context: minimal`.
+The `ClaudeRunner` builds the command with `--print --output-format stream-json --input-format stream-json`. The **prompt is written to the subprocess's stdin** (one stream-json `user` message; stdin closes when the turn returns its result — see "A message sent mid-turn" below) rather than passed as an argv positional: argv is readable by any local process via `ps` and is capped by ARG_MAX (1MB on macOS). A writer thread feeds stdin while `_read_stream` drains stdout, so a prompt larger than the 64KB pipe buffer cannot deadlock. By default the permission flag is `--dangerously-skip-permissions`. When `restricted=True` (multi-tenant secondary chat) it switches to `--permission-mode dontAsk --settings ~/.claude-bot/agents/<agent>/settings.json` so the agent runs against an allowlist scoped to its own vault directory. The `--append-system-prompt` instructs Claude to read the vault (Journal, Tooling, etc.) — it can be omitted via `system_prompt=None` when the routine uses `context: minimal`.
 
 ### Turn integrity (v3.81.0+)
 
@@ -85,6 +85,20 @@ calls `_claude_transcript_exists()` first and runs fresh instead, setting
 gone (a silent context loss just looks like the agent forgetting).
 
 **The prompt never touches argv** — see the invocation note above.
+
+**A message sent mid-turn can join the running answer (v3.86.0+).** stdin is
+*not* closed after the prompt: it stays open until the turn's first `result`
+event (or cancel/cleanup), so `send_btw()` writes a mid-turn message as one more
+stream-json `user` message. Verified on CLI 2.1.292: written during tool calls,
+the CLI folds it into the same answer; written right at the end, it runs as one
+more turn with its own `result` (both results are kept, joined). After the
+`result` closes stdin, `send_btw()` returns False and the bot queues. What the
+bot does with such a message is `BUSY_MESSAGE_MODE`: `ask` (default) replies
+with [⚡ Mandar agora] [⏳ Depois] [🛑 Parar e mandar] — no tap within
+`BUSY_CHOICE_SECONDS` picks "now" (or "later" when the turn can't take input,
+e.g. Codex); a card still open when the turn ends is queued and runs right away;
+"stop" cancels the turn and puts the message first in the queue. `/btw` always
+sends immediately. Tests: `tests/test_mid_turn_messages.py`.
 
 **A Telegram send is never blindly retried.** The Bot API has no idempotency
 key, so a retry after an *ambiguous* failure can deliver the same message twice.
@@ -203,6 +217,8 @@ Read by `claude-fallback-bot.py` at startup and by ClaudeBotManager. Contains cr
 | `OPUS_MODEL` / `SONNET_MODEL` / `HAIKU_MODEL` | No | — | Pin a concrete model id for that alias when the CLI's bare alias lags a release (this was needed for `OPUS_MODEL=claude-opus-4-8` while `--model opus` still resolved to 4.7 — `opus` now resolves directly to `claude-opus-5`). Unset → built-in default pins apply (`sonnet`/`haiku` → 5.5 ids, see `MODEL_ALIAS_DEFAULT_PIN`); `opus` uses the auto-tracking alias. Falls back to the alias if the pinned id is unavailable |
 | `RICH_MESSAGES` | No | `true` | Deliver model answers (final edit, streaming preview, routine output) as Telegram Rich Messages (Bot API 10.1). `false`/`0`/`off` keeps the HTML path. See "Rich Messages" below |
 | `NOTIFY_DONE_AFTER_SECONDS` | No | `20` | When a turn ran at least this long and its answer was delivered by editing the placeholder (edits never notify), send a short notifying "✅ Pronto · <duração>" reply to the user's message. `0` disables. Not sent for routines, `#voice` replies, cancelled turns, or answers already sent as new messages |
+| `BUSY_MESSAGE_MODE` | No | `ask` | What to do with a message sent while a turn runs: `ask` (buttons: send now / later / stop and send), `now` (always join the running answer), `queue` (always wait — pre-v3.86 behavior) |
+| `BUSY_CHOICE_SECONDS` | No | `10` | How long the `ask` buttons wait before applying the default ("now", or "later" when the turn can't take input) |
 
 Edited via: ClaudeBotManager → Settings, or directly.
 
@@ -237,7 +253,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/lint` | Audit the vault |
 | `/find <expr>` | Query the vault by frontmatter |
 | `/indexes` | Regenerate vault index marker blocks |
-| `/btw <msg>` | Inject message to running Claude process |
+| `/btw <msg>` | Send a message into the running answer right away (no buttons) |
 | `/delegate <prompt>` | Spawn an isolated subagent (fresh context, 10min hard limit) |
 | `/stop` | Cancel running task |
 | `/timeout <sec>` | Change timeout |

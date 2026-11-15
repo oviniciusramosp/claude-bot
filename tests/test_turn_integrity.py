@@ -184,17 +184,22 @@ class PromptViaStdin(_RunnerCase):
         payload = json.loads(writes.strip())
         self.assertEqual(payload["message"]["content"][0]["text"], prompt)
 
-    def test_feed_stdin_closes_the_pipe(self):
-        pipe = MagicMock()
-        self.bot.ClaudeRunner._feed_stdin(pipe, '{"type":"user"}\n')
-        pipe.write.assert_called_once_with('{"type":"user"}\n')
-        pipe.close.assert_called_once()
+    def test_stdin_is_closed_when_the_run_ends(self):
+        """stdin stays open during the turn (v3.86) but never outlives it."""
+        runner = self.bot.ClaudeRunner()
+        proc = _mock_proc()
+        with patch.object(self.bot.subprocess, "Popen", return_value=proc), \
+                patch.object(self.bot.threading, "Thread", _InlineThread):
+            runner.run(prompt="oi", model="sonnet", system_prompt=None)
+        proc.stdin.close.assert_called_once()
+        self.assertFalse(runner.can_inject())
 
-    def test_feed_stdin_logs_broken_pipe_instead_of_raising(self):
+    def test_prime_stdin_logs_broken_pipe_instead_of_raising(self):
+        runner = self.bot.ClaudeRunner()
         pipe = MagicMock()
         pipe.write.side_effect = BrokenPipeError("CLI died")
         with self.assertLogs(self.bot.logger, level="ERROR") as cm:
-            self.bot.ClaudeRunner._feed_stdin(pipe, "payload\n")
+            runner._prime_stdin(pipe, "payload\n")
         self.assertTrue(any("stdin write failed" in m for m in cm.output))
 
 

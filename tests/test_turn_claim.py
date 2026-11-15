@@ -111,6 +111,9 @@ class TestTurnClaim(unittest.TestCase):
         ctx.turn_owner = -1  # some other thread owns the turn
         h = _Harness(self.bot, ctx)
         h.bot._ctx = ctx
+        saved = self.bot.BUSY_MESSAGE_MODE
+        self.bot.BUSY_MESSAGE_MODE = "now"  # "ask" shows a card instead
+        self.addCleanup(setattr, self.bot, "BUSY_MESSAGE_MODE", saved)
         h.bot._run_claude_prompt("extra context")
 
         runner.send_btw.assert_called_once_with("extra context")

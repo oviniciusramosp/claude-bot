@@ -365,6 +365,9 @@ class TurnMessageBinding(_Base):
         ctx.turn_owner = -1  # another thread owns the turn
         ctx.runner = MagicMock(running=True)
         ctx.runner.send_btw.return_value = False
+        saved = self.m.BUSY_MESSAGE_MODE
+        self.m.BUSY_MESSAGE_MODE = "queue"  # "ask" shows a card instead
+        self.addCleanup(setattr, self.m, "BUSY_MESSAGE_MODE", saved)
         with patch.object(self.bot, "set_reaction") as sr, \
                 patch.object(self.bot, "_spawn_background_review") as review:
             self.bot._handle_text("outra coisa", user_msg_id=42)
