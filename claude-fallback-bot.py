@@ -1669,6 +1669,11 @@ _REPLY_FORMAT_RICH = (
     "actions or decisions, `>` blockquotes for warnings or callouts, and "
     "`<details><summary>…</summary>…</details>` to collapse long extras (logs, full lists). "
     "Use plain bullets for simple lists, and don't dress up short answers — a one-line reply stays one line. "
+    "You can end an answer with tappable buttons, one row per line made only of button tokens: "
+    "`[button: Label](https://url)` opens a link; `[button: Label](reply)` sends the label back as the "
+    "user's next message, `[button: Label](reply: text to send)` sends that text instead. Add a color "
+    "only when the meaning is clear: `[button success: …]`, `[button danger: …]`, `[button primary: …]`. "
+    "Use them for quick yes/no or few-option choices and key links; never for /commands. "
 )
 _REPLY_FORMAT_PLAIN = "NEVER use tables — always use bullet lists or numbered lists instead. "
 
@@ -6877,6 +6882,68 @@ def _cb_data(data: str) -> str:
     return CALLBACK_REF_PREFIX + ref
 
 
+# ---------------------------------------------------------------------------
+# Colored inline buttons (Bot API 9.4: InlineKeyboardButton.style)
+# "success" = green, "danger" = red, "primary" = blue. Used only where the
+# meaning is clear (go ahead / stop, delete, cancel). If Telegram ever rejects
+# the field (400 mentioning "style" — older or self-hosted Bot API server),
+# _tg_call strips it, re-sends once, and turns styles off for the process
+# (WARNING, once), so a color can never cost a message.
+# ---------------------------------------------------------------------------
+
+BUTTON_STYLES = ("primary", "success", "danger")
+_BUTTON_STYLE_OFF = False
+
+
+def _btn(text: str, callback_data: Optional[str] = None, *,
+         url: Optional[str] = None, style: Optional[str] = None) -> Dict[str, Any]:
+    """One InlineKeyboardButton; ``style`` is dropped unless it's a known value."""
+    button: Dict[str, Any] = {"text": text}
+    if url is not None:
+        button["url"] = url
+    else:
+        button["callback_data"] = callback_data
+    if style in BUTTON_STYLES:
+        button["style"] = style
+    return button
+
+
+def _markup_has_styles(markup: Any) -> bool:
+    if not isinstance(markup, dict):
+        return False
+    rows = markup.get("inline_keyboard")
+    return isinstance(rows, list) and any(
+        isinstance(b, dict) and "style" in b
+        for row in rows if isinstance(row, list) for b in row)
+
+
+def _strip_button_styles(markup: Any) -> Any:
+    """Copy of ``markup`` without any button ``style`` (input untouched)."""
+    if not _markup_has_styles(markup):
+        return markup
+    out = dict(markup)
+    out["inline_keyboard"] = [
+        [({k: v for k, v in b.items() if k != "style"} if isinstance(b, dict) else b)
+         for b in row] if isinstance(row, list) else row
+        for row in markup["inline_keyboard"]]
+    return out
+
+
+def _button_style_rejected(description: str) -> bool:
+    """True when a 400 description blames the button ``style`` field."""
+    return "style" in (description or "").lower()
+
+
+def _disable_button_styles(reason: str) -> None:
+    global _BUTTON_STYLE_OFF
+    if _BUTTON_STYLE_OFF:
+        return
+    _BUTTON_STYLE_OFF = True
+    logging.getLogger("claude-bot").warning(
+        "Colored buttons disabled until restart — Telegram rejected the style field: %s",
+        reason)
+
+
 def _resolve_cb_data(data: str) -> Optional[str]:
     """Inverse of ``_cb_data``. Plain data passes through; an unknown or
     expired ``cbref:`` returns None (caller tells the user the button expired)."""
@@ -10547,8 +10614,8 @@ class PipelineExecutor:
         (delete) or failure/cancellation (edit without reply_markup).
         """
         return {"inline_keyboard": [[
-            {"text": "🛑 Cancelar pipeline",
-             "callback_data": _cb_data(f"cancel_run:{self.task.name}")},
+            _btn("🛑 Cancelar pipeline", _cb_data(f"cancel_run:{self.task.name}"),
+                 style="danger"),
         ]]}
 
     def _send_progress_message(self) -> None:
@@ -10775,9 +10842,9 @@ class PipelineExecutor:
             lines.append("Escolha uma ação:")
 
             markup = {"inline_keyboard": [[
-                {"text": "✅ Aprovar", "callback_data": f"manual_approve:{review_id}"},
+                _btn("✅ Aprovar", f"manual_approve:{review_id}", style="success"),
                 {"text": "✏️ Editar", "callback_data": f"manual_edit:{review_id}"},
-                {"text": "❌ Cancelar", "callback_data": f"manual_cancel:{review_id}"},
+                _btn("❌ Cancelar", f"manual_cancel:{review_id}", style="danger"),
             ]]}
 
             try:
@@ -11393,6 +11460,184 @@ def _rich_escape_prose(line: str) -> str:
     return "".join(out)
 
 
+# --- Buttons inside the answer (Bot API 10.3: RichBlockButtons) ---
+# The model writes one simple token per button (system prompt:
+# _REPLY_FORMAT_RICH):
+#     [button: Abrir o painel](https://example.com)        → opens the link
+#     [button success: Sim, pode publicar](reply)          → sends the label back
+#     [button: Ver detalhes](reply: me mostra os detalhes) → sends that text back
+# A line made only of tokens becomes one row of buttons. On the rich path the
+# row turns into Telegram's own <tg-button-row>/<tg-button> tags; on the HTML
+# path (and inside a normal sentence) link buttons become plain links and reply
+# buttons plain text, so the user never sees raw syntax. A reply button's
+# callback is "rbtn:<text>" (through _cb_data for the 64-byte limit) and is
+# handled like a message the user typed. Native <tg-button> tags the model
+# writes by itself are normalized to tokens first: only link buttons survive —
+# the model never gets to pick raw callback_data (it could mimic a bot action).
+RICH_REPLY_BUTTON_PREFIX = "rbtn:"
+RICH_BUTTON_LABEL_MAX = 64
+RICH_REPLY_TEXT_MAX = 500
+_RICH_BUTTONS_OFF = False   # tripped when Telegram rejects the button tags
+
+_RICH_BUTTON_TOKEN_RE = re.compile(
+    r"\[button(?:[ \t]+(primary|success|danger))?[ \t]*:[ \t]*([^\]\n]+?)[ \t]*\]"
+    r"\([ \t]*((?:https?|tg)://[^\s)]+|reply(?:[ \t]*:[^)\n]*)?)[ \t]*\)",
+    re.IGNORECASE)
+_RICH_NATIVE_BUTTON_RE = re.compile(r"<tg-button\b([^>]*)>(.*?)</tg-button\s*>",
+                                    re.IGNORECASE | re.DOTALL)
+_RICH_NATIVE_ROW_OPEN_RE = re.compile(r"<tg-button-row\b[^>]*>", re.IGNORECASE)
+_RICH_NATIVE_ROW_CLOSE_RE = re.compile(r"</tg-button-row\s*>", re.IGNORECASE)
+_RICH_ATTR_RE = re.compile(r'([\w-]+)\s*=\s*"([^"]*)"')
+
+
+def _disable_rich_buttons(reason: str) -> None:
+    """Stop emitting native button tags (links/plain text instead), once, WARNING."""
+    global _RICH_BUTTONS_OFF
+    if _RICH_BUTTONS_OFF:
+        return
+    _RICH_BUTTONS_OFF = True
+    logging.getLogger("claude-bot").warning(
+        "Rich message buttons disabled until restart — showing them as links: %s", reason)
+
+
+def _rich_button_from_match(m: "re.Match") -> Optional[Dict[str, str]]:
+    """Token → {"label", "style", "url"} or {"label", "style", "reply"}.
+
+    None when the token is unusable as a button (empty label, or a reply that
+    would send a /command — a button must never run a bot command)."""
+    label = re.sub(r"\s+", " ", m.group(2)).strip()[:RICH_BUTTON_LABEL_MAX]
+    if not label:
+        return None
+    style = (m.group(1) or "").lower()
+    target = m.group(3).strip()
+    if not target.lower().startswith("reply"):
+        return {"label": label, "style": style, "url": target}
+    _, _, custom = target.partition(":")
+    reply = re.sub(r"\s+", " ", custom).strip() or label
+    if reply.startswith("/"):
+        return None
+    return {"label": label, "style": style, "reply": reply[:RICH_REPLY_TEXT_MAX]}
+
+
+def _rich_button_plain(m: "re.Match") -> str:
+    """Token → what the HTML path / a sentence shows: a link or the label."""
+    btn = _rich_button_from_match(m)
+    if btn is None:
+        return re.sub(r"\s+", " ", m.group(2)).strip()
+    if "url" in btn:
+        return f"[{btn['label']}]({btn['url']})"
+    return btn["label"]
+
+
+def _rich_is_button_row(line: str) -> bool:
+    return bool(_RICH_BUTTON_TOKEN_RE.search(line)) and not \
+        _RICH_BUTTON_TOKEN_RE.sub("", line).strip()
+
+
+def _rich_native_button_to_token(m: "re.Match") -> str:
+    attrs = {k.lower(): html.unescape(v) for k, v in _RICH_ATTR_RE.findall(m.group(1))}
+    label = re.sub(r"<[^>]+>", "", m.group(2))
+    label = re.sub(r"\s+", " ", html.unescape(label)).strip().replace("]", ")")
+    url = attrs.get("url", "")
+    if attrs.get("type", "url").lower() == "url" and re.match(r"(?:https?|tg)://\S+$", url):
+        style = attrs.get("style", "").lower()
+        style = f" {style}" if style in BUTTON_STYLES else ""
+        return f"[button{style}: {label or url}]({url})"
+    return label
+
+
+def _rich_normalize_native_buttons(text: str) -> str:
+    """Rewrite native <tg-button-row>/<tg-button> tags (outside code fences)
+    into the token syntax, joining a multi-line row into one line."""
+    if "<tg-button" not in text.lower():
+        return text
+    out: List[str] = []
+    row: Optional[List[str]] = None
+    fence: Optional[str] = None
+    for line in text.split("\n"):
+        m = _RICH_FENCE_RE.match(line)
+        if m and row is None:
+            if fence is None:
+                fence = m.group(1)[0] * 3
+            elif line.strip().startswith(fence):
+                fence = None
+            out.append(line)
+            continue
+        if fence is not None:
+            out.append(line)
+            continue
+        if row is None and _RICH_NATIVE_ROW_OPEN_RE.search(line):
+            row = []
+        if row is not None:
+            row.append(line)
+            if _RICH_NATIVE_ROW_CLOSE_RE.search(line):
+                joined = " ".join(row)
+                joined = _RICH_NATIVE_ROW_OPEN_RE.sub(" ", joined)
+                joined = _RICH_NATIVE_ROW_CLOSE_RE.sub(" ", joined)
+                joined = _RICH_NATIVE_BUTTON_RE.sub(
+                    lambda mm: " " + _rich_native_button_to_token(mm) + " ", joined)
+                out.append(re.sub(r"[ \t]+", " ", joined).strip())
+                row = None
+            continue
+        out.append(_RICH_NATIVE_BUTTON_RE.sub(_rich_native_button_to_token, line))
+    if row is not None:   # unclosed row (truncated stream snapshot): flush as-is
+        out.extend(_RICH_NATIVE_ROW_OPEN_RE.sub("", ln) for ln in row)
+    return "\n".join(out)
+
+
+def _rich_buttons_to_plain(text: str) -> str:
+    """HTML-path rendering of button tokens: links / plain labels, fence-aware.
+    A row's buttons are joined with " · "."""
+    text = _rich_normalize_native_buttons(text)
+    if "[button" not in text.lower():
+        return text
+    out: List[str] = []
+    fence: Optional[str] = None
+    for line in text.split("\n"):
+        m = _RICH_FENCE_RE.match(line)
+        if m:
+            if fence is None:
+                fence = m.group(1)[0] * 3
+            elif line.strip().startswith(fence):
+                fence = None
+            out.append(line)
+            continue
+        if fence is not None:
+            out.append(line)
+            continue
+        if _rich_is_button_row(line):
+            out.append(" · ".join(_rich_button_plain(mm)
+                                  for mm in _RICH_BUTTON_TOKEN_RE.finditer(line)))
+        else:
+            segs = re.split(r"(`[^`\n]+`)", line)
+            out.append("".join(
+                sg if k % 2 == 1 else _RICH_BUTTON_TOKEN_RE.sub(_rich_button_plain, sg)
+                for k, sg in enumerate(segs)))
+    return "\n".join(out)
+
+
+def _rich_button_row_block(line: str) -> List[str]:
+    """A token row → <tg-button-row> block lines (blank line before and after,
+    as the HTML block must stand alone). Empty list when no token is usable."""
+    buttons: List[str] = []
+    for m in _RICH_BUTTON_TOKEN_RE.finditer(line):
+        btn = _rich_button_from_match(m)
+        if btn is None:
+            continue
+        style = f' style="{btn["style"]}"' if btn["style"] in BUTTON_STYLES else ""
+        label = html.escape(btn["label"], quote=False)
+        if "url" in btn:
+            buttons.append(f'<tg-button type="url" url="{html.escape(btn["url"])}"'
+                           f'{style}>{label}</tg-button>')
+        else:
+            data = _cb_data(RICH_REPLY_BUTTON_PREFIX + btn["reply"])
+            buttons.append(f'<tg-button type="callback_data" data="{html.escape(data)}"'
+                           f'{style}>{label}</tg-button>')
+    if not buttons:
+        return []
+    return ["", "<tg-button-row>", *buttons, "</tg-button-row>", ""]
+
+
 def _rich_markdown_from_model(text: str) -> str:
     """Turn the bot's model-facing Markdown into InputRichMessage.markdown.
 
@@ -11404,8 +11649,11 @@ def _rich_markdown_from_model(text: str) -> str:
        the rich equivalent of ``<blockquote expandable>`` (collapsed by
        default, and Markdown is parsed inside it).
     2. Prose outside fences and inline code spans is escaped with
-       ``_rich_escape_prose``.
+       ``_rich_escape_prose``. A line made only of ``[button: …](…)`` tokens
+       becomes a native ``<tg-button-row>`` (see "Buttons inside the answer");
+       a token inside a sentence becomes a plain link / label.
     """
+    text = _rich_normalize_native_buttons(text)
     lines = text.split("\n")
     grouped: List[str] = []
     fence: Optional[str] = None
@@ -11452,9 +11700,21 @@ def _rich_markdown_from_model(text: str) -> str:
         if fence is not None:
             out.append(line)
             continue
+        if "[button" in line.lower():
+            if _rich_is_button_row(line):
+                if _RICH_BUTTONS_OFF:
+                    line = " · ".join(_rich_button_plain(mm)
+                                      for mm in _RICH_BUTTON_TOKEN_RE.finditer(line))
+                else:
+                    block = _rich_button_row_block(line)
+                    if block:
+                        out.extend(block)
+                        continue
         segs = re.split(r"(`[^`\n]+`)", line)
         out.append("".join(
-            s if (k % 2 == 1) else _rich_escape_prose(s) for k, s in enumerate(segs)))
+            s if (k % 2 == 1)
+            else _rich_escape_prose(_RICH_BUTTON_TOKEN_RE.sub(_rich_button_plain, s))
+            for k, s in enumerate(segs)))
     return "\n".join(out)
 
 
@@ -13050,6 +13310,30 @@ class ClaudeTelegramBot:
                  attempts: int = 3, droppable: Optional[bool] = None,
                  raw_body: Optional[bytes] = None, content_type: Optional[str] = None,
                  log_name: str = "tg_request") -> TgResult:
+        """Bot API call with the colored-button safety net (see ``_btn``).
+
+        Styles are stripped up front once the server has rejected them; a 400
+        that blames ``style`` strips them and re-sends ONCE (a 400 proves the
+        first request was not delivered, so this can't duplicate a message).
+        """
+        kwargs = dict(timeout=timeout, attempts=attempts, droppable=droppable,
+                      raw_body=raw_body, content_type=content_type, log_name=log_name)
+        styled = (raw_body is None and isinstance(data, dict)
+                  and _markup_has_styles(data.get("reply_markup")))
+        if styled and _BUTTON_STYLE_OFF:
+            data = dict(data, reply_markup=_strip_button_styles(data["reply_markup"]))
+            styled = False
+        res = self._tg_call_raw(method, data, **kwargs)
+        if styled and not res.ok and res.status == 400 and _button_style_rejected(res.description):
+            _disable_button_styles(f"{method}: {res.description}")
+            data = dict(data, reply_markup=_strip_button_styles(data["reply_markup"]))
+            res = self._tg_call_raw(method, data, **kwargs)
+        return res
+
+    def _tg_call_raw(self, method: str, data: Optional[Dict] = None, timeout: float = 15,
+                     attempts: int = 3, droppable: Optional[bool] = None,
+                     raw_body: Optional[bytes] = None, content_type: Optional[str] = None,
+                     log_name: str = "tg_request") -> TgResult:
         data = data or {}
         if droppable is None:
             droppable = method in _TG_IDEMPOTENT_SENDS or self._tg_preview_mode()
@@ -13590,6 +13874,30 @@ class ClaudeTelegramBot:
 
     def _rich_request(self, method: str, data: Dict[str, Any],
                       timeout: int = 30) -> Dict[str, Any]:
+        """``_rich_request_once`` plus the button safety nets: a 400 blaming
+        the answer's <tg-button> tags re-sends ONCE with them as plain links
+        (and turns answer buttons off); one blaming a reply_markup ``style``
+        re-sends ONCE without colors. A 400 proves nothing was delivered."""
+        if _BUTTON_STYLE_OFF and _markup_has_styles(data.get("reply_markup")):
+            data = dict(data, reply_markup=_strip_button_styles(data["reply_markup"]))
+        resp = self._rich_request_once(method, data, timeout=timeout)
+        if resp.get("ok") or resp.get("error_code") != 400:
+            return resp
+        desc = str(resp.get("description") or "")
+        rm = data.get("rich_message") or {}
+        markdown = str(rm.get("markdown") or "")
+        if "<tg-button" in markdown and ("button" in desc.lower() or "style" in desc.lower()):
+            _disable_rich_buttons(f"{method}: {desc}")
+            data = dict(data, rich_message=dict(rm, markdown=_rich_buttons_to_plain(markdown)))
+            return self._rich_request_once(method, data, timeout=timeout)
+        if _markup_has_styles(data.get("reply_markup")) and _button_style_rejected(desc):
+            _disable_button_styles(f"{method}: {desc}")
+            data = dict(data, reply_markup=_strip_button_styles(data["reply_markup"]))
+            return self._rich_request_once(method, data, timeout=timeout)
+        return resp
+
+    def _rich_request_once(self, method: str, data: Dict[str, Any],
+                           timeout: int = 30) -> Dict[str, Any]:
         """ONE Bot API call that always returns Telegram's JSON body.
 
         Unlike tg_request this keeps the error ``description`` (the kill switch
@@ -13864,6 +14172,9 @@ class ClaudeTelegramBot:
         Telegram HTML supports: <b>, <i>, <u>, <s>, <code>, <pre>,
         <pre><code class="language-X">, <a href="URL">, <blockquote>.
         """
+        # Answer buttons ([button: …](…), Bot API 10.3) only exist on the rich
+        # path — here they become plain links / labels, never raw syntax.
+        text = _rich_buttons_to_plain(text)
         # Tables first — _convert_md_tables wraps them in ``` blocks
         text = ClaudeTelegramBot._convert_md_tables(text)
         # Fix unbalanced fenced code blocks
@@ -15939,7 +16250,7 @@ class ClaudeTelegramBot:
             buttons = []
             for name, rtype, _ in running:
                 icon = "🔗" if rtype == "pipeline" else "🔁"
-                buttons.append([{"text": f"🛑 {icon} {name}", "callback_data": _cb_data(f"stop:{name}")}])
+                buttons.append([_btn(f"🛑 {icon} {name}", _cb_data(f"stop:{name}"), style="danger")])
             self.send_message("🛑 *Qual processo parar?*", reply_markup={"inline_keyboard": buttons})
 
     def cmd_timeout(self, val: str) -> None:
@@ -16564,7 +16875,7 @@ class ClaudeTelegramBot:
             extras.append(f"+ diretório de steps `{name}/`")
         extras_text = ("\n" + "\n".join(extras)) if extras else ""
         markup = {"inline_keyboard": [[
-            {"text": "🗑 Confirmar", "callback_data": _cb_data(f"routine_del:{owner}:{name}")},
+            _btn("🗑 Confirmar", _cb_data(f"routine_del:{owner}:{name}"), style="danger"),
             {"text": "Cancelar", "callback_data": "routine_del:cancel"},
         ]]}
         self.send_message(
@@ -16948,7 +17259,7 @@ class ClaudeTelegramBot:
                   f"<i>Envie sua próxima mensagem com o feedback desejado, "
                   f"ou cancele a edição abaixo.</i>")
         new_markup = {"inline_keyboard": [[
-            {"text": "❌ Cancelar Edição", "callback_data": f"act:{cancel_edit_id}"},
+            _btn("❌ Cancelar Edição", f"act:{cancel_edit_id}", style="danger"),
         ]]}
         try:
             self.tg_request("editMessageText", {
@@ -18968,9 +19279,9 @@ class ClaudeTelegramBot:
         cid = os.urandom(5).hex()
         row = []
         if injectable:
-            row.append({"text": "⚡ Mandar agora", "callback_data": f"busy:{cid}:now"})
+            row.append(_btn("⚡ Mandar agora", f"busy:{cid}:now", style="success"))
         row.append({"text": "⏳ Depois", "callback_data": f"busy:{cid}:later"})
-        row.append({"text": "🛑 Parar e mandar", "callback_data": f"busy:{cid}:stop"})
+        row.append(_btn("🛑 Parar e mandar", f"busy:{cid}:stop", style="danger"))
         when = "mando agora" if default == "now" else "mando depois"
         text = (f"💬 Chegou no meio de uma resposta. O que faço com esta mensagem?\n"
                 f"Sem escolha em {BUSY_CHOICE_SECONDS}s, {when}.")
@@ -19386,7 +19697,7 @@ class ClaudeTelegramBot:
             if ctx:
                 reasoning_markup = {"inline_keyboard": [[
                     {"text": "🧠 Reasoning", "callback_data": "reasoning:toggle"},
-                    {"text": "🛑 Stop", "callback_data": "reasoning:stop"},
+                    _btn("🛑 Stop", "reasoning:stop", style="danger"),
                 ]]}
                 ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
                                                        reply_to_message_id=ctx.user_msg_id,
@@ -19659,7 +19970,7 @@ class ClaudeTelegramBot:
         label = "🧠 Reasoning ✓" if is_on else "🧠 Reasoning"
         return {"inline_keyboard": [[
             {"text": label, "callback_data": "reasoning:toggle"},
-            {"text": "🛑 Stop", "callback_data": "reasoning:stop"},
+            _btn("🛑 Stop", "reasoning:stop", style="danger"),
         ]]}
 
     def _build_stream_display(self, snapshot: str, runner: "ClaudeRunner",
@@ -20489,8 +20800,8 @@ class ClaudeTelegramBot:
             }
             markup = {
                 "inline_keyboard": [[
-                    {"text": "✅ Aprovar", "callback_data": f"approve:{approval_id}"},
-                    {"text": "❌ Cancelar", "callback_data": f"reject:{approval_id}"},
+                    _btn("✅ Aprovar", f"approve:{approval_id}", style="success"),
+                    _btn("❌ Cancelar", f"reject:{approval_id}", style="danger"),
                 ]]
             }
             self.send_message(
@@ -20540,6 +20851,23 @@ class ClaudeTelegramBot:
         if msg_id and text:
             self.edit_message(msg_id, text)
 
+    def _handle_reply_button(self, callback: Dict, text: str) -> None:
+        """A reply button from an answer: echo it quietly, then handle it as
+        the user's next message (busy-turn choice, queue, etc. all apply)."""
+        cb_id = callback.get("id", "")
+        text = text.strip()
+        if not text or text.startswith("/"):
+            logger.warning("Reply button ignored (empty or command): %r", text[:80])
+            self.answer_callback(cb_id, "Esse botão não pode ser usado.")
+            return
+        self.answer_callback(cb_id, "💬 Enviado")
+        msg_id = (callback.get("message") or {}).get("message_id")
+        echo_id = self.send_message(f"💬 {text}", reply_to_message_id=msg_id,
+                                    disable_notification=True)
+        if not echo_id:
+            logger.warning("Reply button: echo not delivered — handling %r anyway", text[:80])
+        self._handle_text(text, user_msg_id=echo_id)
+
     def _handle_callback(self, callback: Dict) -> None:
         cb_id = callback.get("id", "")
         data = callback.get("data", "")
@@ -20562,6 +20890,12 @@ class ClaudeTelegramBot:
         # Cancel a currently-running pipeline (button on the live progress message)
         if data.startswith("cancel_run:"):
             self._handle_cancel_running_pipeline_callback(callback, data[len("cancel_run:"):])
+            return
+
+        # Reply button inside a model answer (Bot API 10.3 rich buttons):
+        # the tapped text runs exactly like a message the user typed.
+        if data.startswith(RICH_REPLY_BUTTON_PREFIX):
+            self._handle_reply_button(callback, data[len(RICH_REPLY_BUTTON_PREFIX):])
             return
 
         # What to do with a message sent mid-turn (v3.86)
