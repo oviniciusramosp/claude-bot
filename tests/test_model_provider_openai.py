@@ -20,7 +20,6 @@ class ModelProviderOpenAI(unittest.TestCase):
 
     def test_other_providers_unaffected(self):
         self.assertEqual(self.bot.model_provider("sonnet"), "anthropic")
-        self.assertEqual(self.bot.model_provider("glm-5.1"), "zai")
         self.assertEqual(self.bot.model_provider("opus"), "anthropic")
 
 
@@ -32,12 +31,10 @@ class FallbackChainCrossProvider(unittest.TestCase):
     def setUp(self):
         # Snapshot original chain so each test starts clean
         self._orig_chain = list(self.bot.MODEL_FALLBACK_CHAIN)
-        self._orig_zai = self.bot.ZAI_API_KEY
         self._orig_codex = self.bot.CODEX_ENABLED
 
     def tearDown(self):
         self.bot.MODEL_FALLBACK_CHAIN[:] = self._orig_chain
-        self.bot.ZAI_API_KEY = self._orig_zai
         self.bot.CODEX_ENABLED = self._orig_codex
 
     def test_skips_openai_when_codex_disabled(self):
@@ -64,14 +61,12 @@ class FallbackChainCrossProvider(unittest.TestCase):
         # RATE_LIMIT on openai → skip openai, pick next non-openai
         self.bot.MODEL_FALLBACK_CHAIN[:] = ["gpt-5", "gpt-5-codex", "sonnet"]
         self.bot.CODEX_ENABLED = True
-        self.bot.ZAI_API_KEY = ""  # force anthropic as the only alternative
         nxt = self.bot.get_fallback_model("gpt-5", self.bot.ErrorKind.RATE_LIMIT)
         self.assertEqual(nxt, "sonnet")
 
     def test_no_candidate_returns_none(self):
         self.bot.MODEL_FALLBACK_CHAIN[:] = ["opus", "gpt-5"]
         self.bot.CODEX_ENABLED = False
-        self.bot.ZAI_API_KEY = ""
         # opus is last viable — nothing after
         self.assertIsNone(
             self.bot.get_fallback_model("opus", self.bot.ErrorKind.UNKNOWN)
@@ -222,9 +217,9 @@ class CrossProviderHandoff(unittest.TestCase):
         b._append_transcript("s", "user", "me chame de Vinizeira", "gpt-5")
         b._append_transcript("s", "assistant", "Beleza, Vinizeira.", "gpt-5")
         block = b._build_handoff_block("s", "gpt-5", "sonnet")
-        self.assertIn("Recap cross-provider", block)
+        self.assertIn("Contexto da conversa", block)
         self.assertIn("Vinizeira", block)
-        self.assertIn("/tmp/claude-bot-handoff-", block)
+        self.assertIn("handoffs/", block)
         self.assertIn("gpt-5", block)
         self.assertIn("sonnet", block)
 

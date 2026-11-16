@@ -452,7 +452,7 @@ struct SettingsView: View {
 
         // Model Fallback
         SectionCard(title: "Model Fallback", symbol: "arrow.triangle.branch") {
-            Text("When a model fails after retries, the bot tries the next one in this chain. GLM models require a z.AI API key.")
+            Text("When a model fails, the bot tries the next one in this chain. A Claude model not in the chain (Sonnet, Haiku) goes straight to the first non-Claude model. Switching between Claude and GPT carries the conversation over. GLM models require a z.AI API key.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .padding(.bottom, Spacing.xs)

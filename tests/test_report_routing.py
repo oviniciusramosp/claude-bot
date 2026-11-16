@@ -148,12 +148,9 @@ class ChatGptFallback(unittest.TestCase):
 
     def test_anthropic_rate_limit_falls_through_to_gpt(self):
         with patch.object(self.m, "CODEX_ENABLED", True), \
-                patch.object(self.m, "MODEL_FALLBACK_CHAIN", ["opus", "sonnet-5", "haiku", "gpt"]):
+                patch.object(self.m, "MODEL_FALLBACK_CHAIN", ["fable", "opus", "gpt"]):
             self.assertEqual(self.m.get_fallback_model("opus", self.m.ErrorKind.RATE_LIMIT), "gpt")
-            self.assertEqual(self.m.get_fallback_model("haiku", self.m.ErrorKind.UNKNOWN
-                                                       if hasattr(self.m.ErrorKind, "UNKNOWN")
-                                                       else self.m.ErrorKind.RATE_LIMIT), "gpt")
-
+            self.assertEqual(self.m.get_fallback_model("fable", self.m.ErrorKind.RATE_LIMIT), "gpt")
 
 if __name__ == "__main__":
     unittest.main()

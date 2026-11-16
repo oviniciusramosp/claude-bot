@@ -22,7 +22,7 @@ struct BotConfig: Sendable {
             zaiApiKey: "",
             zaiBaseUrl: "https://api.z.ai/api/anthropic",
             codexPath: "/opt/homebrew/bin/codex",
-            modelFallbackChain: "opus,glm-5.1,sonnet,glm-4.7,haiku",
+            modelFallbackChain: "fable,opus,gpt",
             showSignature: true
         )
     }

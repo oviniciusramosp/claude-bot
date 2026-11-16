@@ -5,7 +5,7 @@ struct FallbackChainEditor: View {
     let zaiKeySet: Bool
     let codexAvailable: Bool
 
-    private let defaultChain = "opus,glm-5.1,sonnet,glm-4.7,haiku"
+    private let defaultChain = "fable,opus,gpt"
 
     private var models: [String] {
         chain.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
