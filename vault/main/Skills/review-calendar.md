@@ -3,7 +3,7 @@ title: Review Calendar
 description: Standard procedure for checking upcoming relevant dates and events (economic calendar, sports fixtures, macro events) to enrich routine context with time-sensitive information.
 type: skill
 created: 2026-04-10
-updated: 2026-04-10
+updated: 2026-11-16
 trigger: "when a routine or pipeline step needs to check upcoming events, match dates, economic releases, or any date-sensitive context — use /review-calendar or reference this skill"
 tags: [skill, calendar, dates, events, finnhub, palmeiras, macro]
 ---
@@ -156,7 +156,7 @@ for m in recent:
         score_away = m["awayScore"].get("current")
 ```
 
-**Note:** SofaScore may block direct requests — add User-Agent and consider PinchTab fallback (see `Skills/fetch-web.md`).
+**Note:** SofaScore may block direct requests — add User-Agent and consider the Safari fallback (`scripts/safari.py`, see `Skills/fetch-web.md`).
 
 ## Source 4 — Notion Palmeiras matches database (if maintained)
 
@@ -278,7 +278,7 @@ The `summary` field is a one-line human-readable synthesis for quick injection i
 |---------|-------|--------|
 | Finnhub 401 | Key invalid | Log, skip economic section, continue |
 | Finnhub 429 | Free tier limit | Use cached data if available, else skip |
-| SofaScore 403 | Bot blocked | Fall back to PinchTab |
+| SofaScore 403 | Bot blocked | Fall back to Safari (`scripts/safari.py`) |
 | Notion 404 | DB doesn't exist yet | Skip silently (not all users have this DB) |
 | Date parse error | API format change | Log full payload, skip item |
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""YouTube channel feed reader — RSS first, PinchTab fallback.
+"""YouTube channel feed reader — RSS first, Safari fallback.
 
 Reads the public Atom feed at
     https://www.youtube.com/feeds/videos.xml?channel_id=<ID>
@@ -7,7 +7,10 @@ which is unauthenticated, quota-free, and contains the 15 most recent
 uploads (regular videos + livestreams alike). No API key required.
 
 CLI:
-    python3 scripts/youtube_rss.py fetch --channel-id UC... [--fallback-pinchtab]
+    python3 scripts/youtube_rss.py fetch --channel-id UC... [--fallback-browser]
+
+(`--fallback-pinchtab` is still accepted as a deprecated alias of
+`--fallback-browser`.)
 
 Stdout: one JSON object per line (JSONL), each:
     {
@@ -34,13 +37,15 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import unicodedata
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # scripts/ → safari.py
+import safari  # noqa: E402
 
 RSS_URL_TEMPLATE = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 USER_AGENT = "Mozilla/5.0 (compatible; youtube-rss/1.0)"
@@ -147,28 +152,20 @@ def fetch_rss(channel_id: str) -> Optional[bytes]:
         return None
 
 
-def fallback_pinchtab(channel_url: str) -> List[Dict[str, Any]]:
-    """Scrape /videos via PinchTab — best-effort fallback.
+def fallback_browser(channel_url: str) -> List[Dict[str, Any]]:
+    """Scrape /videos via Safari (scripts/safari.py) — best-effort fallback.
 
-    Requires PINCHTAB_ALLOW_EVALUATE=1 in the environment of the PinchTab
-    server (port 9870). The call is wrapped in a `pinchtab` CLI invocation
-    if available; otherwise we attempt a raw HTTP GET of the channel page
-    and regex-extract video IDs as a last-ditch path.
+    Opens the channel page in its own Safari window (one attempt), reads the
+    rendered HTML (video IDs are embedded in ytInitialData), and closes it.
+    If Safari can't be driven, the error is reported on stderr and we fall
+    back to a raw HTTP GET of the channel page as a last-ditch path.
     """
-    # Try the PinchTab CLI when available — it returns rendered HTML with
-    # video IDs embedded in ytInitialData.
     html = ""
     try:
-        result = subprocess.run(
-            ["pinchtab", "fetch", channel_url, "--wait-for-selector", "ytd-rich-item-renderer"],
-            capture_output=True,
-            text=True,
-            timeout=45,
-        )
-        if result.returncode == 0:
-            html = result.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+        with safari.open_page(channel_url, settle=3) as page:
+            html = page.html()
+    except safari.SafariError as exc:
+        print(f"WARN: Safari fallback failed for {channel_url}: {exc}", file=sys.stderr)
 
     if not html:
         # Raw HTTP GET — works only if YouTube serves SSR content (logged-out
@@ -223,15 +220,15 @@ def cmd_fetch(args: argparse.Namespace) -> int:
             rss_bytes = None
 
     if not rss_bytes:
-        if not args.fallback_pinchtab:
+        if not args.fallback_browser:
             print(
-                f"ERROR: RSS unavailable for channel {channel_id} and --fallback-pinchtab not set",
+                f"ERROR: RSS unavailable for channel {channel_id} and --fallback-browser not set",
                 file=sys.stderr,
             )
             return 2
         used_fallback = True
         channel_url = f"https://www.youtube.com/channel/{channel_id}/videos"
-        entries = fallback_pinchtab(channel_url)
+        entries = fallback_browser(channel_url)
 
     if used_fallback:
         print(
@@ -246,15 +243,22 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Read a YouTube channel feed (RSS + PinchTab fallback)."
+        description="Read a YouTube channel feed (RSS + Safari fallback)."
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     p_fetch = sub.add_parser("fetch", help="Print channel uploads as JSONL")
     p_fetch.add_argument("--channel-id", required=True)
     p_fetch.add_argument(
-        "--fallback-pinchtab",
+        "--fallback-browser",
         action="store_true",
-        help="If RSS fails, scrape the /videos page via PinchTab (logged-in browser).",
+        help="If RSS fails, scrape the /videos page via Safari (scripts/safari.py).",
+    )
+    # Deprecated alias kept so existing callers don't break.
+    p_fetch.add_argument(
+        "--fallback-pinchtab",
+        dest="fallback_browser",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     p_fetch.set_defaults(func=cmd_fetch)
     return p

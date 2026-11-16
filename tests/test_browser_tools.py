@@ -1,5 +1,5 @@
-"""v3.84 — browser tools for agents (Playwright MCP over CDP) and the
-PinchTab health check.
+"""v3.84 — browser tools for agents (Playwright MCP over CDP), opt-in since
+v3.89.1 when PinchTab (and its health check) was removed.
 
 No browser is started: the CDP probe, npx lookup and launchctl are patched.
 """
@@ -89,64 +89,19 @@ class BrowserMcpConfig(unittest.TestCase):
         self.assertNotIn("--mcp-config", cmd)
 
 
-class BrowserHealthCheck(unittest.TestCase):
-    def setUp(self):
-        self.m = load_bot_module()
-        self.m.BROWSER_MCP_ENABLED = True
-        bot = self.m.ClaudeTelegramBot.__new__(self.m.ClaudeTelegramBot)
-        bot.primary_chat_ids = {"111"}
-        self.sent = []
-        bot.send_message = lambda text, **kw: self.sent.append((kw.get("chat_id"), text)) or 1
-        self.bot = bot
-        self.healthy = True
-        self._p = [
-            patch.object(self.m, "pinchtab_installed", return_value=True),
-            patch.object(self.m, "_http_alive", side_effect=lambda *a, **k: self.healthy),
-            patch.object(self.m, "browser_cdp_alive", side_effect=lambda force=False: self.healthy),
-            patch.object(self.m, "pinchtab_launchd_exit_codes",
-                         return_value={"com.pinchtab.server": "78", "com.chromecdp.pinchtab": "78"}),
-        ]
-        for p in self._p:
-            p.start()
+class BrowserToolsAreOptIn(unittest.TestCase):
+    """v3.89.1: PinchTab is gone, so the browser MCP is off unless the owner
+    points BROWSER_MCP/BROWSER_CDP_URL at a Chrome they run themselves."""
 
-    def tearDown(self):
-        for p in self._p:
-            p.stop()
+    def test_off_by_default(self):
+        self.assertFalse(load_bot_module().BROWSER_MCP_ENABLED)
 
-    def test_alerts_once_after_two_failures_then_recovers(self):
-        self.healthy = False
-        self.bot._check_browser_health()
-        self.assertEqual(self.sent, [])  # one failure may be a restart in progress
-        self.bot._check_browser_health()
-        self.bot._check_browser_health()
-        self.assertEqual(len(self.sent), 1)
-        chat, text = self.sent[0]
-        self.assertEqual(chat, "111")
-        self.assertIn("exit 78", text)
-        self.assertIn("Permitir em Segundo Plano", text)
-        self.healthy = True
-        self.bot._check_browser_health()
-        self.assertEqual(len(self.sent), 2)
-        self.assertIn("voltou", self.sent[1][1])
-        self.bot._check_browser_health()
-        self.assertEqual(len(self.sent), 2)
-
-    def test_silent_when_pinchtab_not_installed(self):
-        self.healthy = False
-        with patch.object(self.m, "pinchtab_installed", return_value=False):
-            for _ in range(3):
-                self.bot._check_browser_health()
-        self.assertEqual(self.sent, [])
-
-
-class LaunchdExitCodes(unittest.TestCase):
-    def test_parses_only_pinchtab_labels(self):
+    def test_no_pinchtab_left(self):
         m = load_bot_module()
-        out = ("PID\tStatus\tLabel\n-\t78\tcom.pinchtab.server\n123\t0\tcom.chromecdp.pinchtab\n"
-               "-\t0\tcom.other\n")
-        with patch.object(m.subprocess, "run", return_value=MagicMock(stdout=out)):
-            codes = m.pinchtab_launchd_exit_codes()
-        self.assertEqual(codes, {"com.pinchtab.server": "78", "com.chromecdp.pinchtab": "0"})
+        for name in ("pinchtab_installed", "pinchtab_launchd_exit_codes", "PINCHTAB_API_URL"):
+            self.assertFalse(hasattr(m, name), name)
+        self.assertFalse(hasattr(m.ClaudeTelegramBot, "_check_browser_health"))
+
 
 if __name__ == "__main__":
     unittest.main()

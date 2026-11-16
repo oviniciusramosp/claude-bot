@@ -13,34 +13,23 @@ Which tool to use for each type of task. Check before choosing an approach.
 
 ## Web browsing
 
-- **Browser tools (preferred)** — when PinchTab's Chrome is up, every run in the owner's chats gets native browser tools from the `browser` MCP server: `mcp__browser__browser_navigate`, `browser_snapshot` (accessibility tree — better than screenshots), `browser_click`, `browser_type`, `browser_fill_form`, `browser_take_screenshot`, `browser_tabs`, `browser_evaluate`. They drive the **same logged-in Chrome** as PinchTab (CDP `:9869`), so sessions (X, Threads, …) are shared. If they're not in your tool list, the browser is down — say so plainly (the bot already alerts the owner) and fall back to WebFetch/WebSearch.
-- **Always finish with `browser_close`** (closes your page only — the shared Chrome keeps running). Open pages accumulate and slow every other agent down.
-- Guest (secondary) chats never get these tools — they would act on the owner's logged-in accounts.
-- **PinchTab** — Web browsing CLI with logged-in sessions (X, Threads). Prefer over urllib to avoid bot fingerprinting. Use it from Bash when you need its CLI specifically; otherwise prefer the browser tools above.
-- Repo/docs: https://github.com/pinchtab/pinchtab
-- Default port: `9867`
-- Requires `PINCHTAB_ALLOW_EVALUATE=1` for JavaScript form submission (X and other sites)
+**Use Safari first.** Safari on this Mac holds the owner's logins (X, Threads, banks, Google…). Drive it with `scripts/safari.py` from Bash or Python — each page opens in its **own Safari window** and only that window is closed, so the owner's tabs are never touched.
 
-Commands:
-```
-pinchtab nav <url> --port 9867       # navigate
-pinchtab text --port 9867            # extract text
-pinchtab snap -i -c --port 9867      # interactive snapshot
-pinchtab click <ref> --port 9867     # click element
-pinchtab fill <ref> "text" --port 9867  # fill form field
-```
-
-### Tab cleanup rule
-
-**Every routine/pipeline that uses PinchTab MUST close its tabs after finishing.** Unclosed tabs accumulate, exhaust Chrome resources, and cause `context deadline exceeded` errors that block all subsequent PinchTab operations.
-
-Add at the end of every routine prompt that uses PinchTab:
-```
-**Cleanup:** After extracting all needed content, close the current tab:
 ```bash
-pinchtab tabs close --port 9867
+python3 scripts/safari.py text <url> [--settle 3] [--scroll 3]   # page text
+python3 scripts/safari.py js <url> "<JS expression>"            # JSON result
+python3 scripts/safari.py html <url>                            # full HTML
+python3 scripts/safari.py check                                 # is Safari scriptable?
 ```
-```
+
+From Python (routine scripts): `sys.path.insert(0, "<repo>/scripts"); import safari`, then
+`with safari.open_page(url, settle=3) as page: page.js(...)`, `page.text()`, `page.scroll(passes=3)`, `page.inject_file(path)`. Errors raise `safari.SafariError` with a plain reason — report it, never skip silently.
+
+- **Not logged in?** If the page lands on a login screen, say so plainly ("o Safari não está logado no X") — never type passwords; the owner logs in once in Safari.
+- **Plain public pages** (articles, docs, RSS): WebFetch/WebSearch are fine and faster.
+- **Backup:** if Safari can't do something, the owner can enable Chrome with the Claude extension — ask before relying on it.
+- Guest (secondary) chats must never drive the owner's Safari.
+- PinchTab was removed (2026-11-16). Don't use `pinchtab` or ports 9867/9869/9870.
 
 ## Telegram notifications from pipelines/routines
 

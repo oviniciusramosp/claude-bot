@@ -1,11 +1,11 @@
 ---
 title: Fetch Web Content
-description: Standard procedure for fetching and parsing web content. Covers tool selection (PinchTab vs curl), PinchTab single-flight concurrency, RSS parsing, HTML extraction, retries, and rate limiting.
+description: Standard procedure for fetching and parsing web content. Covers tool selection (WebFetch/curl for public pages, the owner's Safari via scripts/safari.py for logged-in or JS pages), parallel browser use, RSS parsing, HTML extraction, retries, and rate limiting.
 type: skill
 created: 2026-04-10
-updated: 2026-05-19
+updated: 2026-11-16
 trigger: "when a routine or pipeline step needs to fetch content from a web URL, RSS feed, or API — use /fetch-web or reference this skill"
-tags: [skill, web, fetch, scraping, pinchtab, rss]
+tags: [skill, web, fetch, scraping, safari, rss]
 version: 2
 ---
 
@@ -23,55 +23,48 @@ Decision tree:
 Is it a JSON API or RSS/XML feed?
   → curl + urllib (fast, no overhead)
 
-Is it a static HTML page (no JS required)?
-  → curl + HTML parser (regex or xml.etree)
+Is it a public static HTML page (article, docs, no login)?
+  → WebFetch, or curl + HTML parser (regex or xml.etree)
 
-Is it a JS-heavy SPA or requires login?
-  → PinchTab (logged session, JS rendering)
+Is it a JS-heavy SPA or does it require login (X, Threads, banks…)?
+  → Safari via scripts/safari.py (the owner's logged-in sessions, real JS rendering)
 
 Is it rate-limited or behind bot detection?
-  → PinchTab (real browser, authenticated)
+  → Safari via scripts/safari.py (real browser, authenticated)
 ```
 
-## Concurrency caveats — PinchTab single-flight
+If Safari can't do something, the backup is Chrome with the Claude extension — the owner has to enable it, so ask before relying on it. PinchTab was removed on 2026-11-16: never call `pinchtab` or ports 9867/9869/9870.
 
-PinchTab on a single port (`9870` is the canonical default) is **shared mutable state**: one browser session, one current URL. Concurrent calls against the same port from parallel pipeline steps create a race — they overwrite each other's navigation, causing intermittent empty `text` output, wrong-page content, or whichever step "won" the navigation race wins for everyone.
+## Concurrency caveats — parallel browser use
 
-**Rule:** in any pipeline where multiple steps fetch via PinchTab, force sequential execution via `depends_on:` instead of letting the harness parallelize. The cost (a few seconds of serialization) is far smaller than the cost of a flaky pipeline.
+`scripts/safari.py` opens **each page in its own Safari window** and closes only that window, so parallel pipeline steps no longer share one "current URL" and can't overwrite each other's navigation (the race that used to hit PinchTab's single session).
 
-```yaml
-# DON'T — both steps race on PinchTab port 9870
-steps:
-  - id: collect-x
-    method: pinchtab
-  - id: collect-threads
-    method: pinchtab
-```
+Still, avoid heavy parallel browser use:
+
+- Every window is a real page in the owner's Safari — many at once slow the Mac down and compete with whatever the owner is doing.
+- Authenticated SPAs (X, Threads) rate-limit and flag bursts from the same logged-in account. Hitting them from several steps at once looks like a bot.
+
+**Rule:** in a pipeline where several steps read logged-in sites through Safari, prefer chaining them with `depends_on:` (a few seconds of serialization) over running them all at once. Two independent sites in parallel is fine; a fan-out of browser steps is not.
 
 ```yaml
-# DO — explicit chain forces serial execution
+# PREFER — browser steps on the same logged-in account run one after another
 steps:
   - id: collect-x
-    method: pinchtab
+    method: safari
   - id: collect-threads
-    method: pinchtab
+    method: safari
     depends_on: [collect-x]
 ```
 
-If you must truly fetch in parallel via PinchTab, spawn a second PinchTab instance on a different port (e.g. `9871`) and route each step to its own port. Most pipelines should NOT need this — sequential is simpler and matches the real-world rate limits of authenticated SPAs (X, Threads) anyway.
-
-Discovery context: this race was observed in ai-digest-v2 (week of 2026-05-12) when WebSearch was removed as a source and the X/Threads collectors started competing for the single PinchTab session. The fix landed in W20 — collectors were chained with `depends_on:`. See `main/Journal/2026-05/2026-W20.md`.
-
 ## Prerequisites
 
-- **PinchTab** running on `http://localhost:9870` (for JS/logged sites) — see `Tooling.md`
-- `PINCHTAB_ALLOW_EVALUATE=1` in env if JS evaluation is needed
+- **Safari** on this Mac with the owner's logins, scriptable once (owner, one time): Safari ▸ Settings ▸ Advanced ▸ "Show features for web developers", then Develop ▸ "Allow JavaScript from Apple Events", and allow the calling app under System Settings ▸ Privacy & Security ▸ Automation ▸ Safari. `python3 scripts/safari.py check` tells whether it's ready.
 - Python stdlib only (no `requests`, `beautifulsoup4` — the bot is stdlib-only)
 
 ## Input contract
 
 - `url` (string, required) — target URL
-- `method` (string, default "auto") — `curl`, `pinchtab`, `auto`
+- `method` (string, default "auto") — `curl`, `safari`, `auto`
 - `timeout` (int, default 20) — seconds
 - `user_agent` (string, optional) — custom UA (default: Mozilla/5.0 Chrome/120)
 - `parse` (string, optional) — `rss`, `json`, `html-text`, `html-links`, `raw`
@@ -162,51 +155,58 @@ for line in lines:
             break
 ```
 
-## Method 2 — PinchTab (JS/logged sites)
+## Method 2 — Safari (JS/logged sites)
 
-### Step 1 — Health check
+Paths below are relative to the repo root (`~/claude-bot`).
 
-```python
-import subprocess
-try:
-    subprocess.run(["curl", "-s", "--max-time", "3", "http://localhost:9870/"],
-                   check=True, capture_output=True, timeout=5)
-    pinchtab_ok = True
-except Exception:
-    pinchtab_ok = False
-
-if not pinchtab_ok:
-    # Fall back to curl or notify
-    raise RuntimeError("PinchTab unavailable — cannot fetch JS-heavy sites")
-```
-
-### Step 2 — Navigate and extract
+### Step 1 — Check Safari is scriptable
 
 ```bash
-pinchtab nav "$URL" --port 9870
-sleep 2  # allow JS to render
-pinchtab text --port 9870
+python3 scripts/safari.py check
+```
+
+If it fails, the error says which switch is off — report it to the owner (it's a one-time setting) and abort. Don't skip silently.
+
+### Step 2 — Open and extract text
+
+```bash
+python3 scripts/safari.py text "$URL" --settle 3            # page text
+python3 scripts/safari.py text "$URL" --settle 3 --scroll 3 # scroll to load more first
 ```
 
 Or programmatically:
 
 ```python
-subprocess.run(["pinchtab", "nav", url, "--port", "9870"], check=True, timeout=30)
-time.sleep(2)
-result = subprocess.run(["pinchtab", "text", "--port", "9870"],
-                        capture_output=True, text=True, timeout=10)
-page_text = result.stdout
+import sys
+sys.path.insert(0, "/Users/viniciusramos/claude-bot/scripts")
+import safari
+
+try:
+    with safari.open_page(url, settle=3) as page:   # own window, closed on exit
+        page.scroll(passes=3, pause=2)              # optional, for infinite feeds
+        page_text = page.text()
+except safari.SafariError as exc:
+    raise RuntimeError(f"Safari fetch failed for {url}: {exc}")
 ```
 
-### Step 3 — Snapshot for structured extraction
+### Step 3 — Structured extraction with JavaScript
 
-When you need to click, fill, or navigate deeper:
+Prefer a JS expression with CSS selectors over the raw text blob — it returns JSON (lists, dicts) with real links:
 
 ```bash
-pinchtab snap -i -c --port 9870
+python3 scripts/safari.py js "$URL" "Array.from(document.querySelectorAll('article a[href*=status]')).map(a => a.href)"
 ```
 
-This returns a structured snapshot with clickable element references. Use `pinchtab click <ref>` and `pinchtab fill <ref> "text"` for interaction.
+```python
+with safari.open_page(url, settle=3) as page:
+    if "/login" in page.current_url():
+        raise RuntimeError("Safari is not logged in on this site — the owner must log in once in Safari")
+    items = page.js("Array.from(document.querySelectorAll('article')).slice(0,10).map(a => a.innerText)")
+```
+
+For a statement block, wrap it: `page.js("(() => { ...; return x; })()")`. For promises use `page.js_async(...)`.
+
+**Login wall:** if the page lands on a login screen, say so plainly ("o Safari não está logado no X"). Never type passwords — the owner logs in once in Safari.
 
 ## Retry and timeout strategy
 
@@ -266,7 +266,7 @@ Return a consistent dict to callers:
     "url": url,
     "status": 200,
     "fetched_at": "2026-04-10T01:30:00-03:00",
-    "method": "curl" | "pinchtab",
+    "method": "curl" | "safari",
     "content_type": "text/html",
     "parsed": {
         # parse-specific fields
@@ -283,15 +283,15 @@ Return a consistent dict to callers:
 | Symptom | Cause | Action |
 |---------|-------|--------|
 | 404 | URL wrong | Log, abort (don't retry) |
-| 403 Forbidden | Bot detection / geoblock | Try PinchTab fallback; if still 403, notify user |
+| 403 Forbidden | Bot detection / geoblock | Try the Safari method; if still 403, notify user |
 | 429 | Rate limited | Exponential backoff, max 3 retries |
 | 5xx | Server error | Retry 3x with backoff, then abort |
 | Connection timeout | Network / slow site | Retry with progressive timeout, then abort |
 | SSL error | Cert issue | Log, abort (do NOT skip SSL verification) |
-| Empty body | Soft block / JS required | Try PinchTab (and verify no other step is racing on the same port — see "Concurrency caveats" above) |
+| Empty body | Soft block / JS required | Try the Safari method |
 | Non-UTF8 content | Charset mismatch | Decode with `errors="replace"` + log warning |
-| PinchTab down | Service not running | Notify user to start PinchTab |
-| Wrong-page content from pinchtab | Another step navigated PinchTab mid-fetch | Add `depends_on:` to serialize — see "Concurrency caveats" |
+| `SafariError` (JavaScript from Apple Events / Automation) | Safari not scriptable | Notify the owner with the error text (one-time setting) |
+| Login screen in Safari | Owner not logged in on that site | Notify the owner to log in once in Safari; never type passwords |
 
 **All errors visible** — log with context (URL, method, attempt count) and notify user when the failure blocks a routine.
 
@@ -323,6 +323,6 @@ if cache_file.exists():
 ## Notes
 
 - The bot is stdlib-only — NO `requests`, NO `beautifulsoup4`, NO `lxml`. Use `urllib` + `xml.etree` + `re` + `html`
-- For complex HTML parsing, prefer PinchTab's `text` extraction over hand-written regex
+- For complex HTML parsing, prefer Safari's `text` / `js` extraction over hand-written regex
 - Reference implementations (Pipeline v2 scripts): `parmeirense/Routines/palmeiras-feed/scripts/scout_v2.py`, `crypto-bro/Routines/crypto-news-scout/scripts/collect_data_v2.py`, `crypto-bro/Routines/crypto-ta-analise/scripts/collect_*_v2.py`
 - Tool preferences: always check `Tooling.md` before introducing a new fetching approach

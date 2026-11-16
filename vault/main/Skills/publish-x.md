@@ -1,11 +1,11 @@
 ---
 title: Publish to X (Twitter)
-description: Standard procedure for posting to X via PinchTab (preferred) or cookie-based API. Handles threads, media, character limits, and rate limiting.
+description: Standard procedure for posting to X via the owner's Safari (scripts/safari.py, text posts) or cookie-based API (needed for media). Handles threads, media, character limits, and rate limiting.
 type: skill
 created: 2026-04-10
-updated: 2026-04-10
+updated: 2026-11-16
 trigger: "when a routine or pipeline step needs to post a tweet or thread to X/Twitter — use /publish-x or reference this skill"
-tags: [skill, x, twitter, publishing, pinchtab]
+tags: [skill, x, twitter, publishing, safari]
 ---
 
 # Publish to X (Twitter)
@@ -14,21 +14,21 @@ Canonical procedure for posting to X. There is NO official free API for posting 
 
 ## Method selection
 
-**Default: PinchTab (logged-in browser session).** Read `Tooling.md` first to confirm PinchTab is the preferred browser automation tool.
+**Default for text posts: Safari (the owner's logged-in session)** via `scripts/safari.py`. Read the "Web browsing" section of `Tooling.md` first.
 
-| Use PinchTab when | Use cookie API when |
-|-------------------|---------------------|
-| Interactive debugging | Fully automated pipeline step |
+| Use Safari when | Use cookie API when |
+|-----------------|---------------------|
+| Text-only posts and threads | Posts with media (images/video) |
 | Low-volume posting (≤10/day) | Higher volume |
-| The user is already logged in | Headless/scheduled execution |
+| The owner is logged into X in Safari | Safari is not logged in / not scriptable |
 
-Both methods fail if X requires a fresh login or 2FA challenge. The caller MUST handle that gracefully.
+Both methods fail if X requires a fresh login or 2FA challenge. The caller MUST handle that gracefully. Agents never type passwords — if X shows a login screen, say so and stop.
 
 ## Prerequisites
 
-- `X_AUTH_TOKEN` and `X_CT0` cookies in `vault/.env` (rotate monthly — see expiration notes below)
+- `X_AUTH_TOKEN` and `X_CT0` cookies in `vault/.env` (rotate monthly — see expiration notes below) — for Method 2
 - `TWITTER_LIST_ID` (optional — for list-scoped operations)
-- PinchTab running on `http://localhost:9870` (for Method 1)
+- For Method 1: Safari logged into X, and scriptable (`python3 scripts/safari.py check` — one-time owner setting: Develop ▸ "Allow JavaScript from Apple Events" + Automation permission)
 
 ## Input contract
 
@@ -37,52 +37,78 @@ Both methods fail if X requires a fresh login or 2FA challenge. The caller MUST 
 - `reply_to_id` (string, optional) — if posting as a reply to an existing tweet
 - `thread` (bool, default False) — if True, split long text into a thread
 
-## Method 1 — PinchTab (preferred)
+## Method 1 — Safari (preferred for text)
 
-### Step 1 — Check PinchTab availability
+Run from the repo root (`~/claude-bot`). Keep the **same window open for the whole flow** (open → fill → click → confirm) by using `safari.open_page` as a context manager — the one-shot CLI commands close the window after each call, which would lose the draft.
 
-```bash
-curl -s --max-time 3 http://localhost:9870/ || echo "pinchtab-down"
-```
-
-If down, abort and notify user to start PinchTab (`pinchtab serve --port 9870`).
-
-### Step 2 — Navigate to compose
+### Step 1 — Check Safari is scriptable
 
 ```bash
-pinchtab nav "https://x.com/compose/post" --port 9870
+python3 scripts/safari.py check
 ```
 
-If redirected to `/login` or `/i/flow/login`, abort with clear error: **"X session expired — manual login required"**.
+If it fails, abort and pass the error text to the owner (it names the switch to turn on).
 
-### Step 3 — Snapshot and fill
+### Step 2 — Open compose, detect login wall, fill, post, confirm
 
-```bash
-pinchtab snap -i -c --port 9870
+```python
+import sys, time, json
+sys.path.insert(0, "/Users/viniciusramos/claude-bot/scripts")
+import safari
+
+def post_to_x(text: str) -> str:
+    with safari.open_page("https://x.com/compose/post", settle=4) as page:
+        url = page.current_url()
+        if "/login" in url or "/i/flow/login" in url:
+            raise RuntimeError("X session expired — o Safari não está logado no X; o dono precisa entrar uma vez no Safari")
+
+        # Composer is a contenteditable; insertText keeps X's editor state in sync
+        ok = page.js("""(() => {
+            const box = document.querySelector('[data-testid="tweetTextarea_0"]');
+            if (!box) return false;
+            box.focus();
+            return document.execCommand('insertText', false, %s);
+        })()""" % json.dumps(text))
+        if not ok:
+            raise RuntimeError("X composer not found (UI change?)")
+
+        time.sleep(1)
+        clicked = page.js("""(() => {
+            const b = document.querySelector('[data-testid="tweetButton"]');
+            if (!b || b.disabled || b.getAttribute('aria-disabled') === 'true') return false;
+            b.click(); return true;
+        })()""")
+        if not clicked:
+            raise RuntimeError("Post button missing or disabled (empty/too long text?)")
+
+        # Confirm: the compose dialog closes / composer disappears
+        for _ in range(20):
+            time.sleep(1)
+            if not page.js("!!document.querySelector('[data-testid=\"tweetTextarea_0\"]')"):
+                return page.current_url()
+        raise RuntimeError("Post not confirmed within 20s — check X manually before retrying (avoid duplicates)")
 ```
 
-Locate the composer textarea (role="textbox", `data-testid="tweetTextarea_0"`). Use `pinchtab fill <ref> "text" --port 9870`.
+If the confirmation times out, **do not retry blindly** — the post may have gone out. Check the profile first.
 
-For **media attachments**: find the file input (`data-testid="fileInput"`) and upload via PinchTab's file upload. Wait for upload confirmation before posting.
+### Step 3 — Media
 
-### Step 4 — Post
+Attaching media through Safari JavaScript is **not reliable**: a page script can't fill a file input with a local file. Posts with media must use **Method 2** (cookie API media upload) or be done by the owner by hand. Don't try to fake the upload.
 
-Click the "Post" button (`data-testid="tweetButtonInline"`). Poll for confirmation (URL change to `/home` or success toast).
-
-### Step 5 — Threading (if text >280 chars)
+### Step 4 — Threading (if text >280 chars)
 
 Split text into chunks ≤270 chars (leave 10 chars for `" 1/N"` counter). After posting the first tweet:
 
-1. Navigate to the posted tweet's URL
-2. Click "Reply"
-3. Fill the composer with the next chunk (`" 2/N"`)
-4. Repeat until all chunks posted
+1. Open the posted tweet's URL with `safari.open_page`
+2. Click "Reply" (`[data-testid="reply"]`) via `page.js`
+3. Fill the reply composer the same way (`tweetTextarea_0` + `insertText`) with the next chunk (`" 2/N"`)
+4. Click `[data-testid="tweetButton"]`, confirm, repeat until all chunks posted
 
-Each chunk should end or start with `" i/N"` counter to make the thread readable.
+Each chunk should end or start with `" i/N"` counter to make the thread readable. For long threads, Method 2 (chaining `reply_to_id`) is more robust.
 
 ## Method 2 — Cookie-based API (GraphQL)
 
-**Warning: cookies expire monthly.** If `X_AUTH_TOKEN` or `X_CT0` rotate, this method fails with 401. The caller MUST detect this and fall back to PinchTab or notify the user.
+**Warning: cookies expire monthly.** If `X_AUTH_TOKEN` or `X_CT0` rotate, this method fails with 401. The caller MUST detect this and fall back to Safari (Method 1, text only) or notify the user.
 
 ### Step 1 — Build headers
 
@@ -156,7 +182,7 @@ with urllib.request.urlopen(req, timeout=30) as resp:
 
 ### Step 3 — Media upload (cookie method)
 
-Media goes through `https://upload.twitter.com/1.1/media/upload.json` in 3 phases: INIT, APPEND, FINALIZE. This is brittle — prefer PinchTab when posting media.
+Media goes through `https://upload.twitter.com/1.1/media/upload.json` in 3 phases: INIT, APPEND, FINALIZE. This is brittle, but it is the only automated way to post media — Safari JavaScript can't attach local files. If it fails, hand the media post to the owner.
 
 ## Threading rules
 
@@ -172,7 +198,8 @@ Media goes through `https://upload.twitter.com/1.1/media/upload.json` in 3 phase
 | 401 on cookie method | `X_AUTH_TOKEN`/`X_CT0` expired | Notify user: "X cookies expired — run cookie refresh routine" |
 | 403 | Account flagged | Stop all X posting, notify user immediately |
 | 429 | Rate limit | Exponential backoff, max 3 retries. Log wait time |
-| PinchTab `/login` redirect | Session expired | Notify user, abort |
+| Safari lands on `/login` / `/i/flow/login` | Safari not logged into X | Notify the owner to log in once in Safari, abort (never type passwords) |
+| `SafariError` | Safari not scriptable | Pass the error text to the owner, abort |
 | Duplicate content | X rejects identical tweets within 24h | Skip silently, log once |
 | Text >25000 chars | Exceeds X long-tweet limit | Truncate with `…` and warn |
 

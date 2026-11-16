@@ -124,7 +124,7 @@ class CommandDispatch(unittest.TestCase):
         # Active session should now have model=sonnet
         self.assertEqual(self.bot._get_session().model, "sonnet")
         last = self._last_send()
-        self.assertIn("sonnet", last["text"])
+        self.assertIn("Sonnet", last["text"])  # friendly name (v3.89.1)
 
     def test_opus_command_switches_model(self):
         self.bot._get_session()
@@ -186,7 +186,7 @@ class CommandDispatch(unittest.TestCase):
         self.assertEqual(new_session.model, "opus")
         msg = self._last_send()["text"]
         self.assertIn("parmeirense", msg)
-        self.assertIn("opus", msg)
+        self.assertIn("Opus", msg)
 
     def test_new_command_main_agent_hides_agent_label(self):
         """``/new`` on main agent should not show agent label."""
@@ -197,7 +197,7 @@ class CommandDispatch(unittest.TestCase):
         self.bot._handle_text("/new")
         msg = self._last_send()["text"]
         self.assertNotIn("agente:", msg)
-        self.assertIn("sonnet", msg)
+        self.assertIn("Sonnet", msg)
 
     def test_status_command_shows_session_info(self):
         self.bot._get_session()
