@@ -1676,6 +1676,19 @@ _REPLY_FORMAT_RICH = (
     "Use them for quick yes/no or few-option choices and key links; never for /commands. "
 )
 _REPLY_FORMAT_PLAIN = "NEVER use tables — always use bullet lists or numbered lists instead. "
+# Optional: a specific moment shown in the reader's own timezone/locale via the
+# Telegram date_time entity. Both delivery paths (HTML and Rich) keep the tag;
+# an invalid one degrades to its text, so a model mistake never breaks a reply.
+_REPLY_FORMAT_DATETIME = (
+    "Optional: when you mention a specific moment (a meeting, a deadline, when something ran or will run) "
+    "and you know its exact Unix time, you may write it as "
+    "`<tg-time unix=\"1794751200\" format=\"wdt\">dom, 15/11/2026 11:00</tg-time>` so Telegram shows it "
+    "in the reader's own timezone and language. Format letters: r = relative (\"in 2 hours\"), "
+    "w = weekday, d/D = short/long date, t/T = short/long time (e.g. `dt`, `wDT`, `t`). "
+    "The text inside is the fallback, so make it a readable local date/time. "
+    "Get the Unix time from a tool (e.g. `date -j -f '%Y-%m-%d %H:%M:%S' '2026-11-15 11:00:00' +%s`) — never guess it; "
+    "if unsure, just write the date normally. Never put it inside code blocks or tables. "
+)
 
 SYSTEM_PROMPT = (
     "You are being accessed via a Telegram bot as a remote fallback. "
@@ -1684,7 +1697,8 @@ SYSTEM_PROMPT = (
     "Keep responses concise when possible. When showing code, prefer short relevant snippets. "
     "Summarize tool execution results briefly. The user cannot see tool calls in real-time — "
     "describe what you are doing. "
-    + (_REPLY_FORMAT_RICH if RICH_MESSAGES_ENABLED else _REPLY_FORMAT_PLAIN) +
+    + (_REPLY_FORMAT_RICH if RICH_MESSAGES_ENABLED else _REPLY_FORMAT_PLAIN)
+    + _REPLY_FORMAT_DATETIME +
     "NEVER break a line in the middle of a sentence or phrase — each sentence must stay on a single line. "
     "Line breaks are only allowed between paragraphs or sections, never within a sentence. "
     "Use emojis to highlight important parts of your responses "
@@ -7212,6 +7226,158 @@ def _extract_photo_comment(text: str) -> Tuple[str, str]:
     return cleaned, url
 
 
+# ---------------------------------------------------------------------------
+# Telegram date_time entity (Bot API 9.5; RichTextDateTime in Rich Messages)
+# ---------------------------------------------------------------------------
+# Telegram renders a ``date_time`` entity in the READER's own timezone and
+# locale. HTML parse mode and Rich Markdown/HTML share one syntax:
+#     <tg-time unix="1647531900" format="wDT">22:45 tomorrow</tg-time>
+# The format must match ``r|w?[dD]?[tT]?`` (r = relative to now, w = weekday,
+# d/D = short/long date, t/T = short/long time; empty = show the text as-is).
+# The tag's text is what old clients, notifications and our plain-text
+# fallback show, so it is always filled with a readable local-time string.
+
+_TG_TIME_FORMAT_RE = re.compile(r"r|w?[dD]?[tT]?")
+TG_TIME_DEFAULT_FORMAT = "dt"
+_TG_TIME_MAX_UNIX = 253402300799          # 9999-12-31 — anything above is junk
+_PT_WEEKDAYS = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
+_PT_MONTHS = ("janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho",
+              "agosto", "setembro", "outubro", "novembro", "dezembro")
+# A whole element as written by us or by the model: <tg-time …>text</tg-time>
+# or the self-closing <tg-time …/> (we fill the text in).
+_TG_TIME_ELEMENT_RE = re.compile(
+    r"<tg-time\b([^<>]*?)(?:/\s*>|>([^<]*)</tg-time\s*>)", re.IGNORECASE)
+_TG_TIME_ATTR_RE = re.compile(
+    r"""([a-zA-Z_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+))""")
+# Placeholder that survives html.escape and every inline-markdown regex.
+_TG_TIME_SLOT_RE = re.compile("(\\d+)")
+
+
+def _tg_time_valid_format(fmt: str) -> bool:
+    return _TG_TIME_FORMAT_RE.fullmatch(fmt or "") is not None
+
+
+def _tg_time_plain(unix: int, fmt: str = TG_TIME_DEFAULT_FORMAT) -> str:
+    """Readable pt-BR text for ``unix`` in the bot host's timezone.
+
+    Used as the tag's own text (old clients, notifications, plain-text
+    fallback). ``r`` and an empty format fall back to date + time — an
+    absolute time stays correct no matter when the message is read.
+    """
+    lt = time.localtime(int(unix))
+    if not fmt or fmt == "r" or not _tg_time_valid_format(fmt):
+        fmt = TG_TIME_DEFAULT_FORMAT
+    parts: List[str] = []
+    if "w" in fmt:
+        parts.append(_PT_WEEKDAYS[lt.tm_wday])
+    if "D" in fmt:
+        parts.append(f"{lt.tm_mday} de {_PT_MONTHS[lt.tm_mon - 1]} de {lt.tm_year}")
+    elif "d" in fmt:
+        parts.append(time.strftime("%d/%m/%Y", lt))
+    clock = ""
+    if "T" in fmt:
+        clock = time.strftime("%H:%M:%S", lt)
+    elif "t" in fmt:
+        clock = time.strftime("%H:%M", lt)
+    head = ", ".join(parts)
+    return f"{head} {clock}".strip() if head else clock
+
+
+def tg_time(unix: float, fmt: str = TG_TIME_DEFAULT_FORMAT,
+            text: Optional[str] = None) -> str:
+    """Render ``unix`` as a Telegram date_time entity tag.
+
+    The result is valid in HTML parse mode AND in Rich Markdown/HTML, and our
+    Markdown→HTML converter, HTML sanitizer and rich escaper all keep it
+    intact. It can be embedded in the Markdown the bot passes to
+    ``send_message``. ``text`` overrides the fallback label (it is escaped).
+    An invalid ``fmt`` is logged and replaced by the default — never raises.
+    """
+    unix = int(unix)
+    if not _tg_time_valid_format(fmt):
+        logging.getLogger("claude-bot").warning(
+            "tg_time: invalid date_time format %r — using %r", fmt, TG_TIME_DEFAULT_FORMAT)
+        fmt = TG_TIME_DEFAULT_FORMAT
+    label = text if text else _tg_time_plain(unix, fmt)
+    attrs = f'unix="{unix}"' + (f' format="{fmt}"' if fmt else "")
+    return f"<tg-time {attrs}>{html.escape(label, quote=False)}</tg-time>"
+
+
+def _tg_time_parse_attrs(attrs: str) -> Optional[Tuple[int, str]]:
+    """``(unix, format)`` from a tag's attribute string, or None if unusable."""
+    found: Dict[str, str] = {}
+    for m in _TG_TIME_ATTR_RE.finditer(attrs or ""):
+        val = next((g for g in m.groups()[1:] if g is not None), "")
+        found[m.group(1).lower()] = val.strip()
+    raw = found.get("unix", "")
+    if not re.fullmatch(r"\d{1,12}", raw):
+        return None
+    unix = int(raw)
+    if unix > _TG_TIME_MAX_UNIX:
+        return None
+    fmt = found.get("format", "")
+    if not _tg_time_valid_format(fmt):
+        fmt = TG_TIME_DEFAULT_FORMAT
+    return unix, fmt
+
+
+def _tg_time_canonical(m: "re.Match") -> str:
+    """Rewrite one matched element as a clean tag; invalid ones become text."""
+    parsed = _tg_time_parse_attrs(m.group(1))
+    inner = html.unescape(m.group(2) or "").strip()
+    if parsed is None:
+        return html.escape(inner, quote=False)
+    unix, fmt = parsed
+    return tg_time(unix, fmt, text=inner or None)
+
+
+def _tg_time_stash(text: str) -> Tuple[str, List[str]]:
+    """Swap every <tg-time> element for a placeholder (so escaping and inline
+    Markdown regexes can't touch it); ``_tg_time_restore`` puts them back."""
+    slots: List[str] = []
+
+    def _take(m: "re.Match") -> str:
+        slots.append(_tg_time_canonical(m))
+        return f"{len(slots) - 1}"
+
+    if "<tg-time" not in text.lower():
+        return text, slots
+    return _TG_TIME_ELEMENT_RE.sub(_take, text), slots
+
+
+def _tg_time_restore(text: str, slots: List[str]) -> str:
+    if not slots:
+        return text
+    return _TG_TIME_SLOT_RE.sub(
+        lambda m: slots[int(m.group(1))] if int(m.group(1)) < len(slots) else "", text)
+
+
+def _tg_time_to_plain(text: str) -> str:
+    """Replace every <tg-time> element with its readable text (for paths that
+    can't carry the entity: MarkdownV2/legacy Markdown, tables, TTS)."""
+    if "<tg-time" not in text.lower():
+        return text
+
+    def _plain(m: "re.Match") -> str:
+        parsed = _tg_time_parse_attrs(m.group(1))
+        inner = html.unescape(m.group(2) or "").strip()
+        if inner or parsed is None:
+            return inner
+        return _tg_time_plain(*parsed)
+
+    return _TG_TIME_ELEMENT_RE.sub(_plain, text)
+
+
+def _local_unix_today(hhmm: str) -> Optional[int]:
+    """Unix time of ``HH:MM`` today in the bot host's timezone, or None."""
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", hhmm or "")
+    if not m or int(m.group(1)) > 23 or int(m.group(2)) > 59:
+        return None
+    lt = time.localtime()
+    return int(time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            int(m.group(1)), int(m.group(2)), 0, 0, 0, -1)))
+
+
 def _md2_escape(text: str) -> str:
     """Escape every MarkdownV2 reserved character in ``text``.
 
@@ -7234,6 +7400,7 @@ def _format_status_message(
     icon: str = "🔗",
     body: Optional[List[Tuple[str, str]]] = None,
     duration_seconds: Optional[int] = None,
+    started_at: Optional[float] = None,
 ) -> str:
     """Canonical user-facing status message for pipelines/routines.
 
@@ -7257,13 +7424,19 @@ def _format_status_message(
         icon: leading icon (agent icon if available, else neutral chain)
         body: list of (icon, text) shown one per line; None means just title
         duration_seconds: if set, appends a duration line at the end
+        started_at: epoch seconds; if set, appends a "🕐 Início" line rendered
+            as a Telegram date_time entity (reader's own timezone)
     """
     lines: List[str] = [f"*{icon} {title}*", ""]
     if body:
         for body_icon, body_text in body:
             lines.append(f"{body_icon} {body_text}")
-    if duration_seconds is not None:
+    if started_at:
         if body:
+            lines.append("")
+        lines.append(f"🕐 Início: {tg_time(started_at, 't')}")
+    if duration_seconds is not None:
+        if body and not started_at:
             lines.append("")
         d = max(0, int(duration_seconds))
         mins, secs = divmod(d, 60)
@@ -11507,6 +11680,7 @@ def _rich_escape_prose(line: str) -> str:
     highlight (``a == b``) and ``||…||`` a spoiler. A lone ``~`` (``~30s``) is
     GFM single-tilde strikethrough. URLs are left untouched.
     """
+    line, tg_slots = _tg_time_stash(line)
     out: List[str] = []
     table_row = line.lstrip().startswith("|")
     setext = bool(line.strip()) and set(line.strip()) == {"="}
@@ -11521,7 +11695,7 @@ def _rich_escape_prose(line: str) -> str:
         if not table_row:
             part = part.replace("||", "\\|\\|")
         out.append(part)
-    return "".join(out)
+    return _tg_time_restore("".join(out), tg_slots)
 
 
 # --- Buttons inside the answer (Bot API 10.3: RichBlockButtons) ---
@@ -13779,6 +13953,8 @@ class ClaudeTelegramBot:
         than the markdown it came from — measure THIS, not the raw text)."""
         if parse_mode == "HTML":
             return self._markdown_to_html(text)
+        # date_time entities exist only in HTML / rich; elsewhere show the text.
+        text = _tg_time_to_plain(text)
         if parse_mode == "MarkdownV2":
             return self._sanitize_markdown_v2(text)
         if parse_mode == "Markdown":
@@ -14458,7 +14634,9 @@ class ClaudeTelegramBot:
         - ~~text~~ → <s>
         - [text](url) → <a href>
         - # Heading → <b>
+        - <tg-time unix="…" format="…">…</tg-time> → kept as a date_time entity
         """
+        text, tg_slots = _tg_time_stash(text)
         text = html.escape(text)
         # Headings → bold. Allow leading whitespace (so an indented "  ## X"
         # doesn't leak the ##) and strip inline * emphasis from the heading text
@@ -14484,7 +14662,7 @@ class ClaudeTelegramBot:
         text = re.sub(r"~~(.+?)~~", r"<s>\1</s>", text)
         # Links (& already escaped to &amp; by html.escape — correct for href)
         text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", r'<a href="\2">\1</a>', text)
-        return text
+        return _tg_time_restore(text, tg_slots)
 
     @staticmethod
     def _strip_html_tags(text: str) -> str:
@@ -14499,7 +14677,7 @@ class ClaudeTelegramBot:
     # verbatim by _rebalance_html_chunks after a split.
     _TG_HTML_TAGS = {
         "b", "strong", "i", "em", "u", "ins", "s", "strike", "del",
-        "code", "pre", "a", "blockquote", "tg-spoiler", "span",
+        "code", "pre", "a", "blockquote", "tg-spoiler", "span", "tg-time",
     }
     _TG_TAG_RE = re.compile(r"<\s*(/?)\s*([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>")
 
@@ -14528,6 +14706,9 @@ class ClaudeTelegramBot:
             name = m.group(2).lower()
             if name not in ClaudeTelegramBot._TG_HTML_TAGS:
                 continue                      # drop unsupported tag entirely
+            if (name == "tg-time" and not closing
+                    and _tg_time_parse_attrs(m.group(3)) is None):
+                continue                      # no valid unix= — Telegram would 400; its close drops as stray
             if not closing:
                 if depth.get(name, 0) > 0:
                     depth[name] += 1          # redundant nested open — skip emit
@@ -14598,6 +14779,10 @@ class ClaudeTelegramBot:
         """
         _sep = ClaudeTelegramBot._TABLE_SEP_RE
         lines = text.split('\n')
+        # A table becomes a code block, where a <tg-time> tag would show raw —
+        # use its readable text instead (only on table lines).
+        if "<tg-time" in text.lower():
+            lines = [_tg_time_to_plain(ln) if '|' in ln else ln for ln in lines]
         result: List[str] = []
         i = 0
         while i < len(lines):
@@ -14909,6 +15094,8 @@ class ClaudeTelegramBot:
             idle_secs = time.time() - s.last_activity
             idle_display = f"{idle_secs / 3600:.1f}h" if idle_secs >= 3600 else f"{idle_secs / 60:.0f}m"
             lines.append(f"• Idle: {idle_display} (compact >{IDLE_COMPACT_HOURS}h, clear >{IDLE_CLEAR_HOURS}h)")
+            if s.last_activity:
+                lines.append(f"• Última atividade: {tg_time(s.last_activity, 'dt')}")
             _acw = os.environ.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW") or (
                 f"{AUTO_COMPACT_WINDOW // 1000}k" if AUTO_COMPACT_WINDOW else "padrão da CLI")
             lines.append(f"• Auto-compact: nativo da CLI (janela {_acw})")
@@ -14943,7 +15130,8 @@ class ClaudeTelegramBot:
             return "🫀 Scheduler: —"
         age = max(0.0, time.time() - last)
         warn = "⚠️ " if age > SCHEDULER_HEARTBEAT_STALE_SECS else ""
-        return f"🫀 Scheduler: {warn}último tick há {_format_duration(age)}"
+        return (f"🫀 Scheduler: {warn}último tick há {_format_duration(age)} "
+                f"({tg_time(last, 'T')})")
 
     def cmd_model_switch(self, model: str) -> None:
         if model not in MODEL_PROVIDERS and not model.startswith("gpt-"):
@@ -15274,7 +15462,8 @@ class ClaudeTelegramBot:
         lines = ["📋 *Sessões*\n"]
         for s in items:
             marker = " ◀️" if s.name == active else ""
-            lines.append(f"• `{s.name}` — {s.model}, {s.message_count} msgs{marker}")
+            seen = f" · {tg_time(s.last_activity, 'dt')}" if s.last_activity else ""
+            lines.append(f"• `{s.name}` — {s.model}, {s.message_count} msgs{seen}{marker}")
         self.send_message("\n".join(lines))
 
     def cmd_switch(self, name: str) -> None:
@@ -16979,10 +17168,18 @@ class ClaudeTelegramBot:
                 steps_info = r.get("steps", {})
                 total = len(steps_info) if steps_info else 0
                 done = sum(1 for s in steps_info.values() if s.get("status") in ("completed", "failed", "skipped")) if steps_info else 0
-                lines.append(f"- {icon} `{r['time']}` *{r['title']}* — pipeline {done}/{total} steps — {r['model']}")
+                lines.append(f"- {icon} {self._routine_time_label(r)} *{r['title']}* — pipeline {done}/{total} steps — {r['model']}")
             else:
-                lines.append(f"- {icon} `{r['time']}` *{r['title']}* — {r['model']}")
+                lines.append(f"- {icon} {self._routine_time_label(r)} *{r['title']}* — {r['model']}")
         self.send_message("\n".join(lines))
+
+    @staticmethod
+    def _routine_time_label(r: Dict[str, Any]) -> str:
+        """Today's ``HH:MM`` slot as a date_time entity (reader's timezone);
+        anything else (interval slots, unknown) stays as inline code."""
+        raw = str(r.get("time") or "")
+        unix = _local_unix_today(raw)
+        return tg_time(unix, "t") if unix is not None else f"`{raw}`"
 
     def _routine_status(self) -> None:
         routines = self.scheduler.list_today_routines()
@@ -16990,7 +17187,7 @@ class ClaudeTelegramBot:
             self.send_message("📊 Nenhuma rotina agendada para hoje.")
             return
         _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌", "skipped": "⏭"}
-        lines = [f"📊 *Rotinas — {time.strftime('%Y-%m-%d')}*\n"]
+        lines = [f"📊 *Rotinas — {tg_time(time.time(), 'wd')}*\n"]
         for r in routines:
             icon = _icons.get(r["status"], "⏰")
             extra = ""
@@ -16999,13 +17196,13 @@ class ClaudeTelegramBot:
             rtype = r.get("type", "routine")
             if rtype == "pipeline":
                 steps_info = r.get("steps", {})
-                lines.append(f"- {icon} `{r['time']}` *{r['title']}* (pipeline){extra}")
+                lines.append(f"- {icon} {self._routine_time_label(r)} *{r['title']}* (pipeline){extra}")
                 if steps_info:
                     for sid, sdata in steps_info.items():
                         si = _icons.get(sdata.get("status", "pending"), "⏰")
                         lines.append(f"    {si} {sid}")
             else:
-                lines.append(f"- {icon} `{r['time']}` *{r['title']}*{extra}")
+                lines.append(f"- {icon} {self._routine_time_label(r)} *{r['title']}*{extra}")
         self.send_message("\n".join(lines))
 
     def _routine_create(self, extra: str) -> None:
@@ -19227,6 +19424,8 @@ class ClaudeTelegramBot:
         # cleanup so the sentinel never reaches the macOS `say` synthesizer
         # (which would read the tags out loud).
         text = _strip_memory_context(text)
+        # A date_time tag would be read out loud — keep only its text.
+        text = _tg_time_to_plain(text)
         # Remove code blocks (triple backticks and content)
         text = re.sub(r"```[\s\S]*?```", "", text)
         # Remove inline code
@@ -20712,6 +20911,7 @@ class ClaudeTelegramBot:
                         title=f"Rotina: {task.name} — CANCELADA",
                         icon=f"🛑 {agent_icon}",
                         duration_seconds=int(time.time() - routine_start_time),
+                        started_at=routine_start_time,
                     ))
             elif effective_error:
                 # Error — restore checkpoint
@@ -20734,6 +20934,7 @@ class ClaudeTelegramBot:
                         icon=f"❌ {agent_icon}",
                         body=[("ℹ️", f"Erro: {effective_error[:200]}")],
                         duration_seconds=int(time.time() - routine_start_time),
+                        started_at=routine_start_time,
                     ))
                 _append_execution_report(
                     agent=task.agent, kind="routine", name=task.name,
@@ -20790,6 +20991,7 @@ class ClaudeTelegramBot:
                 icon=f"❌ {agent_icon}",
                 body=[("ℹ️", f"Erro: {str(exc)[:300]}")],
                 duration_seconds=int(time.time() - routine_start_time),
+                started_at=routine_start_time,
             )
             if progress_msg_id:
                 self.edit_message(progress_msg_id, failure_msg)
