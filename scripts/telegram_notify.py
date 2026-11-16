@@ -135,19 +135,39 @@ def _find_agent_file(agent_id: str) -> Path:
     )
 
 
+def _pair(chat_raw, thread_raw):
+    chat = str(chat_raw).strip() if chat_raw not in (None, "") else ""
+    if not chat or chat == "0":
+        return None
+    thread = None
+    if thread_raw not in (None, ""):
+        try:
+            thread = int(thread_raw)
+        except (TypeError, ValueError):
+            print(f"Warning: invalid thread id {thread_raw!r} — sending to the chat root",
+                  file=sys.stderr)
+    return chat, thread
+
+
 def resolve_agent_routing(agent_id: str) -> tuple:
-    """Return (chat_id: str, thread_id: int | None) from agent frontmatter."""
+    """Return (chat_id: str, thread_id: int | None) from agent frontmatter.
+
+    Same rule as the bot (agent_report_route): with AGENT_REPORT_TO=private
+    (default) the agent's topic in the owner's private chat
+    (private_chat_id + private_thread_id) wins; otherwise, or when the agent
+    has no private topic, its group topic (chat_id + thread_id)."""
     agent_file = _find_agent_file(agent_id)
     fm = _parse_frontmatter(agent_file)
 
-    chat_id = fm.get("chat_id") or fm.get("telegram_chat_id")
-    if not chat_id:
-        raise ValueError(f"No chat_id in {agent_file}")
-
-    thread_id_raw = fm.get("thread_id") or fm.get("telegram_thread_id")
-    thread_id = int(thread_id_raw) if thread_id_raw else None
-
-    return str(chat_id), thread_id
+    private = _pair(fm.get("private_chat_id"), fm.get("private_thread_id"))
+    group = _pair(fm.get("chat_id") or fm.get("telegram_chat_id"),
+                  fm.get("thread_id") or fm.get("telegram_thread_id"))
+    prefer = os.environ.get("AGENT_REPORT_TO", "private").strip().lower()
+    order = (group,) if prefer == "group" else (private, group)
+    for route in order:
+        if route:
+            return route
+    raise ValueError(f"No chat_id or private_chat_id in {agent_file}")
 
 
 def send_message(token: str, chat_id: str, text: str,

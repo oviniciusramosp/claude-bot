@@ -50,6 +50,10 @@ The detection is subtle: the CLI emits **`API Error: Usage credits required for 
 
 **Fail-loud behavior:** If a GLM model is requested but `ZAI_API_KEY` is not set, `ClaudeRunner` aborts before spawning the subprocess and surfaces a friendly error via Telegram — no silent failure. The `/model` inline keyboard hides the GLM row entirely when the key is missing.
 
+## Codex CLI provider — account default model (v3.90)
+
+The bot key **`gpt`** means "whatever model the ChatGPT account uses by default": `CodexRunner` passes no `--model` for `gpt` (nor the legacy `gpt-5`/`gpt-5-codex` keys), so no slug goes stale. Probed 2026-11-16 on codex-cli 0.169.0: `--model gpt-5` and `--model gpt-5.5` are both refused under ChatGPT OAuth ("not supported when using Codex with a ChatGPT account"); the account default (`model = "gpt-6.1-sol"` in `~/.codex/config.toml`) works. The display name is read from that config (`codex_default_model()`). `gpt` is the last entry of the default `MODEL_FALLBACK_CHAIN`; `get_fallback_model` skips it when `codex` isn't installed. Any other `gpt-*` is passed as an explicit `--model`.
+
 ## Codex CLI provider — known limitations (v3.44)
 
 | Area | Status | Note |

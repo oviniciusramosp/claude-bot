@@ -135,12 +135,24 @@ class RoutineDestination(_Base):
         self.bot._contexts[("", None)] = ctx
 
     def test_default_agent_prefers_forum_general_topic(self):
+        # Group mode (AGENT_REPORT_TO=group) — the pre-v3.90 default.
+        saved = self.m.AGENT_REPORT_TO
+        self.m.AGENT_REPORT_TO = "group"
+        self.addCleanup(setattr, self.m, "AGENT_REPORT_TO", saved)
         _write_agent(self.f.vault, "chef", chat_id=FORUM, thread_id=77)
         self.bot.primary_chat_ids.add(FORUM)
         self.bot._refresh_agent_chat_map()
         self._phantom_main_context()
         ctx = self.bot._find_context_for_routine(self.task)
         self.assertEqual((ctx.chat_id, ctx.thread_id), (FORUM, None))
+
+    def test_default_agent_goes_to_owner_private_chat_by_default(self):
+        _write_agent(self.f.vault, "chef", chat_id=FORUM, thread_id=77)
+        self.bot.primary_chat_ids.add(FORUM)
+        self.bot._refresh_agent_chat_map()
+        self._phantom_main_context()
+        ctx = self.bot._find_context_for_routine(self.task)
+        self.assertEqual((ctx.chat_id, ctx.thread_id), (PRIMARY, None))
 
     def test_falls_back_to_private_chat_never_empty(self):
         self._phantom_main_context()
