@@ -86,7 +86,8 @@ if _env_file.is_file() and (not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID):
                 os.environ.setdefault("CODEX_PATH", _v)
             elif _k == "PIPELINE_V2_ENABLED":
                 os.environ.setdefault("PIPELINE_V2_ENABLED", _v)
-            elif _k in ("RICH_MESSAGES", "NOTIFY_DONE_AFTER_SECONDS"):
+            elif _k in ("RICH_MESSAGES", "NOTIFY_DONE_AFTER_SECONDS",
+                        "LIVE_DRAFTS", "MESSAGE_EFFECTS", "MESSAGE_EFFECT_DONE"):
                 # Rich Messages kill switch + completion-notice threshold.
                 os.environ.setdefault(_k, _v)
             elif _k in ("DEFAULT_EFFORT", "MAX_CONTEXT",
@@ -1412,6 +1413,35 @@ except ValueError:
     BUSY_CHOICE_SECONDS = 10
     logging.getLogger("claude-bot").warning(
         "BUSY_CHOICE_SECONDS=%r is not a number — using the default 10s", _bcs_raw)
+
+# --- Live drafts (Bot API sendMessageDraft / sendRichMessageDraft) ---
+# Private chats only (chat_id > 0, incl. topics of the private chat): the
+# answer streams as a native draft — animated, with Telegram's own stop
+# button (can_stop) — instead of editing a "⏳ Processando…" placeholder. A
+# draft is an ephemeral ~30s preview, so it is refreshed at least every
+# LIVE_DRAFT_KEEPALIVE seconds and the final answer is always sent as a normal
+# new message. Groups keep the edit-the-placeholder path. LIVE_DRAFTS=false
+# disables it; the first "method unknown / not allowed here" answer from the
+# API trips a process-wide kill switch (_disable_drafts_runtime).
+LIVE_DRAFTS_ENABLED: bool = os.environ.get("LIVE_DRAFTS", "true").strip().lower() not in (
+    "false", "0", "off", "no")
+LIVE_DRAFT_INTERVAL = 1.5      # min seconds between content refreshes
+LIVE_DRAFT_KEEPALIVE = 20.0    # re-send (even unchanged) well inside the 30s window
+LIVE_DRAFT_STOPPED_MARK = "🛑 _Interrompido por você._"
+
+# --- Message effects (message_effect_id, private chats only) ---
+# core.telegram.org/bots/api documents the parameter ("for private chats
+# only") but publishes NO list of ids (checked 2026-11-15, Bot API 10.4).
+# The ids below are the six free effects Telegram clients offer in private
+# chats, as shared by the bot-developer community — not an official source.
+# So the id is an env-overridable constant, and the first "effect invalid"
+# answer disables effects for the process (_disable_effects_runtime) and the
+# message is re-sent without one (a 400 proves it was not delivered).
+#   🔥 5104841245755180586   👍 5107584321108051014   👎 5104858069142078462
+#   ❤️ 5159385139981059251   🎉 5046509860389126442   💩 5046589136895476101
+MESSAGE_EFFECTS_ENABLED: bool = os.environ.get("MESSAGE_EFFECTS", "true").strip().lower() not in (
+    "false", "0", "off", "no")
+EFFECT_ID_CELEBRATE = os.environ.get("MESSAGE_EFFECT_DONE", "5046509860389126442").strip()
 
 # ---------------------------------------------------------------------------
 # Manual pipeline review — web editor
@@ -8698,6 +8728,13 @@ class ThreadContext:
     _last_thinking_len: int = 0
     _last_tool_log_len: int = 0
     tts_enabled: bool = False
+    # Live drafts (private chats): non-zero while this turn streams as a
+    # native draft instead of a placeholder message (stream_msg_id stays None).
+    draft_id: int = 0
+    draft_stopped: bool = False        # user pressed Telegram's native stop
+    last_draft_time: float = 0.0
+    last_draft_len: int = 0            # answer chars shown in the last draft
+    last_draft_steps: int = 0          # reasoning steps shown (no answer yet)
     _auto_agent: Optional[str] = None  # agent ID set by auto-routing (None = manual or unset)
     _manual_override: bool = False  # True when user explicitly switched agent in this context
     last_username: Optional[str] = None  # most recent message sender's @handle/first_name (for audit footers)
@@ -11047,14 +11084,16 @@ class PipelineExecutor:
             sent_text = f"Pipeline *{self.task.title}*: {len(self.task.steps)}/{len(self.task.steps)} steps completed in {mins}m{secs}s"
             try:
                 self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
-                                      disable_notification=True)
+                                      disable_notification=True,
+                                      effect_id=EFFECT_ID_CELEBRATE)
             except Exception as exc:
                 logger.warning("Pipeline notify_success send failed: %s", exc)
         elif output_text:
             sent_text = output_text
             try:
                 self.bot.send_message(sent_text, chat_id=self.ctx.chat_id, thread_id=self.ctx.thread_id,
-                                      disable_notification=True)
+                                      disable_notification=True,
+                                      effect_id=EFFECT_ID_CELEBRATE)
             except Exception as exc:
                 logger.warning("Pipeline notify_success send failed: %s", exc)
 
@@ -11419,6 +11458,65 @@ def _disable_rich_runtime(reason: str, edits_only: bool = False) -> None:
     logging.getLogger("claude-bot").warning(
         "Rich Messages %s disabled until restart — falling back to HTML: %s",
         "edits" if edits_only else "(send + edit)", reason)
+
+
+# --- Live drafts + message effects: process-wide kill switches ---
+_DRAFTS_RUNTIME_OFF = False        # sendMessageDraft / sendRichMessageDraft
+_RICH_DRAFT_RUNTIME_OFF = False    # only the rich variant (plain drafts still OK)
+_EFFECTS_RUNTIME_OFF = False       # message_effect_id
+_DRAFT_STATE_LOCK = threading.Lock()
+
+# Answers that prove drafts can't be used here at all (vs. one bad request):
+# unknown method (older/self-hosted Bot API server), or "private chats only".
+_DRAFT_UNSUPPORTED_MARKERS = (
+    "method not found", "unknown method", "private chat",
+    "can't be used", "not supported", "not available", "unknown parameter",
+)
+
+
+def _disable_drafts_runtime(reason: str, rich_only: bool = False) -> None:
+    """Trip the live-drafts kill switch once, with a WARNING (never silent)."""
+    global _DRAFTS_RUNTIME_OFF, _RICH_DRAFT_RUNTIME_OFF
+    with _DRAFT_STATE_LOCK:
+        if rich_only:
+            if _RICH_DRAFT_RUNTIME_OFF or _DRAFTS_RUNTIME_OFF:
+                return
+            _RICH_DRAFT_RUNTIME_OFF = True
+        else:
+            if _DRAFTS_RUNTIME_OFF:
+                return
+            _DRAFTS_RUNTIME_OFF = True
+    logging.getLogger("claude-bot").warning(
+        "Live drafts %s disabled until restart — %s: %s",
+        "(rich variant)" if rich_only else "(all)",
+        "using plain drafts" if rich_only else "streaming by editing a placeholder message",
+        reason)
+
+
+def _disable_effects_runtime(reason: str) -> None:
+    """Trip the message-effect kill switch once, with a WARNING."""
+    global _EFFECTS_RUNTIME_OFF
+    with _DRAFT_STATE_LOCK:
+        if _EFFECTS_RUNTIME_OFF:
+            return
+        _EFFECTS_RUNTIME_OFF = True
+    logging.getLogger("claude-bot").warning(
+        "Message effects disabled until restart (sending without them): %s", reason)
+
+
+def _draft_result_unsupported(status: Optional[int], description: str) -> bool:
+    """True when a failed draft call says drafts aren't usable at all."""
+    if status == 404:
+        return True
+    desc = (description or "").lower()
+    if "thread" in desc:   # "message thread not found" is a topic problem, not the method
+        return False
+    return status == 400 and any(m in desc for m in _DRAFT_UNSUPPORTED_MARKERS)
+
+
+def _effect_rejected(status: Optional[int], description: str) -> bool:
+    """A 400 that blames the message effect (e.g. EFFECT_ID_INVALID)."""
+    return status == 400 and "effect" in (description or "").lower()
 
 
 def _rich_response_unsupported(resp: Optional[Dict]) -> bool:
@@ -12773,8 +12871,13 @@ class ClaudeTelegramBot:
     def _deliver_final_text(self, final_text: str, stream_msg: Optional[int],
                             copy_markup: Optional[Dict] = None,
                             chat_id: Optional[str] = None,
-                            thread_id: Optional[Any] = None) -> str:
+                            thread_id: Optional[Any] = None,
+                            reply_to_message_id: Optional[int] = None,
+                            effect_id: Optional[str] = None) -> str:
         """Deliver a final answer. Returns delivered | partial | unknown | failed.
+
+        ``reply_to_message_id``/``effect_id`` apply when the answer goes out as
+        a new message (live-draft turns have no placeholder to edit).
 
         Sets ``_tg_tls().final_by_edit`` when the answer landed by editing the
         placeholder — the one delivery Telegram doesn't notify (see
@@ -12803,7 +12906,8 @@ class ClaudeTelegramBot:
             first_line = final_text.split("\n", 1)[0][:200].strip()
             caption = f"{first_line}\n\n📎 _Resposta completa no arquivo anexo_"
             mid = self._send_as_document(final_text, filename="response.md", caption=caption,
-                                         chat_id=chat_id, thread_id=thread_id)
+                                         chat_id=chat_id, thread_id=thread_id,
+                                         reply_to_message_id=reply_to_message_id)
             res = self.tg_last_result()
             if mid:
                 status = "delivered"
@@ -12812,7 +12916,9 @@ class ClaudeTelegramBot:
         else:
             self._tg_tls().last_send = None
             mid = self.send_message(final_text, reply_markup=copy_markup,
-                                    chat_id=chat_id, thread_id=thread_id, rich=True)
+                                    chat_id=chat_id, thread_id=thread_id, rich=True,
+                                    reply_to_message_id=reply_to_message_id,
+                                    effect_id=effect_id)
             out = self._last_send_outcome()
             if out is None:  # send_message replaced (tests) — trust its return value
                 status = "delivered" if mid else "failed"
@@ -13508,7 +13614,8 @@ class ClaudeTelegramBot:
                      thread_id: Optional[str] = None,
                      reply_to_message_id: Optional[int] = None,
                      disable_notification: bool = False,
-                     rich: bool = False) -> Optional[int]:
+                     rich: bool = False,
+                     effect_id: Optional[str] = None) -> Optional[int]:
         """Send ``text`` (split into chunks if needed). Returns the last chunk's
         message_id, or None unless EVERY chunk was delivered. The per-chunk
         detail (delivered / failed / delivery unknown) is in
@@ -13525,11 +13632,15 @@ class ClaudeTelegramBot:
         # through to the HTML path below — except an ambiguous delivery, where
         # re-sending could duplicate the answer. The outcome is recorded like
         # any other send so delivery confirmation (_last_send_outcome) holds.
+        # Message effect (private chats only; None when off/not allowed here).
+        effect_id = self._effect_for_chat(chat_id if chat_id is not None else self._chat_id,
+                                          effect_id)
         if rich and self._rich_enabled(parse_mode):
             _rich_id = self._send_rich(text, chat_id=chat_id, thread_id=thread_id,
                                        reply_to_message_id=reply_to_message_id,
                                        reply_markup=reply_markup,
-                                       disable_notification=disable_notification)
+                                       disable_notification=disable_notification,
+                                       effect_id=effect_id)
             if _rich_id is _RICH_DELIVERY_UNKNOWN or _rich_id is not None:
                 outcome = _SendOutcome(total=1)
                 self._tg_tls().last_send = outcome
@@ -13571,9 +13682,20 @@ class ClaudeTelegramBot:
             data["link_preview_options"] = {"is_disabled": True}
             if disable_notification:
                 data["disable_notification"] = True
+            if effect_id and i == 0 and not _EFFECTS_RUNTIME_OFF:
+                data["message_effect_id"] = effect_id
             self._tg_set_last(None)
             resp = self.tg_request("sendMessage", data)
             res = self.tg_last_result()
+            if (not (resp and resp.get("ok")) and "message_effect_id" in data
+                    and res is not None and _effect_rejected(res.status, res.description)):
+                # A 400 proves the message was not delivered — safe to resend
+                # without the effect (and stop using effects this process).
+                _disable_effects_runtime(f"sendMessage HTTP 400: {res.description}")
+                data.pop("message_effect_id", None)
+                self._tg_set_last(None)
+                resp = self.tg_request("sendMessage", data)
+                res = self.tg_last_result()
             if not (resp and resp.get("ok")) and parse_mode and res is not None and res.parse_error:
                 # Strip formatting so the user sees clean text instead of raw
                 # HTML tags or MDv2 backslashes. Safe to resend: a 400 parse
@@ -13802,7 +13924,8 @@ class ClaudeTelegramBot:
                    thread_id: Optional[str] = None,
                    reply_to_message_id: Optional[int] = None,
                    reply_markup: Optional[Dict] = None,
-                   disable_notification: bool = False) -> Any:
+                   disable_notification: bool = False,
+                   effect_id: Optional[str] = None) -> Any:
         """sendRichMessage. Returns the message id, None to fall back to HTML,
         or ``_RICH_DELIVERY_UNKNOWN`` when a re-send could duplicate the answer."""
         rich_message = self._rich_payload(text)
@@ -13822,7 +13945,15 @@ class ClaudeTelegramBot:
             data["reply_markup"] = reply_markup
         if disable_notification:
             data["disable_notification"] = True
+        if effect_id and not _EFFECTS_RUNTIME_OFF:
+            data["message_effect_id"] = effect_id
         resp = self._rich_request("sendRichMessage", data)
+        if (not resp.get("ok") and "message_effect_id" in data
+                and _effect_rejected(resp.get("error_code"), str(resp.get("description") or ""))):
+            # 400 = not delivered: resend without the effect, once.
+            _disable_effects_runtime(f"sendRichMessage HTTP 400: {resp.get('description')}")
+            data.pop("message_effect_id", None)
+            resp = self._rich_request("sendRichMessage", data)
         if resp.get("ok"):
             msg_id = (resp.get("result") or {}).get("message_id")
             if msg_id:
@@ -13917,12 +14048,220 @@ class ClaudeTelegramBot:
         failed = bool(runner.error_text) or runner.exit_code not in (None, 0)
         label = "⚠️ Terminou com erro" if failed else "✅ Pronto"
         msg_id = self.send_message(f"{label} · {_format_duration(elapsed)}", parse_mode="",
-                                   reply_to_message_id=ctx.user_msg_id)
+                                   reply_to_message_id=ctx.user_msg_id,
+                                   effect_id=None if failed else EFFECT_ID_CELEBRATE)
         if not msg_id:
             logger.warning("Completion notice not delivered (chat=%s, thread=%s)",
                            ctx.chat_id, ctx.thread_id)
         return msg_id
     # --- end completion notice ---
+
+    # --- Message effects (private chats only) ---
+    def _effect_for_chat(self, chat_id: Any, effect_id: Optional[str]) -> Optional[str]:
+        """``effect_id`` when it may be used in ``chat_id``, else None.
+
+        Telegram accepts message_effect_id in private chats only; groups would
+        reject the whole message, so the effect is dropped there."""
+        if not effect_id or not MESSAGE_EFFECTS_ENABLED or _EFFECTS_RUNTIME_OFF:
+            return None
+        if chat_id is None or not _valid_chat_id(chat_id) or _tg_is_group_chat(chat_id):
+            return None
+        return effect_id
+    # --- end message effects ---
+
+    # --- Live drafts (private chats) ---
+    # Contract: a draft is a throwaway preview. It never replaces delivery —
+    # the final answer always goes out through _deliver_final_text as a new
+    # message — and a draft call is never waited on (droppable through the
+    # rate limiter, one attempt). Any "drafts not usable" answer trips the
+    # process kill switch and the turn continues on the placeholder path.
+
+    _draft_seq = 0
+    _draft_seq_lock = threading.Lock()
+
+    def _drafts_usable(self, ctx: Optional["ThreadContext"]) -> bool:
+        return bool(ctx and LIVE_DRAFTS_ENABLED and not _DRAFTS_RUNTIME_OFF
+                    and _valid_chat_id(ctx.chat_id) and not _tg_is_group_chat(ctx.chat_id))
+
+    @classmethod
+    def _next_draft_id(cls) -> int:
+        """Non-zero, unique per turn (fits a signed 32-bit int)."""
+        with cls._draft_seq_lock:
+            cls._draft_seq = (cls._draft_seq % 999_999) + 1
+            seq = cls._draft_seq
+        return (int(time.time()) % 2000) * 1_000_000 + seq
+
+    def _send_draft(self, ctx: "ThreadContext", text: str) -> str:
+        """One draft refresh. Returns ok | dropped | failed | unsupported.
+
+        Empty ``text`` shows Telegram's native "Thinking…" placeholder. Model
+        Markdown goes as sendRichMessageDraft while rich is usable, else as an
+        HTML sendMessageDraft (≤ 4096 chars)."""
+        try:
+            chat = int(ctx.chat_id)
+        except (TypeError, ValueError):
+            return "failed"
+        base: Dict[str, Any] = {"chat_id": chat, "draft_id": ctx.draft_id,
+                                "can_stop": True, "keep_on_stop": True}
+        if ctx.thread_id:
+            base["message_thread_id"] = ctx.thread_id
+        if text and self._rich_enabled() and not _RICH_DRAFT_RUNTIME_OFF:
+            payload = self._rich_payload(text)
+            if payload is not None:
+                res = self._tg_call("sendRichMessageDraft", dict(base, rich_message=payload),
+                                    timeout=15, attempts=1, droppable=True, log_name="draft")
+                if res.ok:
+                    return "ok"
+                if res.dropped:
+                    return "dropped"
+                if _draft_result_unsupported(res.status, res.description) or (
+                        res.status == 400 and _rich_response_unsupported(
+                            {"ok": False, "error_code": 400, "description": res.description})):
+                    _disable_drafts_runtime(
+                        f"sendRichMessageDraft HTTP {res.status}: {res.description}", rich_only=True)
+                else:
+                    logger.warning("Rich draft refused (%s) — this refresh goes as plain",
+                                   res.reason())
+                # fall through: the same refresh as a plain draft
+        data = dict(base)
+        if text:
+            clean = _strip_memory_context(text)
+            html = self._format_outgoing(clean, "HTML")
+            if len(html) <= 4096:
+                data["text"] = html
+                data["parse_mode"] = "HTML"
+            else:
+                data["text"] = _trim_preview_tail(clean, 3900)[-4096:]
+        else:
+            data["text"] = ""
+        res = self._tg_call("sendMessageDraft", data, timeout=15, attempts=1,
+                            droppable=True, log_name="draft")
+        if res.ok:
+            return "ok"
+        if res.dropped:
+            return "dropped"
+        if _draft_result_unsupported(res.status, res.description):
+            _disable_drafts_runtime(f"sendMessageDraft HTTP {res.status}: {res.description}")
+            return "unsupported"
+        if res.parse_error and "parse_mode" in data:
+            data.pop("parse_mode", None)
+            data["text"] = self._plain_fallback_text(data["text"], "HTML")
+            res = self._tg_call("sendMessageDraft", data, timeout=15, attempts=1,
+                                droppable=True, log_name="draft")
+            if res.ok:
+                return "ok"
+        return "failed"
+
+    def _start_draft_turn(self, ctx: "ThreadContext") -> bool:
+        """Open this turn's draft ("Thinking…"). False → use the placeholder."""
+        ctx.draft_id = self._next_draft_id()
+        ctx.draft_stopped = False
+        ctx.last_draft_len = 0
+        ctx.last_draft_steps = 0
+        ctx.last_draft_time = time.time()
+        status = self._send_draft(ctx, "")
+        if status in ("ok", "dropped"):
+            logger.info("Live draft %s opened (chat=%s, thread=%s)",
+                        ctx.draft_id, ctx.chat_id, ctx.thread_id)
+            return True
+        if status == "failed":
+            res = self.tg_last_result()
+            logger.warning("Live draft could not open in chat %s (%s) — using the placeholder "
+                           "for this answer", ctx.chat_id, res.reason() if res else "no result")
+        ctx.draft_id = 0
+        return False
+
+    def _send_stream_placeholder(self, ctx: "ThreadContext") -> Optional[int]:
+        """The edit-path "⏳ Processando…" message (groups, or drafts off)."""
+        reasoning_markup = {"inline_keyboard": [[
+            {"text": "🧠 Reasoning", "callback_data": "reasoning:toggle"},
+            {"text": "🛑 Stop", "callback_data": "reasoning:stop"},
+        ]]}
+        ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
+                                               reply_to_message_id=ctx.user_msg_id,
+                                               reply_markup=reasoning_markup)
+        if ctx.stream_msg_id:
+            self._active_msgs.register(ctx.stream_msg_id, ctx.chat_id,
+                                       ctx.thread_id, "stream", "interactive")
+            self._reasoning_toggles[ctx.stream_msg_id] = False
+        return ctx.stream_msg_id
+
+    def _build_draft_display(self, snapshot: str, runner: Any) -> Tuple[str, int]:
+        """Draft text + the number of reasoning steps it shows.
+
+        The answer alone once it starts (Telegram animates the growth);
+        before that, the reasoning timeline as a plain quote so the user sees
+        what the model is doing; "" (native "Thinking…") when there's nothing."""
+        rich = self._rich_enabled() and not _RICH_DRAFT_RUNTIME_OFF
+        cap = STREAM_PREVIEW_MAX_RICH if rich else MAX_MESSAGE_LENGTH - 300
+        if snapshot:
+            return _trim_preview_tail(snapshot, cap), 0
+        getter = getattr(runner, "get_reasoning_entries", None)
+        entries = getter() if callable(getter) else []
+        if not entries:
+            return "", 0
+        panel = _render_reasoning_panel(entries, REASONING_PANEL_CHARS_HTML)
+        if not panel:
+            return "", len(entries)
+        quoted = "\n".join(f"> {line}" for line in panel.split("\n"))
+        return f"> 🧠 Raciocínio\n{quoted}", len(entries)
+
+    def _stream_draft_tick(self, ctx: "ThreadContext", runner: Any, now: float) -> None:
+        """One _stream_updates step on the draft path."""
+        if ctx.draft_stopped:
+            return
+        snapshot = runner.get_snapshot()
+        since = now - ctx.last_draft_time
+        text, steps = self._build_draft_display(snapshot, runner)
+        changed = (len(snapshot) > ctx.last_draft_len
+                   or (not snapshot and steps > ctx.last_draft_steps))
+        if not ((changed and since >= LIVE_DRAFT_INTERVAL) or since >= LIVE_DRAFT_KEEPALIVE):
+            return
+        status = self._send_draft(ctx, text)
+        ctx.last_draft_time = now  # also on failure: never hammer a failing call
+        if status == "ok":
+            ctx.last_draft_len = len(snapshot)
+            ctx.last_draft_steps = steps
+        elif status == "unsupported":
+            # Kill switch tripped mid-answer: continue on the placeholder path.
+            ctx.draft_id = 0
+            self._send_stream_placeholder(ctx)
+
+    def _handle_generation_stopped(self, payload: Dict) -> None:
+        """``stopped_message_generation``: the user pressed the native stop on
+        a draft. Cancel that chat/topic's running turn exactly like /stop; the
+        partial answer is then delivered (marked as interrupted) by
+        _finalize_response."""
+        chat_id = str((payload.get("chat") or {}).get("id", ""))
+        thread_id = payload.get("message_thread_id")
+        draft_id = payload.get("draft_id")
+        if not self._is_authorized(chat_id):
+            logger.info("Draft stop from unauthorized chat %r ignored", chat_id)
+            return
+        ctx = self._contexts.get((chat_id, thread_id))
+        if ctx is None or not draft_id or ctx.draft_id != draft_id:
+            ctx = next((c for (cid, _t), c in list(self._contexts.items())
+                        if cid == chat_id and draft_id and c.draft_id == draft_id), None)
+        if ctx is None:
+            logger.info("Draft stop for chat %s draft %s: no turn is streaming it (already over)",
+                        chat_id, draft_id)
+            return
+        runner = ctx.runner
+        if runner is None or not getattr(runner, "running", False):
+            logger.info("Draft stop for chat %s draft %s: the turn already finished",
+                        chat_id, draft_id)
+            return
+        ctx.draft_stopped = True
+        logger.info("Native stop pressed — cancelling turn in chat %s thread %s (draft %s)",
+                    chat_id, thread_id, draft_id)
+        try:
+            runner.cancel()
+        except Exception as exc:
+            logger.error("Native stop: cancelling the turn in chat %s failed: %s",
+                         chat_id, exc, exc_info=True)
+            self.send_message("⚠️ Não consegui parar a resposta. Tente /stop.",
+                              chat_id=chat_id, thread_id=thread_id)
+    # --- end live drafts ---
 
     def delete_message(self, message_id: int, chat_id: Optional[str] = None) -> bool:
         if chat_id is None:
@@ -19641,17 +19980,13 @@ class ClaudeTelegramBot:
             self.sessions.save()
         if not _retry and not routine_mode:
             if ctx:
-                reasoning_markup = {"inline_keyboard": [[
-                    {"text": "🧠 Reasoning", "callback_data": "reasoning:toggle"},
-                    {"text": "🛑 Stop", "callback_data": "reasoning:stop"},
-                ]]}
-                ctx.stream_msg_id = self.send_message("⏳ _Processando..._",
-                                                       reply_to_message_id=ctx.user_msg_id,
-                                                       reply_markup=reasoning_markup)
-                if ctx.stream_msg_id:
-                    self._active_msgs.register(ctx.stream_msg_id, ctx.chat_id,
-                                               ctx.thread_id, "stream", "interactive")
-                    self._reasoning_toggles[ctx.stream_msg_id] = False
+                # Private chats stream as a native draft (no placeholder
+                # message); groups — or drafts unavailable — use the
+                # edit-the-placeholder path.
+                ctx.draft_id = 0
+                ctx.draft_stopped = False
+                if not (self._drafts_usable(ctx) and self._start_draft_turn(ctx)):
+                    self._send_stream_placeholder(ctx)
 
         # Start watchdog thread — capture chat context NOW so timeout messages
         # go to the right chat even if self._ctx shifts while the thread runs.
@@ -20003,6 +20338,10 @@ class ClaudeTelegramBot:
                     ctx.last_typing_time = now
                 self._update_reaction(runner)
 
+            if ctx and ctx.draft_id and not ctx.stream_msg_id and not routine_mode:
+                self._stream_draft_tick(ctx, runner, now)
+                continue
+
             stream_msg = ctx.stream_msg_id if ctx else None
             if stream_msg and not routine_mode:
                 snapshot = runner.get_snapshot()
@@ -20137,6 +20476,12 @@ class ClaudeTelegramBot:
                            "(expirado ou gravado em outra pasta) — este turno começou "
                            "com contexto novo._")
 
+        # Native stop on a live draft: the partial answer is kept, marked.
+        draft_turn = bool(ctx and ctx.draft_id and not routine_mode)
+        if (draft_turn and ctx.draft_stopped
+                and (runner.result_text or runner.accumulated_text)):
+            final_text = final_text.rstrip() + "\n\n" + LIVE_DRAFT_STOPPED_MARK
+
         if runner.cost_usd > 0:
             final_text += f"\n\n💰 Custo: ${runner.cost_usd:.4f} (total: ${runner.total_cost_usd:.4f})"
             _track_cost(runner.cost_usd, model=session.model)
@@ -20186,8 +20531,22 @@ class ClaudeTelegramBot:
         else:
             final_chat = ctx.chat_id if ctx else None
             final_thread = ctx.thread_id if ctx else None
+            draft_kw: Dict[str, Any] = {}
+            if draft_turn and not stream_msg:
+                # Live draft: the answer is a new message, so reply to the
+                # user's message like the placeholder did. A long, successful
+                # turn gets the celebration effect — the draft-path stand-in
+                # for the "✅ Pronto" notice (new messages notify on their own).
+                draft_kw["reply_to_message_id"] = ctx.user_msg_id
+                started = getattr(runner, "start_time", 0.0) or 0.0
+                ok = (not runner.error_text and runner.exit_code in (None, 0)
+                      and not ctx.draft_stopped)
+                if (ok and started and NOTIFY_DONE_AFTER_SECONDS > 0
+                        and time.time() - started >= NOTIFY_DONE_AFTER_SECONDS):
+                    draft_kw["effect_id"] = EFFECT_ID_CELEBRATE
             status = self._deliver_final_text(final_text, stream_msg, copy_markup,
-                                              chat_id=final_chat, thread_id=final_thread)
+                                              chat_id=final_chat, thread_id=final_thread,
+                                              **draft_kw)
             if status != "delivered":
                 delivery_settled = self._handle_undelivered_final(
                     status, final_text, stream_msg, copy_markup, final_chat, final_thread)
@@ -20252,6 +20611,8 @@ class ClaudeTelegramBot:
 
         if ctx:
             ctx.stream_msg_id = None
+            ctx.draft_id = 0
+            ctx.draft_stopped = False
             ctx._last_thinking_len = 0
             ctx._last_tool_log_len = 0
             if ctx.user_msg_id:
@@ -21448,7 +21809,7 @@ class ClaudeTelegramBot:
         data = {
             "offset": self._update_offset,
             "timeout": 30,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": ["message", "callback_query", "stopped_message_generation"],
         }
         self._tg_set_last(None)
         resp = self.tg_request("getUpdates", data, timeout=45)
@@ -22090,6 +22451,14 @@ class ClaudeTelegramBot:
                         self._update_offset = uid + 1
                         self._save_offset(self._update_offset)
                     try:
+                        if "stopped_message_generation" in update:
+                            # Native stop on a live draft. No "message" → it
+                            # must not reach the chat-auth/context code below.
+                            threading.Thread(
+                                target=self._handle_generation_stopped,
+                                args=(update["stopped_message_generation"] or {},),
+                                daemon=True).start()
+                            continue
                         msg = update.get("message", {})
                         # Skip individual updates belonging to an instant album batch
                         if msg.get("media_group_id") in _instant_groups:
