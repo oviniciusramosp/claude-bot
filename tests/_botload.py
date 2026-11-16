@@ -66,6 +66,10 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     # features flip the module constants per case (tests/test_rich_messages.py).
     os.environ["RICH_MESSAGES"] = "false"
     os.environ["NOTIFY_DONE_AFTER_SECONDS"] = "0"
+    # Live drafts (private chats) go through _tg_call, not tg_request; a fake
+    # private-chat turn would otherwise try a real draft call. Message effects
+    # stay on (they only add a field). tests/test_live_drafts.py flips it.
+    os.environ["LIVE_DRAFTS"] = "false"
 
     spec = importlib.util.spec_from_file_location("bot_under_test", str(BOT_FILE))
     if spec is None or spec.loader is None:
