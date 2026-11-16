@@ -4815,6 +4815,10 @@ def _track_cost(cost_usd: float, model: Optional[str] = None) -> None:
         p["total"] = round(p["total"] + cost_usd, 6)
         p_day = p["days"].setdefault(today, 0.0)
         p["days"][today] = round(p_day + cost_usd, 6)
+        # Per-model totals (the /cost widget panel lists models).
+        if model:
+            models = week.setdefault("models", {})
+            models[model] = round(models.get(model, 0.0) + cost_usd, 6)
         data["current_week"] = week_key
         # Prune old weeks (keep last 4)
         weeks = sorted(data["weeks"].keys())
@@ -4852,6 +4856,46 @@ def get_weekly_cost(provider: Optional[str] = None) -> dict:
         }
     except Exception:
         return {"week": "", "total": 0.0, "today": 0.0}
+
+
+def get_weekly_cost_breakdown() -> dict:
+    """Current ISO week, broken down for the /cost panel.
+
+    Returns ``{"week", "total", "today", "days": [7 floats, Mon..Sun],
+    "providers": {name: total}, "models": {name: total}, "error"}``.
+    Weeks recorded before per-provider tracking count as all-anthropic;
+    weeks before per-model tracking have an empty ``models``. A file that
+    cannot be read comes back as zeros with ``error`` set (never raises), so
+    the caller can tell the user instead of showing a silent $0.00.
+    """
+    week_key = time.strftime("%G-W%V")
+    out = {"week": week_key, "total": 0.0, "today": 0.0, "days": [0.0] * 7,
+           "providers": {}, "models": {}, "error": ""}
+    try:
+        if not COSTS_FILE.exists():
+            return out
+        data = json.loads(COSTS_FILE.read_text(encoding="utf-8"))
+        week = data.get("weeks", {}).get(week_key, {}) or {}
+        days = week.get("days", {}) or {}
+        out["total"] = float(week.get("total", 0.0) or 0.0)
+        out["today"] = float(days.get(time.strftime("%Y-%m-%d"), 0.0) or 0.0)
+        for day, val in days.items():
+            try:
+                idx = time.strptime(day, "%Y-%m-%d").tm_wday
+            except ValueError:
+                continue
+            out["days"][idx] = float(val or 0.0)
+        providers = week.get("providers")
+        if providers:
+            out["providers"] = {k: float((v or {}).get("total", 0.0) or 0.0)
+                                for k, v in providers.items()}
+        elif out["total"]:
+            out["providers"] = {"anthropic": out["total"]}
+        out["models"] = {k: float(v or 0.0) for k, v in (week.get("models") or {}).items()}
+    except Exception as exc:
+        logger.error("get_weekly_cost_breakdown: could not read %s: %s", COSTS_FILE, exc)
+        out["error"] = str(exc)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -11431,6 +11475,214 @@ def _rich_response_unsupported(resp: Optional[Dict]) -> bool:
     return any(marker in desc for marker in _RICH_UNSUPPORTED_MARKERS)
 
 
+# --- HTML widgets (Bot API 10.4, 2026-11-09) ---
+# A widget is one self-contained HTML document drawn inside the message bubble
+# and run in Telegram's offline QuickJS sandbox (core.telegram.org/bots/widgets).
+# The HTML is fixed once sent; only its state changes: ``chat_data`` (this
+# message) and ``public_data`` (shared), each ≤1024 bytes, written by the bot
+# with editMessageWidgetData. A widget sent with allow_queries can ask the bot
+# with TelegramWidget.request(data ≤64 bytes) → ``widget_query`` update →
+# answerWidgetQuery (≤1024 bytes, within 15 s). In production widgets work
+# ONLY in private chats with the bot (topics included via message_thread_id),
+# so every caller passes a plain-text fallback for groups. TELEGRAM_WIDGETS=
+# false/0/off disables them; the process-wide kill switch below trips (once,
+# WARNING) when the server says the method does not exist.
+WIDGETS_ENABLED: bool = os.environ.get("TELEGRAM_WIDGETS", "true").strip().lower() not in (
+    "false", "0", "off", "no")
+WIDGET_HTML_MAX_BYTES = 32768        # "HTML code of the widget, 1-32768 bytes"
+WIDGET_HTML_MAX_COMPRESSED = 4096    # "must not exceed 4096 bytes when compressed by zlib" (level 9)
+WIDGET_DATA_MAX_BYTES = 1024         # public_data / chat_data / answerWidgetQuery data
+WIDGET_CAPTION_MAX_CHARS = 1024      # "0-1024 characters after entities parsing"
+
+_WIDGET_RUNTIME_OFF = False
+_WIDGET_STATE_LOCK = threading.Lock()
+
+# Telegram answers that prove the server does not know widgets at all (an
+# older or self-hosted Bot API server), as opposed to a problem with one
+# widget (INPUT_MEDIA_WIDGET_TOO_LARGE, …_HTML_INVALID, …_DATA_TOO_LARGE).
+_WIDGET_UNSUPPORTED_MARKERS = ("method not found", "unknown method", "not implemented")
+
+
+class WidgetSendResult(tuple):
+    """``(message_id, widget, reason)`` — ``widget`` is True only when the
+    widget itself was delivered; ``message_id`` is the widget's or the
+    fallback text's id (None when nothing was confirmed delivered)."""
+
+    __slots__ = ()
+
+    def __new__(cls, message_id: Optional[int], widget: bool, reason: str = ""):
+        return tuple.__new__(cls, (message_id, widget, reason))
+
+    message_id = property(lambda self: self[0])
+    widget = property(lambda self: self[1])
+    reason = property(lambda self: self[2])
+
+
+def _disable_widget_runtime(reason: str) -> None:
+    """Trip the widgets kill switch once, with a WARNING (never silent)."""
+    global _WIDGET_RUNTIME_OFF
+    with _WIDGET_STATE_LOCK:
+        if _WIDGET_RUNTIME_OFF:
+            return
+        _WIDGET_RUNTIME_OFF = True
+    logging.getLogger("claude-bot").warning(
+        "Telegram widgets disabled until restart — falling back to text: %s", reason)
+
+
+def _widget_response_unsupported(resp: Optional[Dict]) -> bool:
+    """True when a Telegram error says the server doesn't understand widgets."""
+    if not resp or resp.get("ok"):
+        return False
+    if resp.get("error_code") == 404:
+        return True
+    desc = str(resp.get("description") or "").lower()
+    return any(marker in desc for marker in _WIDGET_UNSUPPORTED_MARKERS)
+
+
+def _widget_html_problem(html_code: Any) -> Optional[str]:
+    """Why Telegram would refuse this widget HTML, or None when it fits.
+
+    Counts exactly like the server: UTF-8 bytes, then ``zlib.compress(…, 9)``
+    (the widgets guide says Python's zlib matches the server byte for byte).
+    """
+    import zlib
+    if not isinstance(html_code, str) or not html_code:
+        return "HTML vazio"
+    if "\x00" in html_code:
+        return "HTML contém o caractere NUL"
+    raw = html_code.encode("utf-8")
+    if len(raw) > WIDGET_HTML_MAX_BYTES:
+        return f"HTML com {len(raw)} bytes (máximo {WIDGET_HTML_MAX_BYTES})"
+    packed = len(zlib.compress(raw, 9))
+    if packed > WIDGET_HTML_MAX_COMPRESSED:
+        return f"HTML com {packed} bytes comprimido (máximo {WIDGET_HTML_MAX_COMPRESSED})"
+    return None
+
+
+def _widget_encode_data(data: Any) -> Optional[str]:
+    """Widget state as the API wants it: a string (dict/list → compact JSON)."""
+    if data is None:
+        return None
+    if isinstance(data, str):
+        return data
+    return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+
+def _widget_data_problem(data: Optional[str]) -> Optional[str]:
+    """Why Telegram would refuse this chat_data/public_data/answer, or None."""
+    if data is None:
+        return None
+    if "\x00" in data:
+        return "dados contêm o caractere NUL"
+    size = len(data.encode("utf-8"))
+    if size > WIDGET_DATA_MAX_BYTES:
+        return f"dados com {size} bytes (máximo {WIDGET_DATA_MAX_BYTES})"
+    return None
+
+
+def _widget_fit_rows(build, rows: List[Any], limit: int = WIDGET_DATA_MAX_BYTES) -> str:
+    """Encode ``build(rows, hidden)`` dropping rows from the end until it fits
+    ``limit`` bytes. ``hidden`` is how many rows were dropped, so the widget
+    can say "+N outras" instead of losing them silently."""
+    rows = list(rows)
+    hidden = 0
+    while True:
+        encoded = _widget_encode_data(build(rows, hidden)) or ""
+        if len(encoded.encode("utf-8")) <= limit or not rows:
+            return encoded
+        rows.pop()
+        hidden += 1
+
+
+def _widget_money(value: float) -> str:
+    """US$ amount the PT-BR way (comma decimals) — same format as the panel."""
+    return "US$ " + f"{float(value or 0.0):.2f}".replace(".", ",")
+
+
+_WIDGET_PROVIDER_NAMES = {"anthropic": "Anthropic", "openai": "OpenAI"}
+
+# Routine status → index into the widget's label/icon arrays.
+_WIDGET_ROUTINE_STATUS = {"pending": 0, "running": 1, "completed": 2, "failed": 3, "skipped": 4}
+
+# The two built-in panels. Kept free of comments and dead code: the server
+# counts the zlib-compressed size (≤4096 bytes) and tests pin both under it.
+# Colors come only from the --tg-theme-* variables the client injects, so the
+# panels follow the chat's light/dark theme live. Each panel draws its first
+# frame synchronously from TelegramWidget.chatData (JSON written by the bot).
+COST_WIDGET_HTML = """<style>
+body{margin:0;padding:10px 14px 12px;font-variant-numeric:tabular-nums}
+.h{color:var(--tg-theme-hint-color);font-size:.8em}
+.big{font-size:1.9em;font-weight:700;line-height:1.15;margin:2px 0}
+.ch{display:flex;align-items:flex-end;gap:6px;height:64px;margin:10px 0 2px}
+.c{flex:1;height:100%;display:flex;align-items:flex-end}
+.b{width:100%;border-radius:3px 3px 0 0;background:var(--tg-theme-button-color)}
+.b.z{background:var(--tg-theme-section-separator-color)}
+.c.t .b{background:var(--tg-theme-accent-text-color)}
+.l{display:flex;gap:6px;color:var(--tg-theme-hint-color);font-size:.75em}
+.l span{flex:1;text-align:center}
+.l .t{color:var(--tg-theme-accent-text-color);font-weight:600}
+h4{margin:12px 0 2px;font-size:.85em;color:var(--tg-theme-section-header-text-color)}
+.r{padding:4px 0;border-top:1px solid var(--tg-theme-section-separator-color)}
+.n{display:flex;justify-content:space-between;gap:8px}
+.n span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.k{height:3px;border-radius:2px;margin-top:3px;background:var(--tg-theme-link-color)}
+</style>
+<div class="h" id="w">Custo da semana</div><div class="big" id="t">…</div><div class="h" id="d"></div>
+<div class="ch" id="ch"></div><div class="l" id="l"></div><div id="x"></div>
+<script>
+const W=window.TelegramWidget,$=i=>document.getElementById(i);
+const f=v=>'US$ '+(+v||0).toFixed(2).replace('.',',');
+const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function draw(){let s=null;try{s=JSON.parse(W&&W.chatData)}catch(e){}
+if(!s){$('t').textContent='Sem dados';return}
+$('w').textContent='Custo da semana · '+s.w;$('t').textContent=f(s.t);
+$('d').textContent='Hoje: '+f(s.d)+(s.u?' · atualizado às '+s.u:'');
+const d=s.days||[],mx=Math.max(...d,1e-4);
+$('ch').innerHTML=d.map((v,i)=>'<div class="c'+(i===s.td?' t':'')+'"><div class="b'+(v>0?'':' z')+'" style="height:'+Math.max(3,Math.round(v/mx*100))+'%"></div></div>').join('');
+$('l').innerHTML=['S','T','Q','Q','S','S','D'].map((c,i)=>'<span'+(i===s.td?' class="t"':'')+'>'+c+'</span>').join('');
+let h='';for(const[k,t]of[['p','Por provedor'],['m','Por modelo']]){const a=s[k]||[];if(!a.length)continue;const top=Math.max(...a.map(x=>x[1]),1e-4);
+h+='<h4>'+t+'</h4>'+a.map(x=>'<div class="r"><div class="n"><span>'+esc(x[0])+'</span><b>'+f(x[1])+'</b></div><div class="k" style="width:'+Math.max(2,Math.round(x[1]/top*100))+'%"></div></div>').join('')}
+if(s.mx)h+='<div class="h">+'+s.mx+' outros modelos</div>';$('x').innerHTML=h}
+if(W)W.onEvent('chatDataChanged',draw);draw();
+</script>"""
+
+ROUTINES_WIDGET_HTML = """<style>
+body{margin:0;padding:10px 14px 12px}
+.top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.ttl{font-weight:700}
+.h{color:var(--tg-theme-hint-color);font-size:.8em}
+.sum{display:flex;flex-wrap:wrap;gap:4px 12px;margin:6px 0 4px;font-size:.85em}
+.row{display:flex;align-items:center;gap:10px;padding:5px 0;border-top:1px solid var(--tg-theme-section-separator-color)}
+.tm{font-variant-numeric:tabular-nums;color:var(--tg-theme-hint-color);font-size:.85em;min-width:2.8em}
+.nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.st{font-size:.8em;white-space:nowrap}
+.s0{color:var(--tg-theme-hint-color)}.s1{color:var(--tg-theme-link-color)}.s2{color:var(--tg-theme-accent-text-color)}.s3{color:var(--tg-theme-destructive-text-color)}.s4{color:var(--tg-theme-subtitle-text-color)}
+button{width:100%;margin-top:8px}
+</style>
+<div class="top"><span class="ttl">Rotinas de hoje</span><span class="h" id="u"></span></div>
+<div class="sum" id="sum"></div><div id="list"></div>
+<button id="btn">Atualizar</button><div class="h" id="msg"></div>
+<script>
+const W=window.TelegramWidget,$=i=>document.getElementById(i);
+const L=['Agendada','Rodando','Concluída','Falhou','Pulada'],I=['⏰','🔄','✅','❌','⏭'],P=[['agendada','agendadas'],['rodando','rodando'],['concluída','concluídas'],['com falha','com falha'],['pulada','puladas']];
+const E={NOT_ALLOWED:'Só dá para atualizar no chat privado com o bot',BUSY:'Já estou atualizando',RATE_LIMITED:'Muitos pedidos, tente de novo em alguns segundos',TIMEOUT:'O bot não respondeu a tempo',FAILED:'Não consegui falar com o bot',INVALID_ANSWER:'O bot mandou uma resposta inválida'};
+const esc=t=>String(t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const parse=t=>{try{return JSON.parse(t)}catch(e){return null}};
+let cur=null;
+function draw(s){if(s&&s.r){if(cur&&(s.v||0)<(cur.v||0))return;cur=s}s=cur;
+if(!s){$('list').innerHTML='<div class="h">Sem dados</div>';return}
+$('u').textContent=(s.d?s.d+' · ':'')+'atualizado às '+s.u;
+const r=s.r,c=[0,0,0,0,0];r.forEach(x=>c[x[2]]++);
+$('sum').innerHTML=c.map((n,i)=>n?'<span class="s'+i+'">'+I[i]+' '+n+' '+P[i][n>1?1:0]+'</span>':'').join('');
+$('list').innerHTML=(r.length?r.map(x=>'<div class="row"><span class="tm">'+esc(x[0])+'</span><span class="nm">'+esc(x[1])+(x[3]?' <span class="h">pipeline</span>':'')+'</span><span class="st s'+x[2]+'">'+I[x[2]]+' '+L[x[2]]+'</span></div>').join(''):'<div class="h">Nenhuma rotina para hoje</div>')+(s.x?'<div class="h">+'+s.x+' outras</div>':'')}
+function ask(tap){if(!W||typeof W.request!=='function')return;if(tap)$('msg').textContent='Atualizando…';
+const no=e=>{if(tap)$('msg').textContent=E[e&&e.code]||'Não consegui atualizar'};
+try{W.request('rt').then(a=>{const s=parse(a&&a.result);if(s&&s.e){if(tap)$('msg').textContent=s.e;return}draw(s);$('msg').textContent=''},no)}catch(e){no(e)}}
+$('btn').onclick=()=>ask(1);
+if(W){W.onEvent('chatDataChanged',()=>draw(parse(W.chatData)));draw(parse(W.chatData));ask(0);setInterval(()=>{if(W.isActive)ask(0)},60000)}else draw(null);
+</script>"""
+
+
 def _rich_escape_prose(line: str) -> str:
     """Neutralize rich-Markdown syntax that plain model prose triggers by accident.
 
@@ -15767,8 +16019,321 @@ class ClaudeTelegramBot:
         except Exception as exc:
             logger.error("Hot cache refresh failed for agent %s: %s", agent_id, exc)
 
-    def cmd_cost(self) -> None:
-        self._run_claude_prompt("/cost")
+    # -- HTML widgets (Bot API 10.4) --------------------------------------
+
+    def _widget_request(self, method: str, data: Dict[str, Any],
+                        timeout: int = 30) -> Dict[str, Any]:
+        """One widget Bot API call, Telegram's JSON body always returned.
+
+        Same single-shot transport as rich messages (keeps the error
+        ``description``, never retries, reports a transport failure as
+        ``transport_error`` so "never left" and "maybe delivered" differ)."""
+        return self._rich_request(method, data, timeout=timeout)
+
+    def _widgets_available(self, chat_id: Any) -> Tuple[bool, str]:
+        """Whether a widget can be sent to ``chat_id`` right now, and why not."""
+        if not WIDGETS_ENABLED:
+            return False, "desligados (TELEGRAM_WIDGETS)"
+        if _WIDGET_RUNTIME_OFF:
+            return False, "desligados até reiniciar (API recusou)"
+        if not str(chat_id or "").strip() or _tg_is_group_chat(chat_id):
+            # Production: "widgets can be sent only to private chats".
+            return False, "chat não é privado"
+        return True, ""
+
+    def send_widget(self, html_code: str, data: Any = None, *,
+                    caption: str = "", fallback_text: str = "",
+                    chat_id: Optional[str] = None, thread_id: Optional[Any] = None,
+                    public_data: Any = None, allow_queries: bool = False,
+                    width: Optional[int] = None,
+                    height: Optional[int] = None) -> WidgetSendResult:
+        """Send an HTML widget (sendWidget), or ``fallback_text`` instead.
+
+        ``data`` becomes the widget's ``chat_data`` (dict/list → compact JSON).
+        The fallback text is sent when widgets can't be used here (not a
+        private chat, disabled, kill switch), when the widget or its data
+        breaks the limits, or when Telegram rejects it — but NOT when the
+        delivery is unknown (a re-send could show the user both). Every
+        failure is logged; nothing is dropped silently.
+        """
+        if chat_id is None:
+            chat_id = self._chat_id
+        if thread_id is None:
+            thread_id = self._ctx.thread_id if self._ctx else None
+
+        def fallback(reason: str) -> WidgetSendResult:
+            if not fallback_text:
+                logger.error("Widget not sent to chat %s (%s) and no fallback text given",
+                             chat_id, reason)
+                return WidgetSendResult(None, False, reason)
+            mid = self.send_message(fallback_text, chat_id=chat_id, thread_id=thread_id)
+            if mid is None:
+                res = self.tg_last_result()
+                logger.error("Widget fallback text to chat %s failed too: %s", chat_id,
+                             res.reason() if res else "no result")
+            return WidgetSendResult(mid, False, reason)
+
+        ok, why = self._widgets_available(chat_id)
+        if not ok:
+            logger.debug("Widget → text for chat %s: %s", chat_id, why)
+            return fallback(why)
+        problem = _widget_html_problem(html_code)
+        chat_data = _widget_encode_data(data)
+        pub_data = _widget_encode_data(public_data)
+        problem = (problem or _widget_data_problem(chat_data)
+                   or _widget_data_problem(pub_data))
+        if problem:
+            logger.error("Widget refused locally (%s) — sending text instead", problem)
+            return fallback(problem)
+
+        payload: Dict[str, Any] = {"chat_id": chat_id, "html": html_code}
+        if thread_id:
+            payload["message_thread_id"] = thread_id
+        if caption:
+            payload["caption"] = caption[:WIDGET_CAPTION_MAX_CHARS]
+        if chat_data is not None:
+            payload["chat_data"] = chat_data
+        if pub_data is not None:
+            payload["public_data"] = pub_data
+        if allow_queries:
+            payload["allow_queries"] = True
+        if width:
+            payload["width"] = int(width)
+        if height:
+            payload["height"] = int(height)
+
+        resp = self._widget_request("sendWidget", payload)
+        if resp.get("ok"):
+            mid = (resp.get("result") or {}).get("message_id")
+            if mid:
+                self._last_first_message_id = mid
+                return WidgetSendResult(mid, True, "")
+            logger.error("sendWidget ok without message_id in chat %s — delivery "
+                         "unknown, not sending the text too", chat_id)
+            return WidgetSendResult(None, False, "entrega incerta")
+        exc = resp.get("transport_error")
+        if exc is not None:
+            if _tg_retry_is_safe("sendWidget", exc):
+                logger.warning("sendWidget never left (%s) — sending text instead", exc)
+                return fallback(f"rede: {exc}")
+            logger.error("sendWidget delivery UNKNOWN (failure after the request was "
+                         "sent): %s — not sending the text too, to avoid a duplicate", exc)
+            return WidgetSendResult(None, False, "entrega incerta")
+        code = resp.get("error_code")
+        desc = str(resp.get("description") or "")
+        if isinstance(code, int) and 500 <= code < 600:
+            logger.error("sendWidget HTTP %s — delivery UNKNOWN, not sending the text "
+                         "too: %s", code, desc)
+            return WidgetSendResult(None, False, "entrega incerta")
+        if _widget_response_unsupported(resp):
+            _disable_widget_runtime(f"sendWidget HTTP {code}: {desc}")
+        else:
+            logger.warning("sendWidget rejected in chat %s (HTTP %s: %s) — sending text "
+                           "instead", chat_id, code, desc)
+        return fallback(f"HTTP {code}: {desc}")
+
+    def edit_widget_data(self, chat_id: Any, message_id: int, chat_data: Any = None,
+                         public_data: Any = None) -> bool:
+        """editMessageWidgetData. True = changed (or already identical).
+
+        Fields left as None stay as they are (an empty string clears one)."""
+        enc_chat = _widget_encode_data(chat_data)
+        enc_pub = _widget_encode_data(public_data)
+        problem = _widget_data_problem(enc_chat) or _widget_data_problem(enc_pub)
+        if problem:
+            logger.error("editMessageWidgetData refused locally for message %s: %s",
+                         message_id, problem)
+            return False
+        if enc_chat is None and enc_pub is None:
+            return True
+        data: Dict[str, Any] = {"chat_id": chat_id, "message_id": message_id}
+        if enc_chat is not None:
+            data["chat_data"] = enc_chat
+        if enc_pub is not None:
+            data["public_data"] = enc_pub
+        resp = self._widget_request("editMessageWidgetData", data, timeout=20)
+        desc = str(resp.get("description") or "")
+        if resp.get("ok") or "message is not modified" in desc.lower():
+            return True
+        if _widget_response_unsupported(resp):
+            _disable_widget_runtime(f"editMessageWidgetData HTTP {resp.get('error_code')}: {desc}")
+        logger.warning("editMessageWidgetData failed for message %s in chat %s: HTTP %s: %s",
+                       message_id, chat_id, resp.get("error_code"), desc)
+        return False
+
+    def answer_widget_query(self, query_id: str, data: Any = None) -> bool:
+        """answerWidgetQuery — must be called for EVERY query within 15 s, or
+        the widget's request rejects with TIMEOUT."""
+        enc = _widget_encode_data(data)
+        problem = _widget_data_problem(enc)
+        if problem:
+            logger.error("answerWidgetQuery %s: %s — answering without data", query_id, problem)
+            enc = _widget_encode_data({"e": "Resposta grande demais"})
+        payload: Dict[str, Any] = {"widget_query_id": query_id}
+        if enc is not None:
+            payload["data"] = enc
+        resp = self._widget_request("answerWidgetQuery", payload, timeout=10)
+        if resp.get("ok"):
+            return True
+        logger.warning("answerWidgetQuery %s failed: HTTP %s: %s", query_id,
+                       resp.get("error_code"), resp.get("description"))
+        return False
+
+    def _dispatch_widget_query(self, query: Dict) -> None:
+        """Handle a ``widget_query`` update off the polling thread."""
+        threading.Thread(target=self._handle_widget_query, args=(query,),
+                         name="widget-query", daemon=True).start()
+
+    def _handle_widget_query(self, query: Dict) -> None:
+        """Answer a request from one of our widgets (always answered)."""
+        qid = str(query.get("id") or "")
+        if not qid:
+            logger.warning("widget_query without id ignored: %r", query)
+            return
+        chat_id = str((query.get("chat") or {}).get("id") or "")
+        message_id = query.get("message_id")
+        data = str(query.get("data") or "")
+        try:
+            # Panels show the owner's data: primary chats only (a secondary
+            # chat is authorized for messages but must not read them).
+            if not chat_id or not self._is_primary_chat(chat_id):
+                logger.info("widget_query from non-primary chat %r refused", chat_id)
+                self.answer_widget_query(qid, {"e": "Não autorizado"})
+                return
+            kind = data.split(":", 1)[0]
+            if kind == "rt":
+                self._widget_refresh_routines(qid, chat_id, message_id)
+                return
+            logger.warning("widget_query with unknown data %r in chat %s", data, chat_id)
+            self.answer_widget_query(qid, {"e": "Pedido desconhecido"})
+        except Exception as exc:
+            logger.exception("widget_query %s (%r) failed: %s", qid, data, exc)
+            try:
+                self.answer_widget_query(qid, {"e": "Erro no bot ao atualizar"})
+            except Exception as answer_exc:
+                logger.error("widget_query %s: could not even answer: %s", qid, answer_exc)
+
+    def _widget_panel_states(self) -> Dict[Tuple[str, int], str]:
+        """Last chat_data we wrote per widget message (bounded, process-local)."""
+        st = getattr(self, "_widget_panel_state", None)
+        if st is None:
+            st = self._widget_panel_state = {}
+        return st
+
+    def _widget_remember(self, chat_id: str, message_id: Optional[int], key: str) -> None:
+        if not message_id:
+            return
+        st = self._widget_panel_states()
+        st[(str(chat_id), int(message_id))] = key
+        while len(st) > 200:
+            st.pop(next(iter(st)))
+
+    def _widget_refresh_routines(self, query_id: str, chat_id: str,
+                                 message_id: Optional[int]) -> None:
+        """Answer the routines panel with today's state, then update the
+        message's chat_data — only when something changed, since each edit
+        counts against the bot's sending limits."""
+        payload, key = self._routines_widget_payload()
+        # Answer first (15 s budget); the edit is the slow, optional part.
+        self.answer_widget_query(query_id, payload)
+        if not message_id:
+            return
+        st = self._widget_panel_states()
+        if st.get((chat_id, int(message_id))) == key:
+            return
+        if self.edit_widget_data(chat_id, int(message_id), chat_data=payload):
+            self._widget_remember(chat_id, message_id, key)
+
+    def _routines_widget_payload(self, routines: Optional[List[Dict]] = None
+                                 ) -> Tuple[str, str]:
+        """Today's routines as the panel's chat_data (≤1024 bytes).
+
+        Returns ``(payload, key)`` — ``key`` is the payload without the clock
+        fields, to tell whether anything really changed."""
+        if routines is None:
+            routines = self.scheduler.list_today_routines()
+        rows = [[str(r.get("time", ""))[:5],
+                 str(r.get("title") or r.get("name") or "")[:28],
+                 _WIDGET_ROUTINE_STATUS.get(str(r.get("status", "pending")), 0),
+                 1 if r.get("type") == "pipeline" else 0]
+                for r in routines]
+        now = time.time()
+        stamp = {"v": int(now), "d": time.strftime("%d/%m", time.localtime(now)),
+                 "u": time.strftime("%H:%M", time.localtime(now))}
+
+        def build(kept: List[Any], hidden: int) -> Dict[str, Any]:
+            body: Dict[str, Any] = dict(stamp)
+            body["r"] = kept
+            if hidden:
+                body["x"] = hidden
+            return body
+
+        payload = _widget_fit_rows(build, rows)
+        parsed = json.loads(payload)
+        key = _widget_encode_data({"r": parsed.get("r"), "x": parsed.get("x", 0)}) or ""
+        return payload, key
+
+    def _cost_widget_payload(self, b: Dict[str, Any]) -> str:
+        """Week cost breakdown as the cost panel's chat_data (≤1024 bytes)."""
+        providers = sorted(((_WIDGET_PROVIDER_NAMES.get(k, k.title()), round(v, 2))
+                            for k, v in b["providers"].items() if v), key=lambda x: -x[1])
+        models = sorted(((k, round(v, 2)) for k, v in b["models"].items() if v),
+                        key=lambda x: -x[1])
+        shown = models[:6]
+        base = {"w": b["week"], "t": round(b["total"], 2), "d": round(b["today"], 2),
+                "td": time.localtime().tm_wday, "days": [round(v, 2) for v in b["days"]],
+                "p": [list(p) for p in providers],
+                "u": time.strftime("%H:%M")}
+
+        def build(kept: List[Any], hidden: int) -> Dict[str, Any]:
+            body = dict(base)
+            body["m"] = kept
+            extra = hidden + (len(models) - len(shown))
+            if extra:
+                body["mx"] = extra
+            return body
+
+        return _widget_fit_rows(build, [list(m) for m in shown])
+
+    def _cost_summary_text(self, b: Dict[str, Any]) -> str:
+        """Plain-text version of the cost panel (fallback when the widget fails)."""
+        lines = [f"💰 *Custo da semana* ({b['week']})", "",
+                 f"Total: {_widget_money(b['total'])}",
+                 f"Hoje: {_widget_money(b['today'])}"]
+        providers = sorted(((k, v) for k, v in b["providers"].items() if v), key=lambda x: -x[1])
+        if providers:
+            lines += ["", "*Por provedor*"]
+            lines += [f"- {_WIDGET_PROVIDER_NAMES.get(k, k.title())}: {_widget_money(v)}"
+                      for k, v in providers]
+        models = sorted(((k, v) for k, v in b["models"].items() if v), key=lambda x: -x[1])
+        if models:
+            lines += ["", "*Por modelo*"]
+            lines += [f"- {k}: {_widget_money(v)}" for k, v in models[:10]]
+        lines += ["", "Custo desta conversa: /cost sessao"]
+        return "\n".join(lines)
+
+    def cmd_cost(self, arg: str = "") -> None:
+        """/cost — week cost panel (widget) in private chats; the Claude CLI's
+        session cost in groups, when widgets are off, or with ``/cost sessao``."""
+        if arg.strip().lower() in ("sessao", "sessão", "session", "s"):
+            self._run_claude_prompt("/cost")
+            return
+        ok, _why = self._widgets_available(self._chat_id)
+        # The week total is the OWNER's bill — never show it in a friend's
+        # (secondary) chat, even a private one.
+        if not ok or not self._is_primary_chat(self._chat_id):
+            self._run_claude_prompt("/cost")
+            return
+        b = get_weekly_cost_breakdown()
+        if b.get("error"):
+            self.send_message("❌ Não consegui ler o arquivo de custos "
+                              f"(`{COSTS_FILE.name}`): {b['error']}\n\n"
+                              "Custo desta conversa: /cost sessao")
+            return
+        caption = (f"💰 Custo da semana: {_widget_money(b['total'])} "
+                   f"(hoje {_widget_money(b['today'])}) · desta conversa: /cost sessao")
+        self.send_widget(COST_WIDGET_HTML, self._cost_widget_payload(b), caption=caption,
+                         fallback_text=self._cost_summary_text(b))
 
     def cmd_doctor(self) -> None:
         self._run_claude_prompt("/doctor")
@@ -16661,10 +17226,35 @@ class ClaudeTelegramBot:
         self.send_message("\n".join(lines))
 
     def _routine_status(self) -> None:
+        """/routine status — a live panel (widget, with a refresh) in private
+        chats; the plain list in groups, when widgets are off, or as the
+        fallback when Telegram refuses the widget."""
         routines = self.scheduler.list_today_routines()
         if not routines:
             self.send_message("📊 Nenhuma rotina agendada para hoje.")
             return
+        text = self._routine_status_text(routines)
+        if not self._widgets_available(self._chat_id)[0]:
+            self.send_message(text)
+            return
+        payload, key = self._routines_widget_payload(routines)
+        counts: Dict[str, int] = {}
+        for r in routines:
+            counts[r.get("status", "pending")] = counts.get(r.get("status", "pending"), 0) + 1
+        caption = f"📊 Rotinas de hoje: {len(routines)}"
+        parts = [f"{counts[k]} {one if counts[k] == 1 else many}" for k, one, many in
+                 (("completed", "concluída", "concluídas"), ("running", "rodando", "rodando"),
+                  ("failed", "com falha", "com falha"))
+                 if counts.get(k)]
+        if parts:
+            caption += " (" + ", ".join(parts) + ")"
+        res = self.send_widget(ROUTINES_WIDGET_HTML, payload, caption=caption,
+                               fallback_text=text, allow_queries=True)
+        if res.widget:
+            self._widget_remember(self._chat_id, res.message_id, key)
+
+    def _routine_status_text(self, routines: List[Dict]) -> str:
+        """Today's routines as a Markdown list (groups and widget fallback)."""
         _icons = {"pending": "⏰", "running": "🔄", "completed": "✅", "failed": "❌", "skipped": "⏭"}
         lines = [f"📊 *Rotinas — {time.strftime('%Y-%m-%d')}*\n"]
         for r in routines:
@@ -16682,7 +17272,7 @@ class ClaudeTelegramBot:
                         lines.append(f"    {si} {sid}")
             else:
                 lines.append(f"- {icon} `{r['time']}` *{r['title']}*{extra}")
-        self.send_message("\n".join(lines))
+        return "\n".join(lines)
 
     def _routine_create(self, extra: str) -> None:
         prompt = (
@@ -20684,7 +21274,7 @@ class ClaudeTelegramBot:
                 "/resume": lambda: self.cmd_resume(),
                 "/lesson": lambda: self.cmd_lesson(arg),
                 "/compact": lambda: self.cmd_compact(),
-                "/cost": lambda: self.cmd_cost(),
+                "/cost": lambda: self.cmd_cost(arg),
                 "/doctor": lambda: self.cmd_doctor(),
                 "/auth": lambda: self.cmd_auth(arg),
                 "/lint": lambda: self.cmd_lint(),
@@ -21448,7 +22038,8 @@ class ClaudeTelegramBot:
         data = {
             "offset": self._update_offset,
             "timeout": 30,
-            "allowed_updates": ["message", "callback_query"],
+            "allowed_updates": (["message", "callback_query", "widget_query"] if WIDGETS_ENABLED
+                                else ["message", "callback_query"]),
         }
         self._tg_set_last(None)
         resp = self.tg_request("getUpdates", data, timeout=45)
@@ -22090,6 +22681,11 @@ class ClaudeTelegramBot:
                         self._update_offset = uid + 1
                         self._save_offset(self._update_offset)
                     try:
+                        if "widget_query" in update:
+                            # Request from one of our HTML widgets (Bot API
+                            # 10.4) — answered off-thread within 15 s.
+                            self._dispatch_widget_query(update["widget_query"])
+                            continue
                         msg = update.get("message", {})
                         # Skip individual updates belonging to an instant album batch
                         if msg.get("media_group_id") in _instant_groups:

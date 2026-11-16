@@ -249,7 +249,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/resume` | Continue a Claude Code session started elsewhere (Claude desktop app / terminal) or a recent bot session. Inline picker of the 20 most recent (by last activity), merged from the Claude.app session index + `sessions.json`; picking one creates a new session resuming that `session_id` under its original cwd. Primary chat only. |
 | `/run [name]` | Manually trigger a routine/pipeline |
 | `/compact` | Auto-compact context |
-| `/cost` | Token usage and cost for current session |
+| `/cost [sessao]` | Private primary chat: week-cost panel (widget). Groups, secondary chats, widgets off, or `sessao`: the Claude CLI session cost |
 | `/doctor` | Check Claude Code installation health |
 | `/auth` | Anthropic auth status + live probe; `/auth login` (phone OAuth), `/auth code <c>`, `/auth set <token>`, `/auth logout`. Primary chat only. See `.claude/rules/auth-hardening.md` |
 | `/lint` | Audit the vault |
@@ -266,7 +266,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/lesson <text>` | Record a manual lesson in `<agent>/Lessons/` |
 | `/active_memory [on\|off\|status]` | Toggle proactive vault context injection (`/active-memory` still works) |
 | `/agent [name\|new\|list]` | Switch/create/list agents |
-| `/routine [list\|status]` | Create a routine interactively, or list/status |
+| `/routine [list\|status]` | Create a routine interactively, or list/status (`status` is a live widget panel in private chats) |
 | `/skill [name]` | Run a vault skill directly |
 | `/voice [on\|off]` | Toggle TTS voice responses |
 | `/audio` | Choose transcription language |
@@ -358,6 +358,16 @@ Outside the discovery window the bot returns to silent-ignore for unknown chats 
 **Isolation caveat (intentional, documented).** The deny list is enforced by Claude's permission system, which **does not sandbox Bash subprocesses**. A motivated user could still `cat ../main/something.md` from inside a Bash tool call. This is suitable for trusted friends, not adversarial users. For hard isolation, wrap the subprocess in `sandbox-exec` with a profile that denies file-read outside `vault/<agent>/` — not implemented yet.
 
 **API cost.** Secondary chats use the same Anthropic auth as primary, so usage is billed to you. If a friend should pay, give them their own ZAI key and pin their agent to a `glm-*` model in `agent-<name>.md` frontmatter.
+
+## Widgets (Bot API 10.4)
+
+Telegram HTML widgets: one self-contained HTML document drawn inside the message bubble, run offline in Telegram's QuickJS sandbox (spec: https://core.telegram.org/bots/widgets). **Production only allows them in private chats with the bot** (forum topics in the private chat work via `message_thread_id`), so every widget has a plain-text fallback.
+
+- **`send_widget(html, data=None, *, caption, fallback_text, allow_queries, …)`** — validates locally first (HTML 1–32768 UTF-8 bytes, ≤4096 bytes after `zlib.compress(html, 9)`, no NUL; `chat_data`/`public_data` ≤1024 bytes), then calls `sendWidget`. Sends `fallback_text` instead when the chat is not private, `TELEGRAM_WIDGETS=false`, the kill switch is tripped, a limit is broken, or Telegram rejects it. **Never** sends the fallback when delivery is unknown (5xx / transport failure after the request left) — same rule as rich messages. Returns `WidgetSendResult(message_id, widget, reason)`.
+- **Kill switch** — `_disable_widget_runtime()` (one WARNING, until restart) trips when the server answers 404 / "method not found" (old or self-hosted Bot API). Per-widget errors (`INPUT_MEDIA_WIDGET_TOO_LARGE`, …) only fall back for that message.
+- **State and refresh** — the HTML never changes after sending; the bot owns the state (`chat_data`, ≤1024 bytes, written with `edit_widget_data` → `editMessageWidgetData`). A widget sent with `allow_queries` calls `TelegramWidget.request(data ≤64 bytes)` → `widget_query` update (requested in `allowed_updates`, handled off the polling thread by `_handle_widget_query`) → `answer_widget_query` within 15 s (always answered, errors as `{"e": "…"}`). Queries are honored from **primary chats only**.
+- **Built-in panels** (`COST_WIDGET_HTML`, `ROUTINES_WIDGET_HTML`, PT-BR, colors only from `--tg-theme-*` so light/dark follow the chat): `/cost` (week total, today, 7-day bars, per provider and per model — `get_weekly_cost_breakdown()`; per-model totals are recorded by `_track_cost` (older weeks have none); owner's bill → primary chats only) and `/routine status` (today's routines, refreshable: the widget asks `rt` when it appears, every 60 s while visible and on the "Atualizar" button; the bot answers with fresh data and edits `chat_data` only when something changed, since each edit counts against send limits).
+- Adding a panel: keep the HTML free of comments, draw the first frame synchronously from `TelegramWidget.chatData`, add a size test (`tests/test_widgets.py` pins the built-ins under 3500 bytes compressed), and pass a text fallback.
 
 ## Vault
 
