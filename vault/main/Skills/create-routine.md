@@ -167,6 +167,8 @@ timeout: 900
 
 **`failure_deliver: silent`** — By default (`notify`) a failed run posts a FAILED message to Telegram. `silent` only records the failure (log, `/routine status`, execution report, history). Use for frequent, non-critical routines where a transient failure is noise.
 
+**`fallback: auto`** — By default (`off`) a routine whose model fails (usage limit, overload…) just fails. With `auto` it runs again right away on the next model, without asking: a Fable limit → Opus; the account's 5-hour or weekly limit, or an Opus/Sonnet/Haiku failure → GPT. Only that run changes model; a quiet notice says so. Use for routines that must deliver even when Claude is out of quota. Pipelines don't support it. In chats the bot always asks before switching.
+
 **Agent ownership (folder is the source of truth).** In v3.5, a routine's owning agent is determined by **where the file lives on disk**, NOT by a frontmatter field. If the user wants the routine to belong to agent `crypto-bro`, save it at `vault/crypto-bro/Routines/<name>.md` — no `agent:` field needed. The bot will run it with `crypto-bro`'s cwd, skills, journal, and Telegram chat/thread automatically. If the user doesn't mention an owning agent, save to `vault/main/Routines/<name>.md` (the default). The legacy `agent: <id>` frontmatter field is still accepted for backcompat, but if it disagrees with the folder, the folder wins and a warning is logged.
 
 If no optional fields are needed, move forward without adding them.

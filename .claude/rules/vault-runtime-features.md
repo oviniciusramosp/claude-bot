@@ -39,6 +39,7 @@ Context for the Python implementation of the bot's runtime features: routines, v
 | `context_from` | string/list | — | Routine only (v3.82): `self` and/or routine names of the same agent whose previous outputs are injected into the prompt |
 | `context_runs` | int | `1` | How many past runs per `context_from` source (max 20) |
 | `failure_deliver` | string | `notify` | Routine only (v3.82): `notify` posts failures to Telegram; `silent` only logs/records them |
+| `fallback` | string | `off` | Routine only (v3.93): `auto` = when the model fails, run again on the next model without asking (Fable limit → Opus, account limit → GPT), that run only |
 
 ### Routine task construction
 

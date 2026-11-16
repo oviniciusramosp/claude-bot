@@ -267,5 +267,69 @@ class AskBeforeSwitching(_Base):
         self.assertEqual(self.b.ran, [])  # going back runs nothing by itself
 
 
+
+class RoutineAutoFallback(unittest.TestCase):
+    """v3.93: `fallback: auto` lets a routine switch model without asking."""
+
+    def test_field_parsing(self):
+        m = load_bot_module()
+        f = m.routine_task_from_frontmatter
+        self.assertFalse(f("r", {}, "b", "08:00", "main").auto_fallback)
+        self.assertTrue(f("r", {"fallback": "auto"}, "b", "08:00", "main").auto_fallback)
+        self.assertTrue(f("r", {"fallback": True}, "b", "08:00", "main").auto_fallback)
+        with self.assertLogs(m.logger, level="WARNING"):
+            self.assertFalse(f("r", {"fallback": "talvez"}, "b", "08:00", "main").auto_fallback)
+
+    def _run(self, auto, routine=True):
+        from tests.test_bot_integration import _BotFixture
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        fx = _BotFixture(Path(td.name))
+        self.addCleanup(fx.cleanup)
+        bot, m = fx.bot, fx.bot_module
+        calls = []
+
+        def fake_run(runner, prompt, model, **kw):
+            calls.append(model)
+            if model == "gpt":
+                runner.exit_code, runner.result_text = 0, "ok"
+            else:
+                runner.exit_code = 1
+                runner.result_text = "You've hit your session limit · resets 8pm (America/Sao_Paulo)"
+
+        sent = []
+        with patch.object(m, "CODEX_ENABLED", True), \
+                patch.object(m, "MODEL_FALLBACK_CHAIN", list(CHAIN)), \
+                patch.object(m.ClaudeRunner, "run", fake_run), \
+                patch.object(m.CodexRunner, "run", fake_run), \
+                patch.object(bot, "_stream_updates", lambda t, r, **k: t.join()), \
+                patch.object(bot, "_watchdog", lambda *a, **k: None), \
+                patch.object(bot, "_finalize_response", lambda *a, **k: None), \
+                patch.object(bot, "_offer_model_switch", lambda *a, **k: sent.append("offer")), \
+                patch.object(bot, "send_message", lambda text, **k: sent.append(text) or 1):
+            bot._get_session().model = "opus"
+            bot._run_claude_prompt_owned("tarefa", routine_mode=routine,
+                                         system_prompt=None, auto_fallback=auto)
+        return calls, sent, bot._get_session()
+
+    def test_auto_routine_switches_without_asking(self):
+        calls, sent, session = self._run(auto=True)
+        self.assertEqual(calls, ["opus", "gpt"])
+        self.assertNotIn("offer", sent)
+        self.assertTrue(any("troca automática" in str(t) for t in sent))
+        self.assertEqual(session.model, "opus")  # only that run changed
+
+    def test_default_routine_does_not_switch(self):
+        calls, sent, _ = self._run(auto=False)
+        self.assertEqual(calls, ["opus"])
+        self.assertNotIn("offer", sent)
+
+    def test_chat_still_asks(self):
+        calls, sent, session = self._run(auto=True, routine=False)
+        self.assertEqual(calls, ["opus"])
+        self.assertIn("offer", sent)
+        self.assertEqual(session.model, "opus")
+
+
 if __name__ == "__main__":
     unittest.main()
