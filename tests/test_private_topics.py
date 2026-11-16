@@ -96,6 +96,30 @@ class PrivateTopicRouting(unittest.TestCase):
             self.f.bot._refresh_agent_chat_map()
         self.assertIsNone(self.f.bot._find_agent_for_chat(OWNER, 42))
 
+    def _route(self, thread_id):
+        bot = self.f.bot
+        bot._ctx = bot._get_context(OWNER, thread_id)
+        bot._route_to_bound_agent(OWNER, thread_id, False)
+        return bot._get_session().agent
+
+    def test_message_in_private_topic_switches_session_to_its_agent(self):
+        # v3.93.1: routing ran only for groups, so the Contador topic answered as Main.
+        self.f.m.set_agent_frontmatter_fields("chef", {"private_chat_id": OWNER, "private_thread_id": 42})
+        self.f.bot._refresh_agent_chat_map()
+        self.f.bot._ctx = self.f.bot._get_context(OWNER, 42)
+        self.f.bot._get_session().agent = "main"
+        self.assertEqual(self._route(42), "chef")
+
+    def test_unowned_private_topic_goes_to_default_agent(self):
+        # Telegram opens a "New Chat" topic for a message written outside the topics.
+        self.f.m.set_agent_frontmatter_fields("chef", {"private_chat_id": OWNER, "private_thread_id": 42})
+        self.f.bot._refresh_agent_chat_map()
+        self.assertEqual(self.f.bot._resolved_agent_for_chat(OWNER, 999)["_id"], "main")
+        self.assertEqual(self._route(999), "main")
+
+    def test_group_unowned_topic_still_unmapped(self):
+        self.assertIsNone(self.f.bot._resolved_agent_for_chat(FORUM, 999))
+
 
 class AgentTopicsCommand(unittest.TestCase):
     def test_topics_disabled_explains_how_to_enable(self):
