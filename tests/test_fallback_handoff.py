@@ -149,5 +149,123 @@ class Handoff(_Base):
         self.assertFalse(old.exists())
 
 
+
+class UsageLimits(unittest.TestCase):
+    """v3.92: two kinds of limit. A model's own cap (Fable) → Opus; the
+    account's 5-hour or weekly cap → GPT."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_bot_module()
+
+    def test_scope(self):
+        sc = self.m.usage_limit_scope
+        self.assertEqual(sc("You've reached your Fable limit."), "model")
+        self.assertEqual(sc("You've hit your Opus limit · resets 3pm"), "model")
+        self.assertEqual(sc("You've hit your session limit · resets 4:20am (America/Sao_Paulo)"), "account")
+        self.assertEqual(sc("You've hit your weekly limit · resets Nov 20, 4pm"), "account")
+        self.assertIsNone(sc("API Error: 500 internal"))
+
+    def test_session_limit_is_a_rate_limit(self):
+        # Before v3.92 this was UNKNOWN, so no limit handling ran.
+        self.assertEqual(self.m.classify_error("You've hit your session limit · resets 8pm"),
+                         self.m.ErrorKind.RATE_LIMIT)
+
+    def test_friendly_message(self):
+        t = self.m._translate_error("You've hit your weekly limit · resets Nov 20, 4pm (America/Sao_Paulo)")
+        self.assertIn("limite semanal da conta", t)
+        self.assertIn("Nov 20, 4pm", t)
+        self.assertIn("limite do Fable", self.m._translate_error("You've reached your Fable limit."))
+
+    def test_reset_time_is_parsed(self):
+        ttl = self.m.parse_rate_limit_reset("You've hit your session limit · resets 4:20am (America/Sao_Paulo)")
+        self.assertIsNotNone(ttl)
+        self.assertGreater(ttl, 0)
+        self.assertLessEqual(ttl, 86400)
+
+    def nxt(self, model, raw):
+        kind = self.m.classify_error(raw)
+        with patch.object(self.m, "CODEX_ENABLED", True), \
+                patch.object(self.m, "MODEL_FALLBACK_CHAIN", list(CHAIN)):
+            return self.m.get_fallback_model(model, kind, limit_scope=self.m.usage_limit_scope(raw))
+
+    def test_fable_limit_offers_opus(self):
+        self.assertEqual(self.nxt("fable", "You've reached your Fable limit."), "opus")
+
+    def test_account_limit_offers_gpt(self):
+        for raw in ("You've hit your session limit · resets 8pm",
+                    "You've hit your weekly limit · resets Nov 20, 4pm"):
+            self.assertEqual(self.nxt("fable", raw), "gpt", raw)
+            self.assertEqual(self.nxt("opus", raw), "gpt", raw)
+
+
+class AskBeforeSwitching(_Base):
+    """v3.92: the model never changes without the user's ✅."""
+
+    def setUp(self):
+        super().setUp()
+        b = self.bot()
+        b._model_offers, b._model_offers_lock = {}, threading.Lock()
+        b.sent, b.edits, b.answers, b.ran = [], [], [], []
+        b.send_message = lambda text, **kw: (b.sent.append((text, kw)), 1)[1]
+        b.edit_message = lambda mid, text, **kw: b.edits.append(text) or True
+        b.answer_callback = lambda cid, text=None, **kw: b.answers.append(text)
+        b._run_claude_prompt = lambda prompt, *a, **kw: b.ran.append(prompt) or True
+        b._ctx_local = threading.local()
+        b._ctx = type("Ctx", (), {"chat_id": "42", "thread_id": None})()
+        self.s = self.m.Session(name="s", session_id="sid1", model="opus", workspace=self.ws)
+        b.sessions = type("SM", (), {"sessions": {"s": self.s}, "save": lambda self: None})()
+        self.b = b
+
+    def offer(self, raw="You've hit your session limit · resets 8pm"):
+        self.b._offer_model_switch(self.s, "opus", "gpt", "rate_limit",
+                                   self.m.usage_limit_scope(raw), raw, "qual a capital?")
+        text, kw = self.b.sent[-1]
+        yes, no = kw["reply_markup"]["inline_keyboard"][0]
+        return text, yes["callback_data"], no["callback_data"]
+
+    def tap(self, data):
+        self.b._handle_callback({"id": "c", "data": data, "message": {"message_id": 9, "text": "q"}})
+
+    def test_offer_changes_nothing(self):
+        text, _, _ = self.offer()
+        self.assertIn("Trocar para", text)
+        self.assertIn("limite de 5 horas da conta", text)
+        self.assertEqual(self.s.model, "opus")
+        self.assertEqual(self.b._handoff_pending, {})
+
+    def test_yes_switches_hands_over_and_answers(self):
+        _, yes, _ = self.offer()
+        self.tap(yes)
+        self.assertEqual(self.s.model, "gpt")
+        self.assertEqual(self.s.preferred_model, "opus")
+        self.assertGreater(self.s.rate_limit_until, 0)
+        self.assertIn("s", self.b._handoff_pending)
+        self.assertEqual(self.b.ran, ["qual a capital?"])
+
+    def test_no_keeps_the_model(self):
+        _, _, no = self.offer()
+        self.tap(no)
+        self.assertEqual(self.s.model, "opus")
+        self.assertEqual(self.b.ran, [])
+
+    def test_button_works_once(self):
+        _, yes, _ = self.offer()
+        self.tap(yes)
+        self.tap(yes)
+        self.assertEqual(self.b.ran, ["qual a capital?"])
+        self.assertIn("expirou", self.b.answers[-1])
+
+    def test_going_back_is_also_asked(self):
+        self.s.model, self.s.preferred_model = "gpt", "opus"
+        self.b._offer_model_return(self.s)
+        self.assertEqual(self.s.model, "gpt")
+        yes = self.b.sent[-1][1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+        self.tap(yes)
+        self.assertEqual(self.s.model, "opus")
+        self.assertIsNone(self.s.preferred_model)
+        self.assertEqual(self.b.ran, [])  # going back runs nothing by itself
+
+
 if __name__ == "__main__":
     unittest.main()

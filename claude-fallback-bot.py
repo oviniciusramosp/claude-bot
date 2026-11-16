@@ -10,7 +10,7 @@ Architecture: User <-> Telegram API <-> this script <-> Claude Code CLI (subproc
 Only uses Python stdlib — no pip dependencies.
 """
 
-BOT_VERSION = "3.91.0"  # # feat (v3.91.0): new fallback order — Fable → Opus, and any other Claude failure (Opus, Sonnet, Haiku) goes straight to ChatGPT (MODEL_FALLBACK_CHAIN default fable,opus,gpt; models outside the chain jump to the first other-provider entry). A turn that crosses Claude ↔ GPT — automatic fallback, rate-limit restore or manual switch — now hands over the conversation: read_claude_transcript() reads the Claude session file (persistent, survives restarts) and the new model gets a recap plus the full conversation in ~/.claude-bot/handoffs/ (0600, pruned after 7 days); after a one-off GPT answer the exchange is handed back to Claude. # feat (v3.90.0): agents report to the owner's private chat — routines, pipeline notices, AGENT_CHAT_ID and scripts/telegram_notify.py now go to the agent's private topic (private_chat_id/private_thread_id from /agent topicos) where live drafts, widgets and effects work; agents without one keep their group topic, the default agent goes to the private chat; AGENT_REPORT_TO=group restores the old routing (agent_report_route()). ChatGPT is the last fallback: new model key "gpt" = the ChatGPT account's default model (Codex gets no --model, so the slug never goes stale — gpt-5 and gpt-5.5 are now refused, default is gpt-6.1-sol); MODEL_FALLBACK_CHAIN default opus,sonnet-5,haiku,gpt; /gpt and the picker use it; its name comes from ~/.codex/config.toml. Mac app model labels follow ~/.claude-bot/model-ids.json. # # fix (v3.89.1): model names shown to the user come from one place and follow upgrades — /model said "Modelo alterado para sonnet-5" (the internal key) for Sonnet 5.5; model_display_name() now derives "Sonnet 5.5" from the id the CLI really ran last time (learn_model_id, persisted in ~/.claude-bot/model-ids.json) or MODEL_FULL_IDS, and every model mention (/model confirmation and buttons, /status, /sessions, /switch, /clone, /agent…) uses it. PinchTab removed: no more browser health check/alerts, BROWSER_MCP now opt-in (default off, CDP default :9222); agents use Safari via scripts/safari.py. # # feat (v3.89.0): Telegram Bot API 9.4–10.4 features — colored inline buttons (green confirm, red stop/cancel) and tappable buttons inside model answers; absolute dates/times as date_time entities in the reader's timezone; /cost and /routine status as live HTML widgets with refresh in private chats; private chats stream answers as native drafts with Telegram's own stop button and a 🎉 effect on long tasks (groups unchanged). # # feat (v3.88.0): the 🧠 reasoning panel no longer cuts mid-word or breaks its formatting. It was the last 1500 raw chars of thinking under a separate tool log, sliced at any byte — mid-word, mid-**bold**, or inside a ``` fence, which closed the HTML quote early and leaked raw ">" markers into a code block; the whole display was then sliced from the front when long, cutting the panel header. Now ClaudeRunner keeps a chronological reasoning_log (thoughts and tool calls in order) and _render_reasoning_panel shows it as one timeline: whole old steps are dropped (with "… N passos anteriores"), only the oldest kept step may be shortened and then at a word; _clean_reasoning_text removes fences (keeps code lines), headings, nested quotes, blank lines and unbalanced **/` markers. Budgets follow the delivery path: 1800 chars in HTML (4096 cap), 6000 in rich previews (32768 cap, whole preview up to 14000). The answer preview is trimmed at a line break and re-opens a code block when the cut lands inside one (_trim_preview_tail); an oversized display drops the panel instead of slicing its header. Header is plain "🧠 Raciocínio". # # feat (v3.87.0): agent topics in the owner's private chat. Bot API 9.3/9.4 lets a bot create forum topics in a private chat once topics are enabled for it in @BotFather (getMe.has_topics_enabled). New `/agent topicos` creates one topic per agent (default agent first, named "<icon> <name>") in the owner's private chat, posts a hello inside it, and binds it through new frontmatter fields private_chat_id + private_thread_id — a second binding next to the group topic (chat_id + thread_id), which keeps working; routines still report to the group topic. Re-running skips agents already bound; failures are listed. When topics are still off it explains the BotFather switch instead of failing. _build_agent_chat_map maps both bindings, so messages outside any topic in the private chat go to the default agent (same rule as a forum's General). New set_agent_frontmatter_fields() edits hub frontmatter line by line, keeping every other key and the body intact. # # feat (v3.86.0): messages sent mid-turn can reach the running answer again, and the user picks what happens. Since v3.81 the prompt went on stdin and stdin was closed right after it, so send_btw always failed (and its legacy "/btw <msg>" plain-text line was never valid stream-json anyway) — every mid-turn message was queued. ClaudeRunner now keeps stdin open during the turn (_prime_stdin), writes a mid-turn message as another stream-json user message (send_btw/can_inject, backlog until the prompt is written, replayed on the 1M-fallback re-spawn) and closes stdin on the first `result` event, on cancel and on cleanup. Verified live on CLI 2.1.292: a message written during tool calls is folded into the same answer; one written at the very end runs as one more turn with its own result — both results are kept (joined) and accumulated text gets a separator. New BUSY_MESSAGE_MODE (ask|now|queue, default ask): ask shows [⚡ Mandar agora] [⏳ Depois] [🛑 Parar e mandar] replying to the message; no tap within BUSY_CHOICE_SECONDS (default 10) picks "now" (or "later" when the turn cannot take input, e.g. Codex); a card still open when the turn ends is queued and runs immediately; "stop" cancels the turn and puts the message first in the queue. /btw still sends immediately. # # feat (v3.85.0): every agent may now style answers with Telegram Rich Messages. The system prompt said "NEVER use tables" from the HTML-only days; with RICH_MESSAGES on it now tells agents to use headings, bold, small tables, task lists, blockquotes and <details> when they help (and keep short answers plain). RICH_MESSAGES=off keeps the old no-tables rule. # feat (v3.84.0): browser tools for agents. Telegram agents kept saying they had no browser: PinchTab's two LaunchAgents had been refused by macOS since 2026-09-05 (launchd exit 78, posix_spawn EPERM — "Allow in the Background" off), and even when up it was only a Bash CLI. Every unrestricted native-Anthropic run now gets `--mcp-config ~/.claude-bot/browser-mcp.json`: Playwright MCP (@playwright/mcp@0.0.83, pinned) attached over CDP to PinchTab's logged-in headless Chrome (BROWSER_CDP_URL, default :9869) — navigate/snapshot/click/type like the desktop app, same sessions, no second browser. Only added when the CDP endpoint answers (probe cached 60s) and npx exists; never in restricted (guest) runs. Verified end to end on CLI 2.1.292 (server `browser` connected, navigate/snapshot/close used). New browser health check in the idle watchdog (first run 90s after start): after 2 failed checks it alerts the primary chats once with the PinchTab API/CDP state and launchd exit codes — exit 78 explains the macOS fix — and announces recovery. Silent when PinchTab isn't installed. Tooling.md tells agents to prefer the MCP tools and always browser_close. # feat (v3.83.0): Telegram audit Lote 3. Model answers (final reply, streaming preview, routine output) go out as Telegram Rich Messages (Bot API 10.1: sendRichMessage / editMessageText rich_message) — native tables, task lists, collapsible sections, up to 32768 chars per message instead of 4096. Opt-in per call (rich=True) so internal status messages stay on HTML; every failure falls back to the HTML path, an ambiguous rich send is never repeated, and a process-wide kill switch disables rich if the API rejects it (RICH_MESSAGES env, default on). Rich is tried first inside _deliver_final_text, so Lote 2's delivery confirmation, retry and placeholder retirement still apply. _rich_markdown_from_model escapes $, ==, || and lone ~ in prose so prices and the cost line don't render as LaTeX/highlight/spoiler. The streaming reasoning panel is collapsed by default (<blockquote expandable> / rich <details>). Turns longer than NOTIFY_DONE_AFTER_SECONDS (default 20) whose answer landed by editing the placeholder get a notifying "✅ Pronto · <duração>" reply, since Telegram doesn't notify edits. API shape verified against the live Bot API with an invalid chat ("chat not found", not "method not found"). # fix (v3.82.3): Telegram audit Lote 2 — reliable delivery. Final answers are measured after HTML conversion and never silently truncated (edit_message refuses to truncate unless preview=True; _deliver_final_text edits in place with the copy-code button or sends in full). Failures carry a per-thread TgResult: plain-text fallback only on "can't parse entities", "message is not modified" is success, a send of unknown outcome is never repeated, a failed chunk stops the rest. Shared TelegramRateLimiter (per chat: private ~1/s burst 3, groups 20/min; global 30/s; full 429 retry_after honored) drops streaming previews/chat actions while throttled; group streaming edits every 4.5s. A final delivery stays registered/cached until confirmed; _handle_undelivered_final notifies and retries once. Polling backs off 5s→60s on failure, calls deleteWebhook once on 409 and alerts the primary chat on 409/401 (hourly). Atomic offset writes; corrupt offset logged; truthful restart notice (marker kept until delivered). Multipart: JSON-encoded object fields, escaped filenames, mimetypes, size-scaled timeout; _send_as_document uses reply_parameters. Files over 20MB refused with the reason; unique download names. # fix (v3.82.2): Telegram audit Lote 1. Commands sent as a reply are dispatched as commands (reply context was prepended, so `/stop` went to Claude as a prompt). Routines never route to an empty chat_id: the polling loop called _get_context("") for every callback_query, creating and persisting a ("", None) context that dict-order routing picked for Main routines (4 routine deliveries lost on 2026-10-12); _get_context now returns a transient context for empty/"0" ids, _load_contexts drops them, and default-agent routines go to the primary forum's General topic, then the owner's private chat. Reactions use only Telegram-allowed emojis (bare ✍, 🤓 instead of 🧠); a failed reaction is logged at WARNING and not recorded. Guest (secondary) chats get an explicit command allowlist (SECONDARY_ALLOWED_COMMANDS) with their own help and chat-scoped menu, and /delegate runs restricted there. Hyphenated commands gained underscore aliases; menus and HELP_TEXT match handler_map and command names are tappable. A message sent mid-turn no longer takes over the running turn's reactions/reply target; queued items keep their message id. callback_data over 64 bytes is swapped for short cbref ids. Startup ping is silent, /cmd@otherbot is ignored, unauthorized callbacks are answered. # fix (v3.82.1): concurrent Telegram updates raced on one runner. _run_claude_prompt checked runner.running (only set True deep inside run()), so two messages arriving together in the same ThreadContext both called run() on the SAME runner; the first run's _cleanup() closed the second's pipes and nulled self.process, crashing _read_stream with AttributeError and sending the turn down the fallback chain (seen on 6 backlogged startup updates). Now ThreadContext.claim_turn() makes check-and-claim atomic on the outermost call (retry/fallback/queue-drain recursion re-enters on the owner thread); losers /btw or queue, and _release_turn drains the queue under turn_lock before releasing so nothing is stranded. _read_stream/_cleanup (Claude + Codex) now use a local proc handle and never clear a process they did not own. # # feat (v3.82.0): cheaper, continuous routines + native compaction. (1) `script:` routines — a shell command runs instead of a model turn (zero tokens): /bin/bash -c from the repo root with AGENT_ID/AGENT_WORKSPACE/VAULT_DIR/ROUTINE_NAME exported; empty stdout (or bare NO_REPLY) = silence, other stdout delivered verbatim, non-zero exit/timeout (`timeout:`, default 300s) = failure with the stderr tail. Refused for agents serving a secondary chat (a guest-steered agent could otherwise write a shell escape into its own Routines/). (2) Continuity — every routine run is recorded to ~/.claude-bot/routine-history/<agent>/<routine>.jsonl (last 20); `context_from: self` (or same-agent routine names) + `context_runs: N` inject previous outputs before the task, so a daily briefing knows what it said yesterday. `failure_deliver: silent` records failures without posting them. All six RoutineTask construction sites now share routine_task_from_frontmatter() (the control API had been dropping `voice`). (3) Native compaction — every Anthropic run gets CLAUDE_CODE_AUTO_COMPACT_WINDOW (AUTO_COMPACT_WINDOW env, default 400000; verified in --print/--resume on CLI 2.1.292, which emits a compact_boundary event now logged and kept in runner.native_compact). The every-20-turns /compact is gone; that interval now only snapshots memory (journal + hot cache), silently. Idle compact unchanged (the CLI's idle compaction is server-flag gated). # fix (v3.81.2): model ids corrected against live probes on CLI 2.1.274 with the bot credential. (1) /fable was broken: claude-fable-5-5 does not exist ("issue with the selected model") — the real id is claude-fable-5-1. (2) A stderr warning on a SUCCESSFUL run was misread as model-unavailable: the CLI prints `[claude-code:unrecognized_model] {"model":"claude-sonnet-5-5[1m]"}` for ids newer than its catalog even though the API answers fine, and the "1m" in it matched the needle set, so every Sonnet 5.5 turn re-ran and tripped the process-wide 1M kill switch. New ClaudeRunner.result_is_error (from the result event); a clean result short-circuits _looks_like_model_unavailable. (3) The bare aliases lag: `sonnet` → claude-sonnet-5, `haiku` → claude-haiku-4-5. New MODEL_ALIAS_DEFAULT_PIN pins them to the 5.5 ids (env var still wins; alias fallback on rejection). Opus stays on the `opus` alias, which reaches claude-opus-5-5 from CLI 2.1.280+ (verified on 2.1.292; 2.1.274 gave claude-opus-5). Labels/help/macOS catalog updated (Fable 5.1, Sonnet 5.5, Haiku 5.5). # fix (v3.81.1): bot crash-looped on startup after the v3.81.0 restart with "SyntaxError: Non-UTF-8 code starting with '\xe2' ... line 9". launchd runs /usr/bin/python3 (3.9.6), whose script tokenizer reads long lines in chunks and rejects a multibyte char split across a chunk boundary; this changelog line grew past ~17KB and hit it (py_compile and newer Pythons were fine, so it went unnoticed). Added an explicit "# -*- coding: utf-8 -*-" cookie, which routes the tokenizer through the codec reader. Regression test runs the real file through /usr/bin/python3. # feat (v3.81.0): turn integrity — a turn can no longer be lost, leaked into argv, or delivered twice. (1) Dead --resume: a Claude transcript lives at ~/.claude/projects/<encoded-cwd>/<id>.jsonl, so it is bound to the cwd it was recorded under AND pruned after ~30 days; passing --resume for a missing one makes the CLI exit with "No conversation found with session ID", num_turns=0 and is_error=true (verified against CLI 2.1.274), spending the user's turn on an error. New _claude_transcript_exists() (reuses _encode_project_dir, until now only used by the /resume picker) is checked before the flag is added; run() drops the stale id, logs it, and sets runner.resume_dropped so _finalize_response states the history is gone instead of letting a silent context loss look like the agent forgetting. Fails open on OSError so a filesystem fluke never discards a live transcript. (2) The prompt moved from argv to stdin via --input-format stream-json (one `user` message, then EOF = one turn, verified live with and without --resume): argv is readable by any local process through `ps` — prompts carry private vault content and whatever was pasted — and is capped by ARG_MAX (1MB on macOS), where a long paste plus an injected memory block would die with E2BIG. _spawn_and_read feeds stdin from a named daemon thread (_feed_stdin) while _read_stream drains stdout, so a prompt larger than the 64KB pipe buffer cannot deadlock against the CLI's own init event; the pipe is passed as an argument because _cleanup() drops self.process the moment the stream ends. /btw keeps using its queue fallback (stdin was already closed before this change). (3) Telegram retries no longer risk duplicates: the Bot API has no idempotency key, and tg_request retried 3x on ANY exception, so an ambiguous sendMessage failure could deliver the same message twice. _tg_retry_is_safe() splits on whether the failure proves the request never left — urllib wraps connect/send errors (DNS, no route, refused, TLS handshake timeout) in URLError, which covers ~90 of the 93 send failures in this bot's own logs, while a bare socket timeout comes from reading the response and a reset can land after the body flushed (3 observed) → stop and log "delivery UNKNOWN". _tg_http_retry_is_safe() adds the status rule: 429 always retries, 4xx is final (answerCallbackQuery "query is too old" was logged three times per event), 5xx retries only where a duplicate is impossible. Reads and idempotent writes retry as before. Same policy applied to _tg_upload_file. New tests/test_turn_integrity.py (32 tests; 30 of them fail against the previous commit). # fix (v3.80.1): the live Reasoning panel rendered as a broken stack of quote bubbles with leaked backticks and commands spilling outside the quote. Three compounding defects: (1) _md_text_to_html converted EVERY "> " line into its own <blockquote>, so the panel (which quotes line by line) became N collapsible bubbles instead of one quote; (2) inline-code spans are extracted before that line pass, so a quoted line holding `code` had its quote closed early and the command rendered OUTSIDE the bubble; (3) tool-log hints were `value[:60]` of the raw tool input, so a heredoc/multi-line command kept its newlines — the single-line inline-code regex then failed to match and the backticks leaked literally, splitting the entry across quote lines. Blockquote conversion moved up to _md_prose_to_html, which now groups consecutive "> " lines into ONE <blockquote> and runs the inline pass (new _md_inline_to_html) on the joined inner text, so code spans stay inside the quote. New _tool_hint() collapses whitespace before truncating, used by both the Claude and Codex stream readers. Tests: BlockquoteGrouping + ToolHint in test_message_helpers (10 tests). # feat (v3.80.0): the General topic of an agent forum now has an owner — the vault's default agent (`default: true`, normally Main). Root cause of a 6-month-old drift: an agent can only claim a NAMED topic (`_build_agent_chat_map` requires chat_id+thread_id), so `_resolved_agent_for_chat` returned None for thread_id=None and the General context simply kept whichever agent its session was last switched to. Creating an agent from General was enough to poison it permanently — `/agent new` calls cmd_agent_switch on the creating context, so General answered as that specialist from then on (observed: contador-pj answering in General since May, signature "💼 Contador Pj"). Now _resolved_agent_for_chat gains step 3: thread_id=None + non-secondary chat + the chat already has topic-bound agents → default_agent() (new module helper). Scoped that way so a plain single-room group (no topic bindings) keeps honoring its manual /agent choice, and secondary chats keep using their own chats.json default (never the vault default — that would expose Main's vault to a guest). _find_agent_for_chat now refreshes the agent map BEFORE the thread_id guard so General routing never reads a stale map. _auto_activate_agent resets session_id/codex_thread_id when the agent actually changes: a transcript belongs to the cwd it was recorded under, so the healed General session starts fresh instead of asking the CLI to resume another agent's project dir. New tests/test_agent_routing.py (10 tests). feat (v3.79.0): models 5.5 consolidation — updated to Opus 5.5, Sonnet 5.5, Haiku 5.5, and Fable 5.5 as the canonical models (removed legacy 4.x support). Reduced DEFAULT_EFFORT from "max" to "high" to balance reasoning quality with cost efficiency across routine tasks. Removed z.AI (GLM) support entirely per cleanup commit. Updated MODEL_FALLBACK_CHAIN and all model descriptions. # fix (v3.78.3): Opus model migration — the CLI's bare `opus` alias now resolves directly to claude-opus-5 (verified via a live probe reading the init event's `model` field), so the OPUS_MODEL=claude-opus-4-8 pin added in v3.70 (back when the alias still lagged behind 4.8) is now stale and was forcing every Opus turn onto the older 4.8 model instead of the CLI's current default. Removed the pin from .env per the documented unset-when-caught-up policy. Updated MODEL_FULL_IDS' opus display-fallback id, the `/opus` help text, ClaudeBotManager's ModelCatalog label, and doc/comment examples referencing claude-opus-4-8 to claude-opus-5. The Fast Mode pricing note ($50/MTok output) is unchanged — Opus 5 fast-mode pricing matches Opus 4.8's, confirmed against current Anthropic pricing. # fix (v3.78.2): idle auto-compact notification ("🔄 Auto-compact (sessão … inativa Xh)") is no longer sent to Telegram. It was already disable_notification=True (silent — no sound/vibration) since v3.27.0, but the message still appeared in the chat and bumped the unread count; per user request the passive idle auto-compact now runs fully silently and sends nothing. The event is still recorded in bot.log (the "Idle compact:" logger.info in _check_idle_sessions plus _auto_compact's "Auto-compact starting/completed" logs). The 🧹 idle-CLEAR notification (session reset after longer inactivity) is unchanged — only the compact ping was removed. # fix (v3.78.1): document & audio downloads failed with "❌ Não consegui baixar o arquivo" whenever /tmp/claude-bot-files or /tmp/claude-bot-audio had been swept by macOS's periodic /tmp cleaner — those dirs were mkdir'd once at process startup and never recreated, so save_path.write_bytes() hit ENOENT days later. _download_telegram_file now does save_dir.mkdir(parents=True, exist_ok=True) right before writing, making downloads resilient to /tmp cleanup (images were unaffected only because their dir stays populated). # feat (v3.78.0): Fable 5 + Sonnet 5 — two new native-Anthropic models selectable via /fable and /sonnet5 (plus the /model keyboard). Both are registered as bot keys (`fable` → claude-fable-5, `sonnet-5` → claude-sonnet-5) in MODEL_PROVIDERS/MODEL_FULL_IDS; because neither is a bare alias the Claude CLI resolves on its own, a new MODEL_CONCRETE_ID map makes resolve_model_alias() hand the CLI the concrete id, and ClaudeRunner.run()'s model-unavailable retry drops to that concrete id (not the unknown bare key) for these. Both get the [1m] max-context suffix (1M window). _resume_model_alias() recognizes claude-fable-5 → fable and claude-sonnet-5 → sonnet-5 (matched before the generic claude-sonnet rule so Sonnet 5 doesn't collapse into Sonnet 4.6). Swift ModelCatalog kept in sync (contract test) and its stale test set brought current (gpt-* + new models, Opus label 4.7→4.8). # feat (v3.77.0): /resume — continue a Claude Code session started elsewhere (the Claude desktop app / Claude.app, or a terminal) directly from Telegram. The desktop app, when pointed at a real local folder, runs the SAME Claude Code engine — its sessions land in ~/.claude/projects/<cwd>/<id>.jsonl and are indexed (title/cwd/model/cliSessionId/lastActivityAt) under ~/Library/Application Support/Claude/claude-code-sessions. /resume reads that index (alive + non-archived only — Claude Code prunes transcripts after ~30 days), merges it with the bot's own Telegram sessions (sessions.json), dedupes by session_id, sorts by last activity, and shows an inline picker (top 20). Picking one creates a NEW bot session that resumes the chosen session_id under its original cwd (an external project runs under Main; a vault dir keeps its agent). Primary chat only (resumes run with full permissions and may point cwd outside the vault). New module helpers: _encode_project_dir, _resume_model_alias, _clean_title, _resume_relative_time, _short_cwd, _scan_claude_app_sessions. # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
+BOT_VERSION = "3.92.0"  # # feat (v3.92.0): the bot never changes model on its own — when a model fails it shows the error and ASKS (✅ Usar X / ❌ Ficar no Y, mswitch:<id>); on yes the session switches and the failed message is answered by the new model (with the conversation when crossing Claude ↔ GPT). When the limit is over it asks to go back instead of restoring silently. Two kinds of limit (usage_limit_scope): a model limit ("Fable limit") offers Opus; the account's 5-hour ("session limit") or weekly limit offers GPT. "You've hit your session limit" was classified UNKNOWN — now RATE_LIMIT with a friendly message and its reset time parsed ("resets 4:20am (America/Sao_Paulo)"). Routines never switch. # feat (v3.91.0): new fallback order — Fable → Opus, and any other Claude failure (Opus, Sonnet, Haiku) goes straight to ChatGPT (MODEL_FALLBACK_CHAIN default fable,opus,gpt; models outside the chain jump to the first other-provider entry). A turn that crosses Claude ↔ GPT — automatic fallback, rate-limit restore or manual switch — now hands over the conversation: read_claude_transcript() reads the Claude session file (persistent, survives restarts) and the new model gets a recap plus the full conversation in ~/.claude-bot/handoffs/ (0600, pruned after 7 days); after a one-off GPT answer the exchange is handed back to Claude. # feat (v3.90.0): agents report to the owner's private chat — routines, pipeline notices, AGENT_CHAT_ID and scripts/telegram_notify.py now go to the agent's private topic (private_chat_id/private_thread_id from /agent topicos) where live drafts, widgets and effects work; agents without one keep their group topic, the default agent goes to the private chat; AGENT_REPORT_TO=group restores the old routing (agent_report_route()). ChatGPT is the last fallback: new model key "gpt" = the ChatGPT account's default model (Codex gets no --model, so the slug never goes stale — gpt-5 and gpt-5.5 are now refused, default is gpt-6.1-sol); MODEL_FALLBACK_CHAIN default opus,sonnet-5,haiku,gpt; /gpt and the picker use it; its name comes from ~/.codex/config.toml. Mac app model labels follow ~/.claude-bot/model-ids.json. # # fix (v3.89.1): model names shown to the user come from one place and follow upgrades — /model said "Modelo alterado para sonnet-5" (the internal key) for Sonnet 5.5; model_display_name() now derives "Sonnet 5.5" from the id the CLI really ran last time (learn_model_id, persisted in ~/.claude-bot/model-ids.json) or MODEL_FULL_IDS, and every model mention (/model confirmation and buttons, /status, /sessions, /switch, /clone, /agent…) uses it. PinchTab removed: no more browser health check/alerts, BROWSER_MCP now opt-in (default off, CDP default :9222); agents use Safari via scripts/safari.py. # # feat (v3.89.0): Telegram Bot API 9.4–10.4 features — colored inline buttons (green confirm, red stop/cancel) and tappable buttons inside model answers; absolute dates/times as date_time entities in the reader's timezone; /cost and /routine status as live HTML widgets with refresh in private chats; private chats stream answers as native drafts with Telegram's own stop button and a 🎉 effect on long tasks (groups unchanged). # # feat (v3.88.0): the 🧠 reasoning panel no longer cuts mid-word or breaks its formatting. It was the last 1500 raw chars of thinking under a separate tool log, sliced at any byte — mid-word, mid-**bold**, or inside a ``` fence, which closed the HTML quote early and leaked raw ">" markers into a code block; the whole display was then sliced from the front when long, cutting the panel header. Now ClaudeRunner keeps a chronological reasoning_log (thoughts and tool calls in order) and _render_reasoning_panel shows it as one timeline: whole old steps are dropped (with "… N passos anteriores"), only the oldest kept step may be shortened and then at a word; _clean_reasoning_text removes fences (keeps code lines), headings, nested quotes, blank lines and unbalanced **/` markers. Budgets follow the delivery path: 1800 chars in HTML (4096 cap), 6000 in rich previews (32768 cap, whole preview up to 14000). The answer preview is trimmed at a line break and re-opens a code block when the cut lands inside one (_trim_preview_tail); an oversized display drops the panel instead of slicing its header. Header is plain "🧠 Raciocínio". # # feat (v3.87.0): agent topics in the owner's private chat. Bot API 9.3/9.4 lets a bot create forum topics in a private chat once topics are enabled for it in @BotFather (getMe.has_topics_enabled). New `/agent topicos` creates one topic per agent (default agent first, named "<icon> <name>") in the owner's private chat, posts a hello inside it, and binds it through new frontmatter fields private_chat_id + private_thread_id — a second binding next to the group topic (chat_id + thread_id), which keeps working; routines still report to the group topic. Re-running skips agents already bound; failures are listed. When topics are still off it explains the BotFather switch instead of failing. _build_agent_chat_map maps both bindings, so messages outside any topic in the private chat go to the default agent (same rule as a forum's General). New set_agent_frontmatter_fields() edits hub frontmatter line by line, keeping every other key and the body intact. # # feat (v3.86.0): messages sent mid-turn can reach the running answer again, and the user picks what happens. Since v3.81 the prompt went on stdin and stdin was closed right after it, so send_btw always failed (and its legacy "/btw <msg>" plain-text line was never valid stream-json anyway) — every mid-turn message was queued. ClaudeRunner now keeps stdin open during the turn (_prime_stdin), writes a mid-turn message as another stream-json user message (send_btw/can_inject, backlog until the prompt is written, replayed on the 1M-fallback re-spawn) and closes stdin on the first `result` event, on cancel and on cleanup. Verified live on CLI 2.1.292: a message written during tool calls is folded into the same answer; one written at the very end runs as one more turn with its own result — both results are kept (joined) and accumulated text gets a separator. New BUSY_MESSAGE_MODE (ask|now|queue, default ask): ask shows [⚡ Mandar agora] [⏳ Depois] [🛑 Parar e mandar] replying to the message; no tap within BUSY_CHOICE_SECONDS (default 10) picks "now" (or "later" when the turn cannot take input, e.g. Codex); a card still open when the turn ends is queued and runs immediately; "stop" cancels the turn and puts the message first in the queue. /btw still sends immediately. # # feat (v3.85.0): every agent may now style answers with Telegram Rich Messages. The system prompt said "NEVER use tables" from the HTML-only days; with RICH_MESSAGES on it now tells agents to use headings, bold, small tables, task lists, blockquotes and <details> when they help (and keep short answers plain). RICH_MESSAGES=off keeps the old no-tables rule. # feat (v3.84.0): browser tools for agents. Telegram agents kept saying they had no browser: PinchTab's two LaunchAgents had been refused by macOS since 2026-09-05 (launchd exit 78, posix_spawn EPERM — "Allow in the Background" off), and even when up it was only a Bash CLI. Every unrestricted native-Anthropic run now gets `--mcp-config ~/.claude-bot/browser-mcp.json`: Playwright MCP (@playwright/mcp@0.0.83, pinned) attached over CDP to PinchTab's logged-in headless Chrome (BROWSER_CDP_URL, default :9869) — navigate/snapshot/click/type like the desktop app, same sessions, no second browser. Only added when the CDP endpoint answers (probe cached 60s) and npx exists; never in restricted (guest) runs. Verified end to end on CLI 2.1.292 (server `browser` connected, navigate/snapshot/close used). New browser health check in the idle watchdog (first run 90s after start): after 2 failed checks it alerts the primary chats once with the PinchTab API/CDP state and launchd exit codes — exit 78 explains the macOS fix — and announces recovery. Silent when PinchTab isn't installed. Tooling.md tells agents to prefer the MCP tools and always browser_close. # feat (v3.83.0): Telegram audit Lote 3. Model answers (final reply, streaming preview, routine output) go out as Telegram Rich Messages (Bot API 10.1: sendRichMessage / editMessageText rich_message) — native tables, task lists, collapsible sections, up to 32768 chars per message instead of 4096. Opt-in per call (rich=True) so internal status messages stay on HTML; every failure falls back to the HTML path, an ambiguous rich send is never repeated, and a process-wide kill switch disables rich if the API rejects it (RICH_MESSAGES env, default on). Rich is tried first inside _deliver_final_text, so Lote 2's delivery confirmation, retry and placeholder retirement still apply. _rich_markdown_from_model escapes $, ==, || and lone ~ in prose so prices and the cost line don't render as LaTeX/highlight/spoiler. The streaming reasoning panel is collapsed by default (<blockquote expandable> / rich <details>). Turns longer than NOTIFY_DONE_AFTER_SECONDS (default 20) whose answer landed by editing the placeholder get a notifying "✅ Pronto · <duração>" reply, since Telegram doesn't notify edits. API shape verified against the live Bot API with an invalid chat ("chat not found", not "method not found"). # fix (v3.82.3): Telegram audit Lote 2 — reliable delivery. Final answers are measured after HTML conversion and never silently truncated (edit_message refuses to truncate unless preview=True; _deliver_final_text edits in place with the copy-code button or sends in full). Failures carry a per-thread TgResult: plain-text fallback only on "can't parse entities", "message is not modified" is success, a send of unknown outcome is never repeated, a failed chunk stops the rest. Shared TelegramRateLimiter (per chat: private ~1/s burst 3, groups 20/min; global 30/s; full 429 retry_after honored) drops streaming previews/chat actions while throttled; group streaming edits every 4.5s. A final delivery stays registered/cached until confirmed; _handle_undelivered_final notifies and retries once. Polling backs off 5s→60s on failure, calls deleteWebhook once on 409 and alerts the primary chat on 409/401 (hourly). Atomic offset writes; corrupt offset logged; truthful restart notice (marker kept until delivered). Multipart: JSON-encoded object fields, escaped filenames, mimetypes, size-scaled timeout; _send_as_document uses reply_parameters. Files over 20MB refused with the reason; unique download names. # fix (v3.82.2): Telegram audit Lote 1. Commands sent as a reply are dispatched as commands (reply context was prepended, so `/stop` went to Claude as a prompt). Routines never route to an empty chat_id: the polling loop called _get_context("") for every callback_query, creating and persisting a ("", None) context that dict-order routing picked for Main routines (4 routine deliveries lost on 2026-10-12); _get_context now returns a transient context for empty/"0" ids, _load_contexts drops them, and default-agent routines go to the primary forum's General topic, then the owner's private chat. Reactions use only Telegram-allowed emojis (bare ✍, 🤓 instead of 🧠); a failed reaction is logged at WARNING and not recorded. Guest (secondary) chats get an explicit command allowlist (SECONDARY_ALLOWED_COMMANDS) with their own help and chat-scoped menu, and /delegate runs restricted there. Hyphenated commands gained underscore aliases; menus and HELP_TEXT match handler_map and command names are tappable. A message sent mid-turn no longer takes over the running turn's reactions/reply target; queued items keep their message id. callback_data over 64 bytes is swapped for short cbref ids. Startup ping is silent, /cmd@otherbot is ignored, unauthorized callbacks are answered. # fix (v3.82.1): concurrent Telegram updates raced on one runner. _run_claude_prompt checked runner.running (only set True deep inside run()), so two messages arriving together in the same ThreadContext both called run() on the SAME runner; the first run's _cleanup() closed the second's pipes and nulled self.process, crashing _read_stream with AttributeError and sending the turn down the fallback chain (seen on 6 backlogged startup updates). Now ThreadContext.claim_turn() makes check-and-claim atomic on the outermost call (retry/fallback/queue-drain recursion re-enters on the owner thread); losers /btw or queue, and _release_turn drains the queue under turn_lock before releasing so nothing is stranded. _read_stream/_cleanup (Claude + Codex) now use a local proc handle and never clear a process they did not own. # # feat (v3.82.0): cheaper, continuous routines + native compaction. (1) `script:` routines — a shell command runs instead of a model turn (zero tokens): /bin/bash -c from the repo root with AGENT_ID/AGENT_WORKSPACE/VAULT_DIR/ROUTINE_NAME exported; empty stdout (or bare NO_REPLY) = silence, other stdout delivered verbatim, non-zero exit/timeout (`timeout:`, default 300s) = failure with the stderr tail. Refused for agents serving a secondary chat (a guest-steered agent could otherwise write a shell escape into its own Routines/). (2) Continuity — every routine run is recorded to ~/.claude-bot/routine-history/<agent>/<routine>.jsonl (last 20); `context_from: self` (or same-agent routine names) + `context_runs: N` inject previous outputs before the task, so a daily briefing knows what it said yesterday. `failure_deliver: silent` records failures without posting them. All six RoutineTask construction sites now share routine_task_from_frontmatter() (the control API had been dropping `voice`). (3) Native compaction — every Anthropic run gets CLAUDE_CODE_AUTO_COMPACT_WINDOW (AUTO_COMPACT_WINDOW env, default 400000; verified in --print/--resume on CLI 2.1.292, which emits a compact_boundary event now logged and kept in runner.native_compact). The every-20-turns /compact is gone; that interval now only snapshots memory (journal + hot cache), silently. Idle compact unchanged (the CLI's idle compaction is server-flag gated). # fix (v3.81.2): model ids corrected against live probes on CLI 2.1.274 with the bot credential. (1) /fable was broken: claude-fable-5-5 does not exist ("issue with the selected model") — the real id is claude-fable-5-1. (2) A stderr warning on a SUCCESSFUL run was misread as model-unavailable: the CLI prints `[claude-code:unrecognized_model] {"model":"claude-sonnet-5-5[1m]"}` for ids newer than its catalog even though the API answers fine, and the "1m" in it matched the needle set, so every Sonnet 5.5 turn re-ran and tripped the process-wide 1M kill switch. New ClaudeRunner.result_is_error (from the result event); a clean result short-circuits _looks_like_model_unavailable. (3) The bare aliases lag: `sonnet` → claude-sonnet-5, `haiku` → claude-haiku-4-5. New MODEL_ALIAS_DEFAULT_PIN pins them to the 5.5 ids (env var still wins; alias fallback on rejection). Opus stays on the `opus` alias, which reaches claude-opus-5-5 from CLI 2.1.280+ (verified on 2.1.292; 2.1.274 gave claude-opus-5). Labels/help/macOS catalog updated (Fable 5.1, Sonnet 5.5, Haiku 5.5). # fix (v3.81.1): bot crash-looped on startup after the v3.81.0 restart with "SyntaxError: Non-UTF-8 code starting with '\xe2' ... line 9". launchd runs /usr/bin/python3 (3.9.6), whose script tokenizer reads long lines in chunks and rejects a multibyte char split across a chunk boundary; this changelog line grew past ~17KB and hit it (py_compile and newer Pythons were fine, so it went unnoticed). Added an explicit "# -*- coding: utf-8 -*-" cookie, which routes the tokenizer through the codec reader. Regression test runs the real file through /usr/bin/python3. # feat (v3.81.0): turn integrity — a turn can no longer be lost, leaked into argv, or delivered twice. (1) Dead --resume: a Claude transcript lives at ~/.claude/projects/<encoded-cwd>/<id>.jsonl, so it is bound to the cwd it was recorded under AND pruned after ~30 days; passing --resume for a missing one makes the CLI exit with "No conversation found with session ID", num_turns=0 and is_error=true (verified against CLI 2.1.274), spending the user's turn on an error. New _claude_transcript_exists() (reuses _encode_project_dir, until now only used by the /resume picker) is checked before the flag is added; run() drops the stale id, logs it, and sets runner.resume_dropped so _finalize_response states the history is gone instead of letting a silent context loss look like the agent forgetting. Fails open on OSError so a filesystem fluke never discards a live transcript. (2) The prompt moved from argv to stdin via --input-format stream-json (one `user` message, then EOF = one turn, verified live with and without --resume): argv is readable by any local process through `ps` — prompts carry private vault content and whatever was pasted — and is capped by ARG_MAX (1MB on macOS), where a long paste plus an injected memory block would die with E2BIG. _spawn_and_read feeds stdin from a named daemon thread (_feed_stdin) while _read_stream drains stdout, so a prompt larger than the 64KB pipe buffer cannot deadlock against the CLI's own init event; the pipe is passed as an argument because _cleanup() drops self.process the moment the stream ends. /btw keeps using its queue fallback (stdin was already closed before this change). (3) Telegram retries no longer risk duplicates: the Bot API has no idempotency key, and tg_request retried 3x on ANY exception, so an ambiguous sendMessage failure could deliver the same message twice. _tg_retry_is_safe() splits on whether the failure proves the request never left — urllib wraps connect/send errors (DNS, no route, refused, TLS handshake timeout) in URLError, which covers ~90 of the 93 send failures in this bot's own logs, while a bare socket timeout comes from reading the response and a reset can land after the body flushed (3 observed) → stop and log "delivery UNKNOWN". _tg_http_retry_is_safe() adds the status rule: 429 always retries, 4xx is final (answerCallbackQuery "query is too old" was logged three times per event), 5xx retries only where a duplicate is impossible. Reads and idempotent writes retry as before. Same policy applied to _tg_upload_file. New tests/test_turn_integrity.py (32 tests; 30 of them fail against the previous commit). # fix (v3.80.1): the live Reasoning panel rendered as a broken stack of quote bubbles with leaked backticks and commands spilling outside the quote. Three compounding defects: (1) _md_text_to_html converted EVERY "> " line into its own <blockquote>, so the panel (which quotes line by line) became N collapsible bubbles instead of one quote; (2) inline-code spans are extracted before that line pass, so a quoted line holding `code` had its quote closed early and the command rendered OUTSIDE the bubble; (3) tool-log hints were `value[:60]` of the raw tool input, so a heredoc/multi-line command kept its newlines — the single-line inline-code regex then failed to match and the backticks leaked literally, splitting the entry across quote lines. Blockquote conversion moved up to _md_prose_to_html, which now groups consecutive "> " lines into ONE <blockquote> and runs the inline pass (new _md_inline_to_html) on the joined inner text, so code spans stay inside the quote. New _tool_hint() collapses whitespace before truncating, used by both the Claude and Codex stream readers. Tests: BlockquoteGrouping + ToolHint in test_message_helpers (10 tests). # feat (v3.80.0): the General topic of an agent forum now has an owner — the vault's default agent (`default: true`, normally Main). Root cause of a 6-month-old drift: an agent can only claim a NAMED topic (`_build_agent_chat_map` requires chat_id+thread_id), so `_resolved_agent_for_chat` returned None for thread_id=None and the General context simply kept whichever agent its session was last switched to. Creating an agent from General was enough to poison it permanently — `/agent new` calls cmd_agent_switch on the creating context, so General answered as that specialist from then on (observed: contador-pj answering in General since May, signature "💼 Contador Pj"). Now _resolved_agent_for_chat gains step 3: thread_id=None + non-secondary chat + the chat already has topic-bound agents → default_agent() (new module helper). Scoped that way so a plain single-room group (no topic bindings) keeps honoring its manual /agent choice, and secondary chats keep using their own chats.json default (never the vault default — that would expose Main's vault to a guest). _find_agent_for_chat now refreshes the agent map BEFORE the thread_id guard so General routing never reads a stale map. _auto_activate_agent resets session_id/codex_thread_id when the agent actually changes: a transcript belongs to the cwd it was recorded under, so the healed General session starts fresh instead of asking the CLI to resume another agent's project dir. New tests/test_agent_routing.py (10 tests). feat (v3.79.0): models 5.5 consolidation — updated to Opus 5.5, Sonnet 5.5, Haiku 5.5, and Fable 5.5 as the canonical models (removed legacy 4.x support). Reduced DEFAULT_EFFORT from "max" to "high" to balance reasoning quality with cost efficiency across routine tasks. Removed z.AI (GLM) support entirely per cleanup commit. Updated MODEL_FALLBACK_CHAIN and all model descriptions. # fix (v3.78.3): Opus model migration — the CLI's bare `opus` alias now resolves directly to claude-opus-5 (verified via a live probe reading the init event's `model` field), so the OPUS_MODEL=claude-opus-4-8 pin added in v3.70 (back when the alias still lagged behind 4.8) is now stale and was forcing every Opus turn onto the older 4.8 model instead of the CLI's current default. Removed the pin from .env per the documented unset-when-caught-up policy. Updated MODEL_FULL_IDS' opus display-fallback id, the `/opus` help text, ClaudeBotManager's ModelCatalog label, and doc/comment examples referencing claude-opus-4-8 to claude-opus-5. The Fast Mode pricing note ($50/MTok output) is unchanged — Opus 5 fast-mode pricing matches Opus 4.8's, confirmed against current Anthropic pricing. # fix (v3.78.2): idle auto-compact notification ("🔄 Auto-compact (sessão … inativa Xh)") is no longer sent to Telegram. It was already disable_notification=True (silent — no sound/vibration) since v3.27.0, but the message still appeared in the chat and bumped the unread count; per user request the passive idle auto-compact now runs fully silently and sends nothing. The event is still recorded in bot.log (the "Idle compact:" logger.info in _check_idle_sessions plus _auto_compact's "Auto-compact starting/completed" logs). The 🧹 idle-CLEAR notification (session reset after longer inactivity) is unchanged — only the compact ping was removed. # fix (v3.78.1): document & audio downloads failed with "❌ Não consegui baixar o arquivo" whenever /tmp/claude-bot-files or /tmp/claude-bot-audio had been swept by macOS's periodic /tmp cleaner — those dirs were mkdir'd once at process startup and never recreated, so save_path.write_bytes() hit ENOENT days later. _download_telegram_file now does save_dir.mkdir(parents=True, exist_ok=True) right before writing, making downloads resilient to /tmp cleanup (images were unaffected only because their dir stays populated). # feat (v3.78.0): Fable 5 + Sonnet 5 — two new native-Anthropic models selectable via /fable and /sonnet5 (plus the /model keyboard). Both are registered as bot keys (`fable` → claude-fable-5, `sonnet-5` → claude-sonnet-5) in MODEL_PROVIDERS/MODEL_FULL_IDS; because neither is a bare alias the Claude CLI resolves on its own, a new MODEL_CONCRETE_ID map makes resolve_model_alias() hand the CLI the concrete id, and ClaudeRunner.run()'s model-unavailable retry drops to that concrete id (not the unknown bare key) for these. Both get the [1m] max-context suffix (1M window). _resume_model_alias() recognizes claude-fable-5 → fable and claude-sonnet-5 → sonnet-5 (matched before the generic claude-sonnet rule so Sonnet 5 doesn't collapse into Sonnet 4.6). Swift ModelCatalog kept in sync (contract test) and its stale test set brought current (gpt-* + new models, Opus label 4.7→4.8). # feat (v3.77.0): /resume — continue a Claude Code session started elsewhere (the Claude desktop app / Claude.app, or a terminal) directly from Telegram. The desktop app, when pointed at a real local folder, runs the SAME Claude Code engine — its sessions land in ~/.claude/projects/<cwd>/<id>.jsonl and are indexed (title/cwd/model/cliSessionId/lastActivityAt) under ~/Library/Application Support/Claude/claude-code-sessions. /resume reads that index (alive + non-archived only — Claude Code prunes transcripts after ~30 days), merges it with the bot's own Telegram sessions (sessions.json), dedupes by session_id, sorts by last activity, and shows an inline picker (top 20). Picking one creates a NEW bot session that resumes the chosen session_id under its original cwd (an external project runs under Main; a vault dir keeps its agent). Primary chat only (resumes run with full permissions and may point cwd outside the vault). New module helpers: _encode_project_dir, _resume_model_alias, _clean_title, _resume_relative_time, _short_cwd, _scan_claude_app_sessions. # fix (v3.76.1): auth-hardening review fixes — (1) _exp_seconds() coerces a malformed OAuth expires_in so a successful refresh is never dropped to the keychain fallback; (2) _save_bot_auth writes the temp file 0600 from creation (os.open) instead of chmod-after-write, closing a transient world-readable window; (3) CodexRunner strips CLAUDE_CODE_OAUTH_TOKEN so the Anthropic credential never reaches the OpenAI codex binary; (4) resolve_oauth_bearer serializes the oauth refresh under _AUTH_REFRESH_LOCK and re-reads creds inside the lock so concurrent topics don't each rotate (and invalidate) the refresh token; (5) the bare-code interceptor now runs AFTER the edit-mode/manual-review interceptors so a pending /auth login can't shadow pipeline edit feedback. # feat (v3.76.0): auth hardening — bot-owned Anthropic credential + remote diagnosis/recovery via Telegram. Root cause eliminated: the bot relied on the shared macOS keychain OAuth login (Claude Code-credentials), which the desktop app's token rotation silently revokes → every Anthropic turn 401s with no remote fix. Now the bot keeps its OWN credential and injects it via CLAUDE_CODE_OAUTH_TOKEN (which the CLI honors OVER the keychain), in ~/.claude-bot/claude-auth.json (0600). Two shapes: setup_token (long-lived `claude setup-token`, ~1y, immune to rotation) and oauth (access+refresh minted by the in-Telegram /auth login PKCE flow, auto-refreshed before expiry against platform.claude.com/v1/oauth/token). resolve_oauth_bearer() resolves the bearer (file > CLAUDE_CODE_OAUTH_TOKEN env/.env > keychain fallback); injected in ClaudeRunner.run for native-Anthropic runs only (popped for z.AI). New /auth command (primary-chat only): `/auth` status + live haiku probe + keychain-expiry diagnostic; `/auth login` → PKCE link you open on your phone, then `/auth code <código>` (or bare-paste the code) exchanges it; `/auth set <token>` installs a long-lived token; `/auth logout` reverts to keychain. Proactive _alert_auth_failure() notifies the primary chat (throttled 10min) with remote-fix steps when an Anthropic turn 401s instead of falling through silently. Friendly 401 message now points to /auth. # feat (v3.75.0): /morri command — activates a personal "legacy"/in-case-i-die knowledge base. Content lives in vault/main/Legacy (gitignored; blank PT-BR templates ship in templates/legacy and are scaffolded on first use). On a real trigger it sends a static, AI-independent acolhimento first (folder path + start-here, so the essentials reach a grieving reader even if the LLM/subscription/Mac is down), then spawns Claude to guide whoever is left through contacts/finances/crypto/digital-life/wishes/Brazilian-bureaucracy with care; secrets stay as pointers, never plaintext. Blocked in secondary chats via _block_if_secondary. `/morri teste` runs a gap-review for the operator in life. # feat: /fast command — per-session toggle for Claude Code Fast mode (Opus, faster output). ClaudeRunner.run() appends --settings '{"fastMode": true}' when the session has fast_mode on AND resolves to an Opus model; strictly gated (anthropic + opus + non-restricted) so Sonnet/Haiku/GLM/GPT and secondary chats never trigger the credit-burning flag. New Session.fast_mode field (default False — fast mode draws pay-as-you-go usage credits even on subscription auth). Init-event fast_mode_state is captured into ClaudeRunner.captured_fast_mode; the response signature appends ⚡ when it actually engaged, and /status surfaces it (flagged inactive when the session isn't on Opus). # feat (v3.73.0): expose gpt-5.5 in the macOS model catalog + MODEL_PROVIDERS contract test (runtime support already shipped). # fix (v3.72.3): exclude haiku from [1m] context suffix — haiku-4-5 has no 1M variant and CLI v2.1.153+ hangs instead of rejecting it, causing curate step to time out every run # fix: watchdog timeout messages sent to wrong chat — capture chat_id/thread_id at spawn time instead of reading self._chat_id from the watchdog thread (which has no thread-local ctx and falls back to primary chat). # fix: HTML formatting reliability — the v3.72.0 converter produced HTML that Telegram 400s, so responses frequently fell back to unformatted plain text. Three root causes fixed: (1) "## **Título**" became invalid nested <b><b>…</b></b> — headings now strip inline * and allow leading whitespace (no more leaked ##), and a new _sanitize_telegram_html() collapses any nested same-tag, closes unclosed tags, drops stray/unsupported tags (runs at the end of _markdown_to_html so the whole message is always valid); (2) long replies split between <b> and </b> ("Can't find end of Bold entity") — new _rebalance_html_chunks() closes open tags at each chunk end and reopens them at the next chunk start, wired into send_message after _split_message; (3) edit_message truncation could cut a tag — it now drops a partial trailing tag and re-balances. Adds the first tests for the HTML converter (test_message_helpers: MarkdownToHtml, SanitizeTelegramHtml, RebalanceHtmlChunks). # feat (v3.72.0): switch Telegram formatting from MarkdownV2 to HTML — more robust, eliminates stray-backslash fallbacks. New _markdown_to_html converter: *bold*, **bold**, _italic_, `code`, ```fences```, [links](url), headings, blockquotes, strikethrough, tables→<pre>. Internal MDv2 escape sequences removed throughout. # feat (v3.71.0): the Telegram response signature now leads with the agent's own emoji icon (from its hub frontmatter) — "🤖 Main · claude-sonnet-4-6". New _agent_icon() helper (best-effort, defaults to 🤖). # fix (v3.70.1): the 1M-context fail-safe now catches the "Usage credits required for 1M context" error the CLI emits in result_text (stdout) with error_text empty — previously _looks_like_model_unavailable only inspected error_text/stderr, so the inner retry was skipped and the OUTER model-fallback chain switched the whole turn to GLM. Now _failure_blob() folds in result_text when it carries an API-error marker (never a normal answer that merely contains "1m"/"200k"), the turn retries on standard context, and a process-wide kill switch (_MAX_CONTEXT_RUNTIME_OFF, tripped only on context-related failures via _failure_is_context_related) stops appending [1m] for the rest of the process so we don't pay a failed-attempt tax every turn. NOTE: 1M context requires pay-as-you-go usage credits (claude.ai/settings/usage) even on subscription auth — without them [1m] is rejected and the bot runs standard 200K context. # feat (v3.70.0): maximum effort + maximum context by default, and an auto-tracking model signature. (1) ClaudeRunner now appends the [1m] max-context model variant for native Anthropic models (MAX_CONTEXT env, default on) and forces DEFAULT_EFFORT (env, default "max") when the caller didn't set one — pure helpers resolve_max_context_model() / resolve_effort() gate by provider so z.AI (proxied) and Codex are left alone. CodexRunner maps our richer effort scale down to its low|medium|high via CODEX_EFFORT_MAP (max→high). (2) Distribution-safe 1M fail-safe: if the [1m] variant is rejected (account/plan without 1M access), run() retries once on the base context (_spawn_and_read factored out; _looks_like_1m_rejection heuristic), logged, never silent. (3) The response signature now prefers the REAL model id the CLI resolves at runtime (captured from the init event into ClaudeRunner.captured_model, e.g. "claude-opus-4-8[1m]") for Anthropic, so a model upgrade (opus 4.7 → 4.8) surfaces with zero code edits; MODEL_FULL_IDS is now only a display fallback (opus bumped to claude-opus-4-8). (4) per-family model override (resolve_model_alias + OPUS_MODEL/SONNET_MODEL/HAIKU_MODEL env): the CLI's bare `opus` alias still resolves to 4.7 even on CLI 2.1.150, so an env pin (OPUS_MODEL=claude-opus-4-8) delivers 4.8 now; default unset keeps the auto-tracking alias, and run() falls back to the bare alias if the pinned id/[1m] is rejected (unified _looks_like_model_unavailable retry). (5) VALID_EFFORTS adds "xhigh"; /effort, /status (shows effort + context mode) and help reflect the new defaults.
 
 import base64
 import hmac
@@ -6787,6 +6787,11 @@ def _translate_error(raw: str) -> str:
             "Os servidores da Anthropic estão recebendo muitas requisições agora. "
             "Aguarde alguns minutos e tente de novo."
         )
+    if usage_limit_scope(raw):
+        label = usage_limit_label(raw)
+        m = re.search(r"resets?\s+([^\n·]+)", raw, re.I)
+        when = f"\nLibera: {m.group(1).strip()}" if m else ""
+        return f"❌ *Você atingiu o {label}*{when}"
     if "rate limit" in sl or "429" in sl:
         return (
             "❌ *Limite de requisições atingido (429)*\n"
@@ -6890,6 +6895,49 @@ _RECOVERY_MAP: Dict[ErrorKind, tuple] = {
 }
 
 
+_USAGE_LIMIT_RE = re.compile(
+    r"(?:you've|you have)\s+(?:hit|reached)\s+your\s+"
+    r"(?P<name>(?:fable|opus|sonnet|haiku|session|weekly|5-hour|daily)\s+limit|limit|usage limit)",
+    re.I)
+
+
+def usage_limit_scope(raw: str) -> Optional[str]:
+    """Which Claude usage limit a CLI error reports (v3.92), or None.
+
+    The CLI says "You've hit your <name>" / "You've reached your <name>", with
+    <name> one of "session limit" (the 5-hour window), "weekly limit",
+    "Fable limit", "Opus limit", "Sonnet limit" (CLI 2.1.292 strings).
+
+    * ``"model"``   — a per-model cap (Fable/Opus/Sonnet/Haiku): another
+      Claude model still works.
+    * ``"account"`` — the account's 5-hour or weekly cap (or an unnamed one):
+      every Claude model is blocked.
+    """
+    if not raw:
+        return None
+    m = _USAGE_LIMIT_RE.search(raw)
+    if not m:
+        return None
+    name = m.group("name").lower()
+    if name.split()[0] in ("fable", "opus", "sonnet", "haiku"):
+        return "model"
+    return "account"
+
+
+def usage_limit_label(raw: str) -> str:
+    """Plain PT-BR name of the limit in ``raw`` ("limite semanal da conta"…)."""
+    m = _USAGE_LIMIT_RE.search(raw or "")
+    name = (m.group("name").lower() if m else "")
+    first = name.split()[0] if name else ""
+    if first in ("fable", "opus", "sonnet", "haiku"):
+        return f"limite do {first.capitalize()}"
+    if first == "weekly":
+        return "limite semanal da conta"
+    if first in ("session", "5-hour"):
+        return "limite de 5 horas da conta"
+    return "limite de uso da conta"
+
+
 def classify_error(raw: str) -> ErrorKind:
     """Classify a raw CLI error string into an ErrorKind."""
     if not raw:
@@ -6900,6 +6948,8 @@ def classify_error(raw: str) -> ErrorKind:
         return ErrorKind.CONTEXT_TOO_LONG
     if "overloaded" in sl:
         return ErrorKind.OVERLOADED
+    if usage_limit_scope(raw):
+        return ErrorKind.RATE_LIMIT
     if "rate limit" in sl or "429" in sl:
         return ErrorKind.RATE_LIMIT
     if "authentication" in sl or "401" in sl or "invalid api key" in sl or "x-api-key" in sl:
@@ -6979,6 +7029,43 @@ def parse_rate_limit_reset(raw: str) -> Optional[float]:
                 return delta
         except (ValueError, ImportError):
             pass
+
+    # Claude CLI usage limits: "resets 4:20am (America/Sao_Paulo)",
+    # "resets 8pm (…)", "resets Nov 20, 4pm (…)" — wall-clock in that zone.
+    m = re.search(
+        r"resets?\s+(?:at\s+)?(?:(?P<mon>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?"
+        r"(?P<h>\d{1,2})(?::(?P<mi>\d{2}))?\s*(?P<ap>am|pm)(?:\s*\((?P<tz>[^)]+)\))?",
+        sl)
+    if m:
+        try:
+            import datetime as _dt
+            from zoneinfo import ZoneInfo
+            tz = None
+            if m.group("tz"):
+                raw_tz = re.search(r"\(([^)]+)\)", raw[m.start():])
+                try:
+                    tz = ZoneInfo(raw_tz.group(1).strip()) if raw_tz else None
+                except Exception:
+                    tz = None
+            now = _dt.datetime.now(tz) if tz else _dt.datetime.now().astimezone()
+            hour = int(m.group("h")) % 12 + (12 if m.group("ap") == "pm" else 0)
+            minute = int(m.group("mi") or 0)
+            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if m.group("mon"):
+                months = ["jan", "feb", "mar", "apr", "may", "jun",
+                          "jul", "aug", "sep", "oct", "nov", "dec"]
+                if m.group("mon") in months:
+                    target = target.replace(month=months.index(m.group("mon")) + 1,
+                                            day=int(m.group("day")))
+                    if target <= now:
+                        target = target.replace(year=target.year + 1)
+            elif target <= now:
+                target += _dt.timedelta(days=1)
+            delta = (target - now).total_seconds()
+            if delta > 0:
+                return delta
+        except (ValueError, ImportError) as exc:
+            logger.warning("Could not parse limit reset time from %r: %s", raw[:120], exc)
 
     # Weekly usage limit — Anthropic's weekly cap resets 7 days after first
     # request of the week; without a specific reset time we conservatively
@@ -7677,7 +7764,8 @@ def _format_duration(seconds: float) -> str:
     return f"{d}d" if h == 0 else f"{d}d {h}h"
 
 
-def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str]:
+def get_fallback_model(failed_model: str, error_kind: ErrorKind,
+                       limit_scope: Optional[str] = None) -> Optional[str]:
     """Return the model to try after ``failed_model`` fails, or None.
 
     Default chain (v3.91) is ``fable,opus,gpt``: Fable falls back to Opus, and
@@ -7688,7 +7776,9 @@ def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str
 
     Skips gpt-* models when the codex CLI isn't installed. Skips same-provider
     models for AUTH/CREDIT/RATE_LIMIT errors — those are account-wide failures,
-    so trying another model from the same provider would hit the same wall.
+    so trying another model from the same provider would hit the same wall —
+    except a RATE_LIMIT whose ``limit_scope`` is ``"model"`` (the Fable cap:
+    Opus still works). See usage_limit_scope().
     """
     failed_provider = model_provider(failed_model)
     if failed_model in MODEL_FALLBACK_CHAIN:
@@ -7699,7 +7789,8 @@ def get_fallback_model(failed_model: str, error_kind: ErrorKind) -> Optional[str
         same_provider_ok = False   # Sonnet/Haiku never fall "up" to Fable/Opus
     else:
         return None
-    if error_kind in (ErrorKind.AUTH, ErrorKind.CREDIT, ErrorKind.RATE_LIMIT):
+    if error_kind in (ErrorKind.AUTH, ErrorKind.CREDIT) or (
+            error_kind == ErrorKind.RATE_LIMIT and limit_scope != "model"):
         same_provider_ok = False
 
     for candidate in candidates:
@@ -12725,6 +12816,11 @@ class ClaudeTelegramBot:
         self._transcripts: Dict[str, List[Dict[str, Any]]] = {}
         self._handoff_pending: Dict[str, Dict[str, str]] = {}
         self._transcripts_lock = threading.Lock()
+        # Model switches waiting for the user's yes/no (v3.92) — the bot never
+        # changes model on its own. id → offer; in memory (a restart expires
+        # the buttons, which then say so).
+        self._model_offers: Dict[str, Dict[str, Any]] = {}
+        self._model_offers_lock = threading.Lock()
 
         # Tracks active routine/pipeline contexts for HTTP stop requests
         self._routine_contexts: Dict[str, "ThreadContext"] = {}
@@ -15940,6 +16036,126 @@ class ClaudeTelegramBot:
                 "workspace": session.workspace or "",
             }
         return True
+
+    # -- Model switch only with the user's OK (v3.92) --
+
+    _MODEL_OFFER_TTL = 24 * 3600        # buttons older than this say "expirou"
+    _NON_LIMIT_HOLD_SECONDS = 30 * 60   # non-limit failure: offer to go back after this
+    _UNKNOWN_LIMIT_HOLD_SECONDS = 5 * 3600
+
+    def _store_model_offer(self, offer: Dict[str, Any]) -> str:
+        oid = secrets.token_hex(4)
+        now = time.time()
+        with self._model_offers_lock:
+            for k in [k for k, v in self._model_offers.items()
+                      if now - v.get("ts", 0) > self._MODEL_OFFER_TTL]:
+                self._model_offers.pop(k, None)
+            self._model_offers[oid] = dict(offer, ts=now)
+        return oid
+
+    def _offer_model_switch(self, session: "Session", from_model: str, to_model: str,
+                            kind: str, scope: str, raw_error: str, prompt: str) -> Optional[str]:
+        """Ask whether to answer the failed message with ``to_model``.
+        Nothing changes until the user taps ✅ (``_handle_model_offer``)."""
+        ctx = self._ctx
+        if kind == ErrorKind.RATE_LIMIT.value:
+            hold = parse_rate_limit_reset(raw_error) or self._UNKNOWN_LIMIT_HOLD_SECONDS
+        else:
+            hold = self._NON_LIMIT_HOLD_SECONDS
+        oid = self._store_model_offer({
+            "type": "switch", "session": session.name,
+            "chat_id": str(ctx.chat_id) if ctx else "", "thread_id": str(ctx.thread_id or "") if ctx else "",
+            "from_model": from_model, "to_model": to_model,
+            "until": time.time() + hold, "prompt": prompt or "",
+        })
+        frm, to = model_display_name(from_model), model_display_name(to_model)
+        if scope == "model":
+            why = f"O {frm} atingiu o limite dele."
+        elif scope == "account":
+            why = f"Sua conta Claude atingiu o {usage_limit_label(raw_error)}."
+        else:
+            why = f"O {frm} falhou."
+        lines = [f"🔀 *Trocar para {to}?*", "", why]
+        if prompt:
+            lines.append(f"Se você quiser, o {to} responde a sua mensagem agora.")
+        if (model_provider(from_model) == "openai") != (model_provider(to_model) == "openai"):
+            lines.append("Ele recebe a conversa até aqui.")
+        lines.append(f"Quando o limite liberar, eu pergunto se você quer voltar para o {frm}.")
+        markup = {"inline_keyboard": [[
+            _btn(f"✅ Usar {to}", f"mswitch:{oid}:y", style="success"),
+            _btn(f"❌ Ficar no {frm}", f"mswitch:{oid}:n"),
+        ]]}
+        return self.send_message("\n".join(lines), reply_markup=markup)
+
+    def _offer_model_return(self, session: "Session") -> Optional[str]:
+        """The limit that made us switch is over: ask to go back."""
+        ctx = self._ctx
+        back, cur = session.preferred_model, session.model
+        oid = self._store_model_offer({
+            "type": "return", "session": session.name,
+            "chat_id": str(ctx.chat_id) if ctx else "", "thread_id": str(ctx.thread_id or "") if ctx else "",
+            "from_model": cur, "to_model": back,
+        })
+        b, c = model_display_name(back), model_display_name(cur)
+        markup = {"inline_keyboard": [[
+            _btn(f"↩️ Voltar para {b}", f"mswitch:{oid}:y", style="success"),
+            _btn(f"Ficar no {c}", f"mswitch:{oid}:n"),
+        ]]}
+        return self.send_message(
+            f"⏱️ *O limite do {b} já deve ter liberado.*\n"
+            f"Esta mensagem ainda vai pelo {c}. Quer voltar para o {b}?",
+            reply_markup=markup, disable_notification=True)
+
+    def _handle_model_offer(self, callback: Dict, payload: str) -> None:
+        """✅/❌ on a model switch question (``mswitch:<id>:y|n``)."""
+        cb_id = callback.get("id", "")
+        msg = callback.get("message") or {}
+        msg_id = msg.get("message_id")
+        oid, _, answer = payload.partition(":")
+        with self._model_offers_lock:
+            offer = self._model_offers.pop(oid, None)
+        if not offer:
+            self.answer_callback(cb_id, "⌛ Essa pergunta expirou.")
+            if msg_id:
+                self.edit_message(msg_id, (msg.get("text") or "🔀") + "\n\n⌛ Expirou — nada mudou.",
+                                  reply_markup={"inline_keyboard": []})
+            return
+        ctx = self._ctx
+        here = (str(ctx.chat_id) if ctx else "", str(ctx.thread_id or "") if ctx else "")
+        session = self.sessions.sessions.get(offer["session"])
+        if session is None or here != (offer["chat_id"], offer["thread_id"]):
+            logger.warning("Model offer %s: session %r gone or other chat", oid, offer["session"])
+            self.answer_callback(cb_id, "Essa conversa não existe mais.")
+            return
+        frm, to = offer["from_model"], offer["to_model"]
+        if answer != "y":
+            if offer["type"] == "return":
+                session.preferred_model = None
+                self.sessions.save()
+            self.answer_callback(cb_id, "Ok, nada mudou.")
+            if msg_id:
+                self.edit_message(msg_id, f"👍 Mantido no *{model_display_name(frm)}*.",
+                                  reply_markup={"inline_keyboard": []})
+            return
+        if (model_provider(frm) == "openai") != (model_provider(to) == "openai"):
+            self._arm_handoff(session, frm, to)  # Claude ↔ GPT: separate histories
+        if offer["type"] == "switch":
+            if not session.preferred_model:
+                session.preferred_model = frm
+            session.rate_limit_until = offer.get("until")
+        else:
+            session.preferred_model = None
+            session.rate_limit_until = None
+        session.model = to
+        self.sessions.save()
+        logger.info("Model switch approved by user: %s → %s (session %s)", frm, to, session.name)
+        self.answer_callback(cb_id, f"Usando {model_display_name(to)}")
+        if msg_id:
+            self.edit_message(msg_id, f"✅ Agora no *{model_display_name(to)}*.",
+                              reply_markup={"inline_keyboard": []})
+        prompt = offer.get("prompt") or ""
+        if offer["type"] == "switch" and prompt:
+            self._run_claude_prompt(prompt)
 
     _HANDOFF_KEEP_SECONDS = 7 * 86400  # handoff files older than this are pruned
 
@@ -21079,26 +21295,19 @@ class ClaudeTelegramBot:
                 if block:
                     prompt = block + "\n" + prompt
 
-        # Rate-limit fallback auto-restore: when the TTL set at fallback time
-        # has elapsed, swap back to the user's preferred model so the next
-        # turn uses the real choice again. Only fires on fresh interactive
-        # turns (not retries, not routines, not fallback recursions).
+        # Limit over → ASK to go back (v3.92; never switches on its own):
+        # once the reset time set when the switch was approved has passed,
+        # offer the preferred model again. Asked once; this turn keeps the
+        # current model.
         if (not _retry
                 and not routine_mode
                 and _fallback_model is None
                 and session.preferred_model
                 and session.rate_limit_until
                 and time.time() >= session.rate_limit_until):
-            restored = session.preferred_model
-            if model_provider(session.model) != model_provider(restored):
-                self._arm_handoff(session, session.model, restored)
-            session.model = restored
-            session.preferred_model = None
             session.rate_limit_until = None
             self.sessions.save()
-            self.send_message(
-                f"✅ *Rate limit liberou* — sessão `{session.name}` voltou para `{restored}`."
-            )
+            self._offer_model_return(session)
 
         if not _retry:
             session.message_count += 1
@@ -21312,6 +21521,7 @@ class ClaudeTelegramBot:
         # Stream updates while runner is active
         self._stream_updates(runner_thread, runner, routine_mode=routine_mode)
 
+        fallback_offer: Optional[Dict[str, str]] = None
         # Auto-recovery — two phases:
         # Phase 1: retry same model with backoff (existing behavior)
         # Phase 2: fall back to next model in MODEL_FALLBACK_CHAIN
@@ -21381,104 +21591,41 @@ class ClaudeTelegramBot:
                     )
                     return
 
-                # Phase 2: model fallback — CONTEXT_TOO_LONG is a context issue, not a model issue
-                if kind != ErrorKind.CONTEXT_TOO_LONG:
+                # Phase 2: model fallback — CONTEXT_TOO_LONG is a context issue,
+                # not a model issue. Never switches on its own (v3.92): the
+                # error is shown and the user is ASKED whether to answer with
+                # the next model (_offer_model_switch after finalize).
+                # Routines have nobody to ask — they fail and notify.
+                if kind != ErrorKind.CONTEXT_TOO_LONG and not routine_mode:
                     current_model = _fallback_model or session.model
-                    next_model = get_fallback_model(current_model, kind)
-                    if next_model and not routine_mode and (
-                            (model_provider(current_model) == "openai")
-                            != (model_provider(next_model) == "openai")):
-                        # Crossing Claude ↔ GPT: the fallback model starts
-                        # without the session's history — hand it over.
-                        if self._arm_handoff(session, current_model, next_model):
-                            logger.info("Fallback %s → %s: conversation handed over",
-                                        current_model, next_model)
+                    scope = usage_limit_scope(raw_error) if kind == ErrorKind.RATE_LIMIT else None
+                    next_model = get_fallback_model(current_model, kind, limit_scope=scope)
                     if next_model:
                         logger.warning(
-                            "Model fallback: %s failed (%s), trying %s | "
-                            "exit=%s raw_error=%.300s result=%d chars accum=%d chars "
-                            "stderr=%d chars error_text=%.200s",
-                            current_model, kind.value, next_model,
-                            runner.exit_code, raw_error,
-                            len(runner.result_text), len(runner.accumulated_text),
-                            len(runner.stderr_text),
-                            runner.error_text[:200] if runner.error_text else "none",
+                            "Model fallback offered: %s failed (%s%s), asking to use %s | "
+                            "exit=%s raw_error=%.300s",
+                            current_model, kind.value, f"/{scope}" if scope else "",
+                            next_model, runner.exit_code, raw_error,
                         )
-                        # Rate limit: persist the fallback so subsequent turns
-                        # skip the failing model entirely until the cap resets.
-                        # Snapshots the preferred model on first trip only — if
-                        # the fallback itself rate limits later, we keep the
-                        # original preference as the restoration target.
-                        if kind == ErrorKind.RATE_LIMIT and not routine_mode:
-                            if not session.preferred_model:
-                                session.preferred_model = current_model
-                            ttl = parse_rate_limit_reset(raw_error)
-                            if ttl and ttl > 0:
-                                session.rate_limit_until = time.time() + ttl
-                                eta = _format_duration(ttl)
-                                notice = (
-                                    f"⚠️ *Rate limit em `{current_model}`* — "
-                                    f"fallback para `{next_model}`.\n"
-                                    f"Restauro automático em ~{eta} "
-                                    f"(ou use `/restart-agent` para forçar)."
-                                )
-                            else:
-                                session.rate_limit_until = None
-                                notice = (
-                                    f"⚠️ *Rate limit em `{current_model}`* — "
-                                    f"fallback para `{next_model}`.\n"
-                                    f"Tempo de reset não informado; use "
-                                    f"`/restart-agent` quando o limite liberar."
-                                )
-                            session.model = next_model
-                            self.sessions.save()
-                            self.send_message(notice)
-                            if inflight_file is not None:
-                                self._clear_inflight(inflight_file)
-                            # Recursive call: use session.model (already updated),
-                            # drop _fallback_model so the persisted value wins.
-                            self._run_claude_prompt(
-                                prompt,
-                                _retry=0,
-                                _fallback_model=None,
-                                no_output_timeout=no_output_timeout,
-                                max_total_timeout=max_total_timeout,
-                                inactivity_timeout=inactivity_timeout,
-                                routine_mode=routine_mode,
-                                system_prompt=system_prompt,
-                                force_tts=force_tts,
-                                suppress_text=suppress_text,
-                            )
-                            return
-
-                        excerpt = raw_error[:150].replace('\n', ' ')
-                        if len(raw_error) > 150:
-                            excerpt += "..."
-                        self.send_message(
-                            f"⚠️ *Fallback:* `{current_model}` → `{next_model}` "
-                            f"(exit {runner.exit_code})\n`{excerpt}`"
-                        )
-                        if inflight_file is not None:
-                            self._clear_inflight(inflight_file)
-                        self._run_claude_prompt(
-                            prompt,
-                            _retry=0,
-                            _fallback_model=next_model,
-                            no_output_timeout=no_output_timeout,
-                            max_total_timeout=max_total_timeout,
-                            inactivity_timeout=inactivity_timeout,
-                            routine_mode=routine_mode,
-                            system_prompt=system_prompt,
-                            force_tts=force_tts,
-                            suppress_text=suppress_text,
-                        )
-                        return
+                        fallback_offer = {
+                            "from_model": current_model,
+                            "to_model": next_model,
+                            "kind": kind.value,
+                            "scope": scope or "",
+                            "raw_error": raw_error[:500],
+                            "prompt": raw_user_prompt,
+                        }
+                    elif kind == ErrorKind.RATE_LIMIT:
+                        logger.warning("No fallback for %s after %s: %.200s",
+                                       current_model, kind.value, raw_error)
 
         # Finalize — pass raw_user_prompt (pre-enrichment) so the transcript
         # stored for cross-provider handoff doesn't carry recap/hint prefixes.
         self._finalize_response(session, runner, prompt=raw_user_prompt if not _retry else None,
                                 routine_mode=routine_mode, force_tts=tts_this_request,
                                 suppress_text=force_tts, effective_model=effective_model)
+        if fallback_offer:
+            self._offer_model_switch(session, **fallback_offer)
 
         # Process queued messages for this context
         self._process_pending()
@@ -21747,7 +21894,10 @@ class ClaudeTelegramBot:
                 session.session_id = None
                 session.codex_thread_id = None
                 session.message_count = 0
-                session.model = _agent_default_model(session.agent)
+                # A model the user approved after a limit stays until they
+                # choose to go back (v3.92: no silent model changes).
+                if not session.preferred_model:
+                    session.model = _agent_default_model(session.agent)
                 self.sessions.save()
                 self.send_message("🔄 _Sessão rotacionada automaticamente (%d turns)_" % AUTO_ROTATE_THRESHOLD)
             elif session.message_count > 0 and session.message_count % MEMORY_SNAPSHOT_INTERVAL == 0:
@@ -22542,6 +22692,11 @@ class ClaudeTelegramBot:
         # the tapped text runs exactly like a message the user typed.
         if data.startswith(RICH_REPLY_BUTTON_PREFIX):
             self._handle_reply_button(callback, data[len(RICH_REPLY_BUTTON_PREFIX):])
+            return
+
+        # Model switch question — never switch without the user's OK (v3.92)
+        if data.startswith("mswitch:"):
+            self._handle_model_offer(callback, data[len("mswitch:"):])
             return
 
         # What to do with a message sent mid-turn (v3.86)
