@@ -294,6 +294,7 @@ Read by Claude Code when executing tasks in the vault context. Contains keys for
 | `/lesson <text>` | Record a manual lesson in `<agent>/Lessons/` |
 | `/active_memory [on\|off\|status]` | Toggle proactive vault context injection (`/active-memory` still works) |
 | `/agent [name\|new\|list]` | Switch/create/list agents |
+| `/newagent [descrição]` | Same as `/agent new` — create an agent; in the private chat it then gets its own topic (v3.96) |
 | `/routine [list\|status]` | Create a routine interactively, or list/status (`status` is a live widget panel in private chats) |
 | `/skill [name]` | Run a vault skill directly |
 | `/voice [on\|off]` | Toggle TTS voice responses |

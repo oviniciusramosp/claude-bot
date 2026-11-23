@@ -196,6 +196,15 @@ class NewAgentGetsItsTopic(unittest.TestCase):
         f.bot._adopt_new_agents()
         self.assertFalse(any(m == "createForumTopic" for m, _ in f.calls))
 
+    def test_newagent_command_creates_an_agent(self):
+        from unittest.mock import patch
+        f = _Fixture()
+        self.addCleanup(f.cleanup)
+        f.bot._ctx = f.bot._get_context(OWNER, None)
+        with patch.object(f.bot, "_run_agent_create_skill") as create:
+            f.bot._handle_text("/newagent um chef de padaria")
+        create.assert_called_once_with("um chef de padaria")
+
 
 if __name__ == "__main__":
     unittest.main()
