@@ -167,5 +167,35 @@ class AgentTopicsCommand(unittest.TestCase):
         self.assertIn("Não deu certo", f.sent_texts()[-1])
 
 
+
+class NewAgentGetsItsTopic(unittest.TestCase):
+    """v3.95: an agent created after startup gets its own private topic."""
+
+    def test_new_agent_is_adopted(self):
+        f = _Fixture()
+        self.addCleanup(f.cleanup)
+        f.bot.cmd_agent("topicos")              # private topics in use
+        f.bot._known_agent_ids = set(f.m.iter_agent_ids())
+        f.calls.clear()
+        _write_agent(f.vault, "novo")
+        f.bot._adopt_new_agents()
+        created = [d for m, d in f.calls if m == "createForumTopic"]
+        self.assertEqual(len(created), 1)
+        self.assertIn("novo", created[0]["name"])
+        tid = int(f.m.load_agent("novo")["private_thread_id"])
+        self.assertEqual(f.bot._resolved_agent_for_chat(OWNER, tid)["_id"], "novo")
+        f.calls.clear()
+        f.bot._adopt_new_agents()               # only once
+        self.assertFalse(any(m == "createForumTopic" for m, _ in f.calls))
+
+    def test_no_topics_without_private_topics_in_use(self):
+        f = _Fixture()
+        self.addCleanup(f.cleanup)
+        f.bot._known_agent_ids = set(f.m.iter_agent_ids())
+        _write_agent(f.vault, "novo")
+        f.bot._adopt_new_agents()
+        self.assertFalse(any(m == "createForumTopic" for m, _ in f.calls))
+
+
 if __name__ == "__main__":
     unittest.main()

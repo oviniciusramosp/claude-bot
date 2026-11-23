@@ -378,7 +378,7 @@ class GroupPathUnchanged(_Base):
         ctx = self.ctx(chat_id="-1001234", thread_id=3)
         self.bot._send_stream_placeholder(ctx)
         self.assertEqual(ctx.draft_id, 0)
-        r = self.runner(snapshot="parcial")
+        r = self.runner(snapshot="Parcial.")  # previews show whole sentences (v3.95)
         r.accumulated_thinking = ""
         r.tool_log = []
         alive = MagicMock()   # one loop pass, then the runner thread "ends"

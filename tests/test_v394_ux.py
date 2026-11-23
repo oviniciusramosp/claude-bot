@@ -74,6 +74,38 @@ class DraftWithoutLiveAnswer(_Base):
         self.assertFalse(self.m.MESSAGE_EFFECTS_ENABLED)
 
 
+class SentenceBySentence(unittest.TestCase):
+    """v3.95: previews grow by whole sentences."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.m = load_bot_module()
+
+    def test_prefix(self):
+        f = self.m._sentence_prefix
+        self.assertEqual(f("Olá. Tudo bem? Estou escre"), "Olá. Tudo bem?")
+        self.assertEqual(f("sem ponto ainda"), "")
+        self.assertEqual(f("linha um\nlinha do"), "linha um")
+        self.assertEqual(f("Valor 3.5 mil e"), "")
+
+    def test_draft_hands_over_to_a_message_when_the_answer_starts(self):
+        td = tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        fx = _BotFixture(Path(td.name))
+        self.addCleanup(fx.cleanup)
+        bot = fx.bot
+        ctx = bot._get_context("123456789", None)
+        ctx.draft_id = 9
+        runner = MagicMock()
+        runner.get_snapshot.return_value = "Primeira frase. Segunda"
+        with patch.object(bot, "_send_stream_placeholder") as ph, \
+                patch.object(bot, "_send_draft") as draft:
+            bot._stream_draft_tick(ctx, runner, time.time())
+        self.assertTrue(ph.called)
+        self.assertFalse(draft.called)
+        self.assertEqual(ctx.draft_id, 0)
+
+
 class VoiceTranscription(_Base):
     def _voice(self, native, hear):
         b = self.bot
