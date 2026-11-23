@@ -86,6 +86,8 @@ If the output of a routine (not pipeline) is exactly `NO_REPLY`, the bot sends n
 
 ## Voice / TTS
 
+**Voice notes in (v3.94).** `_handle_voice` transcribes with Apple's on-device **SpeechAnalyzer** first: `scripts/transcribe.swift`, compiled by the bot itself (`_ensure_transcriber` → `build_transcriber()`, Command Line Tools `swiftc`, background thread at startup, rebuilt when the source is newer) into `~/.claude-bot/bin/transcribe`; it reads the Telegram OGG directly, punctuates, and runs offline (macOS 26+; the language model downloads on first use). `hear` (SFSpeechRecognizer, via ffmpeg → WAV) is only the fallback: on 2026-11-23 it returned "Bom dia obrigado" for a three-sentence note. Tests skip the build (`CLAUDE_BOT_SKIP_TRANSCRIBER_BUILD`). Tests: `tests/test_v394_ux.py`.
+
 The bot supports voice responses (Text-to-Speech) via macOS `say` + ffmpeg (OGG Opus):
 
 - **`/voice on`** — enables TTS for all subsequent session messages (text + audio)

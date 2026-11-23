@@ -165,6 +165,13 @@ class KillSwitch(_Base):
 
 
 class DraftStreaming(_Base):
+    def setUp(self):
+        super().setUp()
+        # Live answer text in drafts is opt-in since v3.94 (LIVE_DRAFT_ANSWER).
+        self._saved_answer = self.m.LIVE_DRAFT_ANSWER
+        self.m.LIVE_DRAFT_ANSWER = True
+        self.addCleanup(setattr, self.m, "LIVE_DRAFT_ANSWER", self._saved_answer)
+
     def test_answer_streams_as_rich_draft_with_same_id(self):
         ctx = self.ctx()
         ctx.draft_id = 1234

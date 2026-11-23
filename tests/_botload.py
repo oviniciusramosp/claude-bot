@@ -70,6 +70,8 @@ def load_bot_module(tmp_home: Path | None = None, vault_dir: Path | None = None)
     # private-chat turn would otherwise try a real draft call. Message effects
     # stay on (they only add a field). tests/test_live_drafts.py flips it.
     os.environ["LIVE_DRAFTS"] = "false"
+    # Never compile the Swift transcriber from tests (v3.94).
+    os.environ["CLAUDE_BOT_SKIP_TRANSCRIBER_BUILD"] = "1"
 
     spec = importlib.util.spec_from_file_location("bot_under_test", str(BOT_FILE))
     if spec is None or spec.loader is None:
